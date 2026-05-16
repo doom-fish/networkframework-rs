@@ -1,6 +1,6 @@
 [package]
 name = "networkframework"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/doom-fish/networkframework-rs"
@@ -69,3 +69,12 @@ name = "05_websocket"
 
 [[example]]
 name = "06_bonjour_advertise"
+
+[[example]]
+name = "framer_length_prefix"
+
+[[example]]
+name = "interface_list"
+
+[[example]]
+name = "connection_group"

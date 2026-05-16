@@ -6,29 +6,9 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use crate::ffi;
+use crate::interface::{list_interfaces_for_monitor, NetworkInterface};
 
-/// Which network interface the device is currently using to satisfy
-/// the monitored path (best-effort).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InterfaceType {
-    Other,
-    WiFi,
-    Cellular,
-    Wired,
-    Loopback,
-}
-
-impl InterfaceType {
-    const fn from_raw(v: i32) -> Self {
-        match v {
-            1 => Self::WiFi,
-            2 => Self::Cellular,
-            3 => Self::Wired,
-            4 => Self::Loopback,
-            _ => Self::Other,
-        }
-    }
-}
+pub use crate::interface::InterfaceType;
 
 /// One network-path update.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,6 +30,14 @@ pub struct PathMonitor {
 
 unsafe impl Send for PathMonitor {}
 unsafe impl Sync for PathMonitor {}
+
+impl PathMonitor {
+    /// List the interfaces visible to the most recent path snapshot.
+    #[must_use]
+    pub fn list_interfaces(&self) -> Vec<NetworkInterface> {
+        list_interfaces_for_monitor(self.handle)
+    }
+}
 
 impl Drop for PathMonitor {
     fn drop(&mut self) {

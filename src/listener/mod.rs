@@ -1,16 +1,20 @@
 //! [`TcpListener`] — synchronous TCP listener via Network.framework.
 
+#![allow(clippy::missing_errors_doc)]
+
 use core::ffi::{c_int, c_void};
 
 use crate::client::TcpClient;
 use crate::error::{from_status, NetworkError};
 use crate::ffi;
+use crate::parameters::{ConnectionParameters, KeepAlives};
 
 /// Blocking listener wrapper around `nw_listener`. Each accepted
 /// connection returns a [`TcpClient`] handle that is already fully
 /// ready for reads/writes.
 pub struct TcpListener {
     handle: *mut c_void,
+    keepalives: KeepAlives,
 }
 
 unsafe impl Send for TcpListener {}
@@ -42,6 +46,24 @@ impl TcpListener {
         Self::bind_inner(port, true)
     }
 
+    /// Bind a listener using explicit [`ConnectionParameters`].
+    pub fn bind_with_parameters(
+        port: u16,
+        parameters: &ConnectionParameters,
+    ) -> Result<Self, NetworkError> {
+        let mut status: c_int = 0;
+        let handle = unsafe {
+            ffi::nw_shim_listener_create_with_parameters(parameters.as_ptr(), port, &mut status)
+        };
+        if status != ffi::NW_OK || handle.is_null() {
+            return Err(from_status(status));
+        }
+        Ok(Self {
+            handle,
+            keepalives: parameters.keepalives(),
+        })
+    }
+
     fn bind_inner(port: u16, use_tls: bool) -> Result<Self, NetworkError> {
         let mut status: c_int = 0;
         let handle = unsafe {
@@ -50,7 +72,10 @@ impl TcpListener {
         if status != ffi::NW_OK || handle.is_null() {
             return Err(from_status(status));
         }
-        Ok(Self { handle })
+        Ok(Self {
+            handle,
+            keepalives: KeepAlives::empty(),
+        })
     }
 
     /// The port actually bound (useful when `bind(0)` was used).
@@ -75,7 +100,9 @@ impl TcpListener {
         // SAFETY: nw_shim_listener_accept returns the same shape as
         // nw_shim_tcp_connect — a `nw_conn_handle*`. We hand it to
         // TcpClient via a private constructor below.
-        Ok(unsafe { TcpClient::from_raw(conn_handle) })
+        Ok(unsafe {
+            TcpClient::from_raw_with_keepalives(conn_handle, self.keepalives.clone())
+        })
     }
 }
 
