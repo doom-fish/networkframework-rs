@@ -520,3 +520,152 @@ void nw_shim_browser_stop(void *handle) {
     dispatch_release(h->queue);
     free(h);
 }
+
+// ---------------------------------------------------------------------
+// WebSocket (nw_ws_*) connection — v0.5
+// ---------------------------------------------------------------------
+// Builds a websocket connection by chaining ws -> tcp / tls protocols
+// into a custom nw_parameters_t.
+
+void *nw_shim_ws_connect(const char *host, uint16_t port, const char *path, int use_tls, int *out_status) {
+    if (!host) { if (out_status) *out_status = NW_INVALID_ARG; return NULL; }
+    (void)path; // path is encoded in the URL endpoint below.
+
+    nw_parameters_t params = nw_parameters_create_secure_tcp(
+        use_tls ? NW_PARAMETERS_DEFAULT_CONFIGURATION : NW_PARAMETERS_DISABLE_PROTOCOL,
+        NW_PARAMETERS_DEFAULT_CONFIGURATION);
+
+    // Insert WebSocket framing on top of (TLS)TCP.
+    nw_protocol_options_t ws_opts = nw_ws_create_options(nw_ws_version_13);
+    nw_protocol_stack_t stack = nw_parameters_copy_default_protocol_stack(params);
+    nw_protocol_stack_prepend_application_protocol(stack, ws_opts);
+    nw_release(ws_opts);
+    nw_release(stack);
+
+    // URL endpoint encodes ws:// or wss:// + host + port + path.
+    char url[2048];
+    snprintf(url, sizeof(url), "%s://%s:%u%s",
+             use_tls ? "wss" : "ws", host, (unsigned)port,
+             (path && path[0]) ? path : "/");
+    nw_endpoint_t endpoint = nw_endpoint_create_url(url);
+    if (!endpoint) {
+        nw_release(params);
+        if (out_status) *out_status = NW_INVALID_ARG;
+        return NULL;
+    }
+
+    nw_connection_t conn = nw_connection_create(endpoint, params);
+    nw_release(endpoint);
+    nw_release(params);
+    if (!conn) { if (out_status) *out_status = NW_CONNECT_FAILED; return NULL; }
+
+    nw_conn_handle *h = (nw_conn_handle *)calloc(1, sizeof(nw_conn_handle));
+    h->conn = conn;
+    h->queue = dispatch_queue_create("networkframework-rs.ws", DISPATCH_QUEUE_SERIAL);
+    h->ready = dispatch_semaphore_create(0);
+    atomic_store(&h->state_code, 0);
+
+    nw_connection_set_queue(conn, h->queue);
+    nw_connection_set_state_changed_handler(conn, ^(nw_connection_state_t state, nw_error_t error) {
+        (void)error;
+        if (state == nw_connection_state_ready) {
+            atomic_store(&h->state_code, 1);
+            dispatch_semaphore_signal(h->ready);
+        } else if (state == nw_connection_state_cancelled) {
+            atomic_store(&h->state_code, 2);
+            dispatch_semaphore_signal(h->ready);
+        } else if (state == nw_connection_state_failed) {
+            atomic_store(&h->state_code, 3);
+            dispatch_semaphore_signal(h->ready);
+        }
+    });
+    nw_connection_start(conn);
+
+    dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, 30LL * NSEC_PER_SEC);
+    if (dispatch_semaphore_wait(h->ready, deadline) != 0
+        || atomic_load(&h->state_code) != 1) {
+        nw_connection_cancel(conn);
+        destroy_handle(h);
+        if (out_status) *out_status = NW_CONNECT_FAILED;
+        return NULL;
+    }
+
+    if (out_status) *out_status = NW_OK;
+    return h;
+}
+
+// Send a text or binary websocket message. opcode:
+//   1 = text, 2 = binary, 8 = close, 9 = ping, 10 = pong.
+int nw_shim_ws_send(void *handle, const uint8_t *data, size_t len, int opcode) {
+    nw_conn_handle *h = (nw_conn_handle *)handle;
+    if (!h || !data) return NW_INVALID_ARG;
+
+    nw_ws_opcode_t op = (nw_ws_opcode_t)opcode;
+    nw_protocol_metadata_t metadata = nw_ws_create_metadata(op);
+    nw_content_context_t ctx = nw_content_context_create("ws-send");
+    nw_content_context_set_metadata_for_protocol(ctx, metadata);
+    nw_release(metadata);
+
+    dispatch_data_t payload = dispatch_data_create(
+        data, len, h->queue, DISPATCH_DATA_DESTRUCTOR_DEFAULT);
+
+    __block int result = NW_OK;
+    dispatch_semaphore_t done = dispatch_semaphore_create(0);
+
+    nw_connection_send(h->conn, payload, ctx, true, ^(nw_error_t error) {
+        if (error) result = NW_SEND_FAILED;
+        dispatch_semaphore_signal(done);
+    });
+
+    dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
+    dispatch_release(done);
+    dispatch_release(payload);
+    nw_release(ctx);
+    return result;
+}
+
+ssize_t nw_shim_ws_receive(void *handle, uint8_t *out_buf, size_t max_len, int *out_opcode) {
+    nw_conn_handle *h = (nw_conn_handle *)handle;
+    if (!h || !out_buf || max_len == 0) return NW_INVALID_ARG;
+
+    __block ssize_t result = 0;
+    __block int op = 0;
+    dispatch_semaphore_t done = dispatch_semaphore_create(0);
+
+    nw_connection_receive_message(h->conn,
+        ^(dispatch_data_t content, nw_content_context_t ctx, bool is_complete, nw_error_t error) {
+            (void)is_complete;
+            if (error) {
+                result = NW_RECV_FAILED;
+            } else {
+                if (ctx) {
+                    nw_protocol_metadata_t md = nw_content_context_copy_protocol_metadata(
+                        ctx, nw_protocol_copy_ws_definition());
+                    if (md) {
+                        op = (int)nw_ws_metadata_get_opcode(md);
+                        nw_release(md);
+                    }
+                }
+                if (content) {
+                    __block size_t copied = 0;
+                    dispatch_data_apply(content,
+                        ^bool(dispatch_data_t region, size_t offset, const void *buffer, size_t size) {
+                            (void)region; (void)offset;
+                            size_t can = max_len - copied;
+                            if (can == 0) return false;
+                            size_t take = size < can ? size : can;
+                            memcpy(out_buf + copied, buffer, take);
+                            copied += take;
+                            return true;
+                        });
+                    result = (ssize_t)copied;
+                }
+            }
+            dispatch_semaphore_signal(done);
+        });
+
+    dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
+    dispatch_release(done);
+    if (out_opcode) *out_opcode = op;
+    return result;
+}

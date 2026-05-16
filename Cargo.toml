@@ -1,6 +1,6 @@
 [package]
 name = "networkframework"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/doom-fish/networkframework-rs"
@@ -63,3 +63,6 @@ name = "03_udp_and_path"
 
 [[example]]
 name = "04_bonjour"
+
+[[example]]
+name = "05_websocket"

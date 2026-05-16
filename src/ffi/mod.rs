@@ -61,6 +61,28 @@ extern "C" {
     ) -> *mut c_void;
 
     pub fn nw_shim_browser_stop(handle: *mut c_void);
+
+    pub fn nw_shim_ws_connect(
+        host: *const core::ffi::c_char,
+        port: u16,
+        path: *const core::ffi::c_char,
+        use_tls: c_int,
+        out_status: *mut c_int,
+    ) -> *mut c_void;
+
+    pub fn nw_shim_ws_send(
+        handle: *mut c_void,
+        data: *const u8,
+        len: usize,
+        opcode: c_int,
+    ) -> c_int;
+
+    pub fn nw_shim_ws_receive(
+        handle: *mut c_void,
+        out_buf: *mut u8,
+        max_len: usize,
+        out_opcode: *mut c_int,
+    ) -> isize;
 }
 
 pub type BrowserServiceCallback = unsafe extern "C" fn(

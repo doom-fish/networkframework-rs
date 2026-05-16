@@ -13,6 +13,7 @@ pub mod ffi;
 pub mod listener;
 pub mod path_monitor;
 pub mod udp;
+pub mod websocket;
 
 pub use browser::{start_browser, Browser, BrowserEvent, DiscoveredService};
 pub use client::TcpClient;
@@ -20,6 +21,7 @@ pub use error::NetworkError;
 pub use listener::TcpListener;
 pub use path_monitor::{start_path_monitor, InterfaceType, PathMonitor, PathUpdate};
 pub use udp::UdpClient;
+pub use websocket::{Opcode, WebSocket, WsMessage};
 
 /// Common imports.
 pub mod prelude {
@@ -31,4 +33,5 @@ pub mod prelude {
         start_path_monitor, InterfaceType, PathMonitor, PathUpdate,
     };
     pub use crate::udp::UdpClient;
+    pub use crate::websocket::{Opcode, WebSocket, WsMessage};
 }
