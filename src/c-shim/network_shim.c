@@ -40,7 +40,7 @@ static void destroy_handle(nw_conn_handle *h) {
     free(h);
 }
 
-void *nw_shim_tcp_connect(const char *host, uint16_t port, int *out_status) {
+void *nw_shim_tcp_connect(const char *host, uint16_t port, int use_tls, int *out_status) {
     if (!host) { if (out_status) *out_status = NW_INVALID_ARG; return NULL; }
 
     char port_str[8];
@@ -49,7 +49,7 @@ void *nw_shim_tcp_connect(const char *host, uint16_t port, int *out_status) {
     if (!endpoint) { if (out_status) *out_status = NW_INVALID_ARG; return NULL; }
 
     nw_parameters_t params = nw_parameters_create_secure_tcp(
-        NW_PARAMETERS_DISABLE_PROTOCOL,
+        use_tls ? NW_PARAMETERS_DEFAULT_CONFIGURATION : NW_PARAMETERS_DISABLE_PROTOCOL,
         NW_PARAMETERS_DEFAULT_CONFIGURATION);
 
     nw_connection_t conn = nw_connection_create(endpoint, params);
@@ -183,12 +183,12 @@ typedef struct nw_listener_handle {
     _Atomic uint16_t bound_port;
 } nw_listener_handle;
 
-void *nw_shim_listener_create(uint16_t port, int *out_status) {
+void *nw_shim_listener_create(uint16_t port, int use_tls, int *out_status) {
     char port_str[8];
     snprintf(port_str, sizeof(port_str), "%u", (unsigned)port);
 
     nw_parameters_t params = nw_parameters_create_secure_tcp(
-        NW_PARAMETERS_DISABLE_PROTOCOL,
+        use_tls ? NW_PARAMETERS_DEFAULT_CONFIGURATION : NW_PARAMETERS_DISABLE_PROTOCOL,
         NW_PARAMETERS_DEFAULT_CONFIGURATION);
 
     nw_listener_t listener = nw_listener_create_with_port(port_str, params);

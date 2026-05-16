@@ -21,18 +21,44 @@ unsafe impl Send for TcpClient {}
 unsafe impl Sync for TcpClient {}
 
 impl TcpClient {
-    /// Open a TCP connection to `host:port`. Blocks up to 30 s waiting
-    /// for the connection to become ready.
+    /// Open a plain TCP connection to `host:port`. Blocks up to 30 s
+    /// waiting for the connection to become ready.
+    ///
+    /// For TLS, use [`connect_tls`](Self::connect_tls).
     ///
     /// # Errors
     ///
     /// Returns [`NetworkError::ConnectFailed`] / [`NetworkError::Timeout`]
     /// on failure.
     pub fn connect(host: &str, port: u16) -> Result<Self, NetworkError> {
+        Self::connect_inner(host, port, false)
+    }
+
+    /// Open a TLS-wrapped TCP connection to `host:port`. Server-name
+    /// indication and Apple's default trust evaluation are used; the
+    /// connection only becomes ready once the TLS handshake completes
+    /// successfully.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetworkError::ConnectFailed`] / [`NetworkError::Timeout`]
+    /// on TCP or TLS failure (incl. invalid certificate / hostname).
+    pub fn connect_tls(host: &str, port: u16) -> Result<Self, NetworkError> {
+        Self::connect_inner(host, port, true)
+    }
+
+    fn connect_inner(host: &str, port: u16, use_tls: bool) -> Result<Self, NetworkError> {
         let host_c = CString::new(host)
             .map_err(|e| NetworkError::InvalidArgument(format!("host NUL byte: {e}")))?;
         let mut status: c_int = 0;
-        let handle = unsafe { ffi::nw_shim_tcp_connect(host_c.as_ptr(), port, &mut status) };
+        let handle = unsafe {
+            ffi::nw_shim_tcp_connect(
+                host_c.as_ptr(),
+                port,
+                c_int::from(use_tls),
+                &mut status,
+            )
+        };
         if status != ffi::NW_OK || handle.is_null() {
             return Err(from_status(status));
         }

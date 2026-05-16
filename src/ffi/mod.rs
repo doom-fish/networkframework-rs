@@ -17,6 +17,7 @@ extern "C" {
     pub fn nw_shim_tcp_connect(
         host: *const core::ffi::c_char,
         port: u16,
+        use_tls: c_int,
         out_status: *mut c_int,
     ) -> *mut c_void;
 
@@ -26,7 +27,11 @@ extern "C" {
 
     pub fn nw_shim_tcp_close(handle: *mut c_void);
 
-    pub fn nw_shim_listener_create(port: u16, out_status: *mut c_int) -> *mut c_void;
+    pub fn nw_shim_listener_create(
+        port: u16,
+        use_tls: c_int,
+        out_status: *mut c_int,
+    ) -> *mut c_void;
 
     pub fn nw_shim_listener_port(handle: *mut c_void) -> u16;
 

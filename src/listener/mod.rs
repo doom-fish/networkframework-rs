@@ -17,14 +17,36 @@ unsafe impl Send for TcpListener {}
 unsafe impl Sync for TcpListener {}
 
 impl TcpListener {
-    /// Bind a TCP listener on `port` (use `0` for an OS-assigned port).
+    /// Bind a plain TCP listener on `port` (use `0` for an OS-assigned
+    /// port).
+    ///
+    /// For TLS, use [`bind_tls`](Self::bind_tls).
     ///
     /// # Errors
     ///
     /// Returns [`NetworkError::ListenFailed`] if the bind fails.
     pub fn bind(port: u16) -> Result<Self, NetworkError> {
+        Self::bind_inner(port, false)
+    }
+
+    /// Bind a TLS-wrapped TCP listener on `port`. Uses Apple's default
+    /// TLS configuration; the server must be configured with an
+    /// identity (out of scope for this crate's `bind_tls` helper — for
+    /// real-world use cases plug in `nw_protocol_options_set_identity`
+    /// via your own shim).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetworkError::ListenFailed`] if the bind fails.
+    pub fn bind_tls(port: u16) -> Result<Self, NetworkError> {
+        Self::bind_inner(port, true)
+    }
+
+    fn bind_inner(port: u16, use_tls: bool) -> Result<Self, NetworkError> {
         let mut status: c_int = 0;
-        let handle = unsafe { ffi::nw_shim_listener_create(port, &mut status) };
+        let handle = unsafe {
+            ffi::nw_shim_listener_create(port, c_int::from(use_tls), &mut status)
+        };
         if status != ffi::NW_OK || handle.is_null() {
             return Err(from_status(status));
         }
