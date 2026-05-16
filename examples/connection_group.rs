@@ -1,5 +1,5 @@
 use networkframework::{
-    ConnectionGroup, ConnectionGroupDescriptor, ConnectionParameters, ConnectionGroupState,
+    ConnectionGroup, ConnectionGroupDescriptor, ConnectionGroupState, ConnectionParameters,
 };
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -21,10 +21,14 @@ fn main() -> Result<(), networkframework::NetworkError> {
 
     let observed_states = states.lock().expect("state lock");
     assert!(!observed_states.is_empty());
-    assert!(observed_states
-        .iter()
-        .any(|state| matches!(state, ConnectionGroupState::Ready | ConnectionGroupState::Waiting)));
-    println!("connection group started with {} observed state update(s)", observed_states.len());
+    assert!(observed_states.iter().any(|state| matches!(
+        state,
+        ConnectionGroupState::Ready | ConnectionGroupState::Waiting
+    )));
+    println!(
+        "connection group started with {} observed state update(s)",
+        observed_states.len()
+    );
     drop(observed_states);
 
     group.cancel();

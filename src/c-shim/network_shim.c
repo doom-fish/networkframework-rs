@@ -13,18 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-// ---------------------------------------------------------------------
-// Status codes (mirrored in Rust)
-// ---------------------------------------------------------------------
-
-#define NW_OK              0
-#define NW_INVALID_ARG    -1
-#define NW_CONNECT_FAILED -2
-#define NW_SEND_FAILED    -3
-#define NW_RECV_FAILED    -4
-#define NW_LISTEN_FAILED  -5
-#define NW_CANCELLED      -6
-#define NW_TIMEOUT        -7
+#include "network_shim.h"
 
 // ---------------------------------------------------------------------
 // Connection (outbound TCP)
@@ -881,6 +870,12 @@ void nw_shim_bonjour_advertise_stop(void *handle) {
     nw_bonjour_advertise_handle *h = (nw_bonjour_advertise_handle *)handle;
     if (!h) return;
     nw_listener_cancel(h->listener);
+    dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, 5LL * NSEC_PER_SEC);
+    while (atomic_load(&h->state_code) != 2 && atomic_load(&h->state_code) != 3) {
+        if (dispatch_semaphore_wait(h->ready, deadline) != 0) {
+            break;
+        }
+    }
     nw_release(h->listener);
     dispatch_release(h->queue);
     dispatch_release(h->ready);
@@ -2274,4 +2269,769 @@ void nw_shim_connection_group_release(void *handle) {
     dispatch_release(h->queue);
     dispatch_release(h->state_sem);
     free(h);
+}
+
+void nw_shim_free_buffer(void *buffer) {
+    free(buffer);
+}
+
+void *nw_shim_parameters_create(void) {
+    return nw_parameters_create();
+}
+
+void *nw_shim_parameters_create_application_service(void) {
+    if (__builtin_available(macOS 13.0, *)) {
+        return nw_parameters_create_application_service();
+    }
+    return NULL;
+}
+
+void nw_shim_parameters_set_attribution(void *parameters, int attribution) {
+    if (!parameters) {
+        return;
+    }
+    nw_parameters_set_attribution((nw_parameters_t)parameters, (nw_parameters_attribution_t)attribution);
+}
+
+int nw_shim_parameters_get_attribution(void *parameters) {
+    if (!parameters) {
+        return 0;
+    }
+    return (int)nw_parameters_get_attribution((nw_parameters_t)parameters);
+}
+
+void nw_shim_parameters_set_required_interface_type(void *parameters, int interface_type) {
+    if (!parameters) {
+        return;
+    }
+    nw_parameters_set_required_interface_type((nw_parameters_t)parameters, (nw_interface_type_t)interface_type);
+}
+
+int nw_shim_parameters_get_required_interface_type(void *parameters) {
+    if (!parameters) {
+        return 0;
+    }
+    return (int)nw_parameters_get_required_interface_type((nw_parameters_t)parameters);
+}
+
+void nw_shim_parameters_set_prohibit_expensive(void *parameters, int prohibit_expensive) {
+    if (!parameters) {
+        return;
+    }
+    nw_parameters_set_prohibit_expensive((nw_parameters_t)parameters, prohibit_expensive != 0);
+}
+
+int nw_shim_parameters_get_prohibit_expensive(void *parameters) {
+    if (!parameters) {
+        return 0;
+    }
+    return nw_parameters_get_prohibit_expensive((nw_parameters_t)parameters) ? 1 : 0;
+}
+
+void nw_shim_parameters_set_prohibit_constrained(void *parameters, int prohibit_constrained) {
+    if (!parameters) {
+        return;
+    }
+    nw_parameters_set_prohibit_constrained((nw_parameters_t)parameters, prohibit_constrained != 0);
+}
+
+int nw_shim_parameters_get_prohibit_constrained(void *parameters) {
+    if (!parameters) {
+        return 0;
+    }
+    return nw_parameters_get_prohibit_constrained((nw_parameters_t)parameters) ? 1 : 0;
+}
+
+void nw_shim_parameters_set_allow_ultra_constrained(void *parameters, int allow_ultra_constrained) {
+    if (!parameters) {
+        return;
+    }
+    if (__builtin_available(macOS 26.0, *)) {
+        nw_parameters_set_allow_ultra_constrained((nw_parameters_t)parameters, allow_ultra_constrained != 0);
+    }
+}
+
+int nw_shim_parameters_get_allow_ultra_constrained(void *parameters) {
+    if (!parameters) {
+        return 0;
+    }
+    if (__builtin_available(macOS 26.0, *)) {
+        return nw_parameters_get_allow_ultra_constrained((nw_parameters_t)parameters) ? 1 : 0;
+    }
+    return 0;
+}
+
+void *nw_shim_connection_copy_endpoint(void *handle) {
+    nw_conn_handle *h = (nw_conn_handle *)handle;
+    if (!h || !h->conn) {
+        return NULL;
+    }
+    return nw_connection_copy_endpoint(h->conn);
+}
+
+void *nw_shim_connection_copy_parameters(void *handle) {
+    nw_conn_handle *h = (nw_conn_handle *)handle;
+    if (!h || !h->conn) {
+        return NULL;
+    }
+    return nw_connection_copy_parameters(h->conn);
+}
+
+void *nw_shim_connection_copy_current_path(void *handle) {
+    nw_conn_handle *h = (nw_conn_handle *)handle;
+    if (!h || !h->conn) {
+        return NULL;
+    }
+    return nw_connection_copy_current_path(h->conn);
+}
+
+void *nw_shim_path_monitor_copy_latest_path(void *handle) {
+    nw_path_handle *h = (nw_path_handle *)handle;
+    if (!h) {
+        return NULL;
+    }
+
+    __block nw_path_t snapshot = NULL;
+    dispatch_sync(h->queue, ^{
+        if (h->latest_path) {
+            snapshot = nw_retain(h->latest_path);
+        }
+    });
+    return snapshot;
+}
+
+void *nw_shim_browser_start_with_descriptor(
+    void *descriptor,
+    void *parameters,
+    void (*found_callback)(const char *name, const char *service_type, const char *domain, void *user_info),
+    void (*lost_callback)(const char *name, const char *service_type, const char *domain, void *user_info),
+    void *user_info
+) {
+    if (!descriptor) {
+        return NULL;
+    }
+
+    nw_browse_descriptor_t desc = nw_retain((nw_browse_descriptor_t)descriptor);
+    nw_parameters_t params = parameters ? nw_parameters_copy((nw_parameters_t)parameters) : nw_parameters_create();
+    if (!params) {
+        nw_release(desc);
+        return NULL;
+    }
+
+    nw_browser_t browser = nw_browser_create(desc, params);
+    nw_release(desc);
+    nw_release(params);
+    if (!browser) {
+        return NULL;
+    }
+
+    nw_browser_handle *h = (nw_browser_handle *)calloc(1, sizeof(nw_browser_handle));
+    h->browser = browser;
+    h->queue = dispatch_queue_create("networkframework-rs.browser", DISPATCH_QUEUE_SERIAL);
+    h->found_callback = found_callback;
+    h->lost_callback = lost_callback;
+    h->user_info = user_info;
+
+    nw_browser_set_queue(browser, h->queue);
+    nw_browser_set_browse_results_changed_handler(browser,
+        ^(nw_browse_result_t old_result, nw_browse_result_t new_result, bool batch_complete) {
+            (void)batch_complete;
+            nw_browse_result_t result = new_result ? new_result : old_result;
+            if (!result) {
+                return;
+            }
+            nw_endpoint_t ep = nw_browse_result_copy_endpoint(result);
+            if (!ep) {
+                return;
+            }
+            const char *name = nw_endpoint_get_bonjour_service_name(ep);
+            const char *type = nw_endpoint_get_bonjour_service_type(ep);
+            const char *dom = nw_endpoint_get_bonjour_service_domain(ep);
+            if (!name || !name[0]) {
+                name = nw_endpoint_get_hostname(ep);
+            }
+            if (new_result && !old_result && h->found_callback) {
+                h->found_callback(name ? name : "", type ? type : "", dom ? dom : "", h->user_info);
+            } else if (old_result && !new_result && h->lost_callback) {
+                h->lost_callback(name ? name : "", type ? type : "", dom ? dom : "", h->user_info);
+            }
+            nw_release(ep);
+        });
+    nw_browser_start(browser);
+    return h;
+}
+
+void *nw_shim_bonjour_advertise_start_with_descriptor(void *descriptor, uint16_t port, int *out_status) {
+    if (!descriptor) {
+        if (out_status) *out_status = NW_INVALID_ARG;
+        return NULL;
+    }
+
+    nw_parameters_t params = nw_parameters_create_secure_tcp(
+        NW_PARAMETERS_DISABLE_PROTOCOL,
+        NW_PARAMETERS_DEFAULT_CONFIGURATION);
+
+    char port_str[8];
+    snprintf(port_str, sizeof(port_str), "%u", (unsigned)port);
+    nw_listener_t listener = nw_listener_create_with_port(port_str, params);
+    nw_release(params);
+    if (!listener) {
+        if (out_status) *out_status = NW_LISTEN_FAILED;
+        return NULL;
+    }
+
+    nw_advertise_descriptor_t advertise_descriptor = nw_retain((nw_advertise_descriptor_t)descriptor);
+    nw_listener_set_advertise_descriptor(listener, advertise_descriptor);
+    nw_release(advertise_descriptor);
+
+    nw_bonjour_advertise_handle *h = (nw_bonjour_advertise_handle *)calloc(1, sizeof(nw_bonjour_advertise_handle));
+    h->listener = listener;
+    h->queue = dispatch_queue_create("networkframework-rs.advertise-descriptor", DISPATCH_QUEUE_SERIAL);
+    h->ready = dispatch_semaphore_create(0);
+    atomic_store(&h->state_code, 0);
+
+    nw_listener_set_queue(listener, h->queue);
+    nw_listener_set_state_changed_handler(listener, ^(nw_listener_state_t state, nw_error_t error) {
+        (void)error;
+        if (state == nw_listener_state_ready) {
+            atomic_store(&h->state_code, 1);
+            dispatch_semaphore_signal(h->ready);
+        } else if (state == nw_listener_state_cancelled) {
+            atomic_store(&h->state_code, 2);
+            dispatch_semaphore_signal(h->ready);
+        } else if (state == nw_listener_state_failed) {
+            atomic_store(&h->state_code, 3);
+            dispatch_semaphore_signal(h->ready);
+        }
+    });
+    nw_listener_set_new_connection_handler(listener, ^(nw_connection_t conn) {
+        nw_connection_cancel(conn);
+    });
+    nw_listener_start(listener);
+
+    dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, 10LL * NSEC_PER_SEC);
+    if (dispatch_semaphore_wait(h->ready, deadline) != 0 || atomic_load(&h->state_code) != 1) {
+        nw_listener_cancel(listener);
+        nw_release(h->listener);
+        dispatch_release(h->queue);
+        dispatch_release(h->ready);
+        free(h);
+        if (out_status) *out_status = NW_LISTEN_FAILED;
+        return NULL;
+    }
+
+    if (out_status) *out_status = NW_OK;
+    return h;
+}
+
+void *nw_shim_privacy_context_copy_default(void) {
+    return nw_retain(NW_DEFAULT_PRIVACY_CONTEXT);
+}
+
+void *nw_shim_relay_hop_create(void *http3_endpoint, void *http2_endpoint, void *relay_tls_options) {
+    if (!http3_endpoint && !http2_endpoint) {
+        return NULL;
+    }
+    return nw_relay_hop_create(
+        (nw_endpoint_t)http3_endpoint,
+        (nw_endpoint_t)http2_endpoint,
+        (nw_protocol_options_t)relay_tls_options);
+}
+
+void nw_shim_relay_hop_add_additional_http_header_field(void *relay_hop, const char *field_name, const char *field_value) {
+    if (!relay_hop || !field_name || !field_value) {
+        return;
+    }
+    nw_relay_hop_add_additional_http_header_field((nw_relay_hop_t)relay_hop, field_name, field_value);
+}
+
+void *nw_shim_proxy_config_create_relay(void *first_hop, void *second_hop) {
+    if (!first_hop) {
+        return NULL;
+    }
+    return nw_proxy_config_create_relay((nw_relay_hop_t)first_hop, (nw_relay_hop_t)second_hop);
+}
+
+void *nw_shim_proxy_config_create_oblivious_http(
+    void *relay_hop,
+    const char *relay_resource_path,
+    const uint8_t *gateway_key_config,
+    size_t gateway_key_config_length
+) {
+    if (!relay_hop || !relay_resource_path || !gateway_key_config || gateway_key_config_length == 0) {
+        return NULL;
+    }
+    return nw_proxy_config_create_oblivious_http(
+        (nw_relay_hop_t)relay_hop,
+        relay_resource_path,
+        gateway_key_config,
+        gateway_key_config_length);
+}
+
+void nw_shim_proxy_config_enumerate_match_domains(
+    void *proxy_config,
+    void (*callback)(const char *value, void *user_info),
+    void *user_info
+) {
+    if (!proxy_config || !callback) {
+        return;
+    }
+    nw_proxy_config_enumerate_match_domains((nw_proxy_config_t)proxy_config, ^(const char *domain) {
+        callback(domain ? domain : "", user_info);
+    });
+}
+
+void nw_shim_proxy_config_enumerate_excluded_domains(
+    void *proxy_config,
+    void (*callback)(const char *value, void *user_info),
+    void *user_info
+) {
+    if (!proxy_config || !callback) {
+        return;
+    }
+    nw_proxy_config_enumerate_excluded_domains((nw_proxy_config_t)proxy_config, ^(const char *domain) {
+        callback(domain ? domain : "", user_info);
+    });
+}
+
+void *nw_shim_endpoint_create_host(const char *host, uint16_t port) {
+    return nw_shim_create_host_endpoint(host, port);
+}
+
+void *nw_shim_endpoint_create_address(const char *address, uint16_t port) {
+    return nw_shim_create_address_endpoint(address, port);
+}
+
+void *nw_shim_endpoint_create_bonjour_service(const char *name, const char *type, const char *domain) {
+    if (!type) {
+        return NULL;
+    }
+    return nw_endpoint_create_bonjour_service(name, type, domain);
+}
+
+void *nw_shim_endpoint_create_url(const char *url) {
+    if (!url) {
+        return NULL;
+    }
+    return nw_endpoint_create_url(url);
+}
+
+int nw_shim_endpoint_get_type(void *endpoint) {
+    if (!endpoint) {
+        return 0;
+    }
+    return (int)nw_endpoint_get_type((nw_endpoint_t)endpoint);
+}
+
+char *nw_shim_endpoint_copy_hostname(void *endpoint) {
+    if (!endpoint) {
+        return NULL;
+    }
+    const char *hostname = nw_endpoint_get_hostname((nw_endpoint_t)endpoint);
+    return hostname ? strdup(hostname) : NULL;
+}
+
+char *nw_shim_endpoint_copy_port_string(void *endpoint) {
+    if (!endpoint) {
+        return NULL;
+    }
+    return nw_endpoint_copy_port_string((nw_endpoint_t)endpoint);
+}
+
+uint16_t nw_shim_endpoint_get_port(void *endpoint) {
+    if (!endpoint) {
+        return 0;
+    }
+    return nw_endpoint_get_port((nw_endpoint_t)endpoint);
+}
+
+char *nw_shim_endpoint_copy_address_string(void *endpoint) {
+    if (!endpoint) {
+        return NULL;
+    }
+    return nw_endpoint_copy_address_string((nw_endpoint_t)endpoint);
+}
+
+char *nw_shim_endpoint_copy_bonjour_service_name(void *endpoint) {
+    if (!endpoint) {
+        return NULL;
+    }
+    const char *value = nw_endpoint_get_bonjour_service_name((nw_endpoint_t)endpoint);
+    return value ? strdup(value) : NULL;
+}
+
+char *nw_shim_endpoint_copy_bonjour_service_type(void *endpoint) {
+    if (!endpoint) {
+        return NULL;
+    }
+    const char *value = nw_endpoint_get_bonjour_service_type((nw_endpoint_t)endpoint);
+    return value ? strdup(value) : NULL;
+}
+
+char *nw_shim_endpoint_copy_bonjour_service_domain(void *endpoint) {
+    if (!endpoint) {
+        return NULL;
+    }
+    const char *value = nw_endpoint_get_bonjour_service_domain((nw_endpoint_t)endpoint);
+    return value ? strdup(value) : NULL;
+}
+
+char *nw_shim_endpoint_copy_url(void *endpoint) {
+    if (!endpoint) {
+        return NULL;
+    }
+    const char *value = nw_endpoint_get_url((nw_endpoint_t)endpoint);
+    return value ? strdup(value) : NULL;
+}
+
+uint8_t *nw_shim_endpoint_copy_signature(void *endpoint, size_t *out_signature_length) {
+    if (out_signature_length) {
+        *out_signature_length = 0;
+    }
+    if (!endpoint) {
+        return NULL;
+    }
+    size_t length = 0;
+    const uint8_t *signature = nw_endpoint_get_signature((nw_endpoint_t)endpoint, &length);
+    if (!signature || length == 0) {
+        return NULL;
+    }
+    uint8_t *copy = (uint8_t *)malloc(length);
+    if (!copy) {
+        return NULL;
+    }
+    memcpy(copy, signature, length);
+    if (out_signature_length) {
+        *out_signature_length = length;
+    }
+    return copy;
+}
+
+int nw_shim_path_get_status(void *path) {
+    return path ? (int)nw_path_get_status((nw_path_t)path) : 0;
+}
+
+int nw_shim_path_get_unsatisfied_reason(void *path) {
+    return path ? (int)nw_path_get_unsatisfied_reason((nw_path_t)path) : 0;
+}
+
+int nw_shim_path_is_equal(void *path, void *other_path) {
+    if (!path || !other_path) {
+        return 0;
+    }
+    return nw_path_is_equal((nw_path_t)path, (nw_path_t)other_path) ? 1 : 0;
+}
+
+int nw_shim_path_is_expensive(void *path) {
+    return path && nw_path_is_expensive((nw_path_t)path) ? 1 : 0;
+}
+
+int nw_shim_path_is_constrained(void *path) {
+    return path && nw_path_is_constrained((nw_path_t)path) ? 1 : 0;
+}
+
+int nw_shim_path_is_ultra_constrained(void *path) {
+    if (!path) {
+        return 0;
+    }
+    if (__builtin_available(macOS 26.0, *)) {
+        return nw_path_is_ultra_constrained((nw_path_t)path) ? 1 : 0;
+    }
+    return 0;
+}
+
+int nw_shim_path_has_ipv4(void *path) {
+    return path && nw_path_has_ipv4((nw_path_t)path) ? 1 : 0;
+}
+
+int nw_shim_path_has_ipv6(void *path) {
+    return path && nw_path_has_ipv6((nw_path_t)path) ? 1 : 0;
+}
+
+int nw_shim_path_has_dns(void *path) {
+    return path && nw_path_has_dns((nw_path_t)path) ? 1 : 0;
+}
+
+int nw_shim_path_uses_interface_type(void *path, int interface_type) {
+    if (!path) {
+        return 0;
+    }
+    return nw_path_uses_interface_type((nw_path_t)path, (nw_interface_type_t)interface_type) ? 1 : 0;
+}
+
+void *nw_shim_path_copy_effective_local_endpoint(void *path) {
+    return path ? nw_path_copy_effective_local_endpoint((nw_path_t)path) : NULL;
+}
+
+void *nw_shim_path_copy_effective_remote_endpoint(void *path) {
+    return path ? nw_path_copy_effective_remote_endpoint((nw_path_t)path) : NULL;
+}
+
+int nw_shim_path_get_link_quality(void *path) {
+    if (!path) {
+        return 0;
+    }
+    if (__builtin_available(macOS 26.0, *)) {
+        return (int)nw_path_get_link_quality((nw_path_t)path);
+    }
+    return 0;
+}
+
+int nw_shim_path_enumerate_interfaces(
+    void *path,
+    int (*callback)(const char *name, int interface_type, uint32_t index, void *user_info),
+    void *user_info
+) {
+    if (!path || !callback) {
+        return 0;
+    }
+    return nw_shim_enumerate_path_interfaces((nw_path_t)path, callback, user_info);
+}
+
+void *nw_shim_browse_descriptor_create_bonjour_service(const char *type, const char *domain) {
+    if (!type) {
+        return NULL;
+    }
+    return nw_browse_descriptor_create_bonjour_service(type, domain);
+}
+
+char *nw_shim_browse_descriptor_copy_bonjour_service_type(void *descriptor) {
+    if (!descriptor) {
+        return NULL;
+    }
+    const char *value = nw_browse_descriptor_get_bonjour_service_type((nw_browse_descriptor_t)descriptor);
+    return value ? strdup(value) : NULL;
+}
+
+char *nw_shim_browse_descriptor_copy_bonjour_service_domain(void *descriptor) {
+    if (!descriptor) {
+        return NULL;
+    }
+    const char *value = nw_browse_descriptor_get_bonjour_service_domain((nw_browse_descriptor_t)descriptor);
+    return value ? strdup(value) : NULL;
+}
+
+void nw_shim_browse_descriptor_set_include_txt_record(void *descriptor, int include_txt_record) {
+    if (!descriptor) {
+        return;
+    }
+    nw_browse_descriptor_set_include_txt_record((nw_browse_descriptor_t)descriptor, include_txt_record != 0);
+}
+
+int nw_shim_browse_descriptor_get_include_txt_record(void *descriptor) {
+    if (!descriptor) {
+        return 0;
+    }
+    return nw_browse_descriptor_get_include_txt_record((nw_browse_descriptor_t)descriptor) ? 1 : 0;
+}
+
+void *nw_shim_browse_descriptor_create_application_service(const char *application_service_name) {
+    if (!application_service_name) {
+        return NULL;
+    }
+    if (__builtin_available(macOS 13.0, *)) {
+        return nw_browse_descriptor_create_application_service(application_service_name);
+    }
+    return NULL;
+}
+
+char *nw_shim_browse_descriptor_copy_application_service_name(void *descriptor) {
+    if (!descriptor) {
+        return NULL;
+    }
+    if (__builtin_available(macOS 13.0, *)) {
+        const char *value = nw_browse_descriptor_get_application_service_name((nw_browse_descriptor_t)descriptor);
+        return value ? strdup(value) : NULL;
+    }
+    return NULL;
+}
+
+void *nw_shim_advertise_descriptor_create_bonjour_service(const char *name, const char *type, const char *domain) {
+    if (!type) {
+        return NULL;
+    }
+    return nw_advertise_descriptor_create_bonjour_service(name, type, domain);
+}
+
+void *nw_shim_advertise_descriptor_create_application_service(const char *application_service_name) {
+    if (!application_service_name) {
+        return NULL;
+    }
+    if (__builtin_available(macOS 13.0, *)) {
+        return nw_advertise_descriptor_create_application_service(application_service_name);
+    }
+    return NULL;
+}
+
+void nw_shim_advertise_descriptor_set_txt_record(void *descriptor, const uint8_t *txt_record, size_t txt_length) {
+    if (!descriptor) {
+        return;
+    }
+    nw_advertise_descriptor_set_txt_record((nw_advertise_descriptor_t)descriptor, txt_record, txt_length);
+}
+
+void nw_shim_advertise_descriptor_set_no_auto_rename(void *descriptor, int no_auto_rename) {
+    if (!descriptor) {
+        return;
+    }
+    nw_advertise_descriptor_set_no_auto_rename((nw_advertise_descriptor_t)descriptor, no_auto_rename != 0);
+}
+
+int nw_shim_advertise_descriptor_get_no_auto_rename(void *descriptor) {
+    if (!descriptor) {
+        return 0;
+    }
+    return nw_advertise_descriptor_get_no_auto_rename((nw_advertise_descriptor_t)descriptor) ? 1 : 0;
+}
+
+char *nw_shim_advertise_descriptor_copy_application_service_name(void *descriptor) {
+    if (!descriptor) {
+        return NULL;
+    }
+    if (__builtin_available(macOS 13.0, *)) {
+        const char *value = nw_advertise_descriptor_get_application_service_name((nw_advertise_descriptor_t)descriptor);
+        return value ? strdup(value) : NULL;
+    }
+    return NULL;
+}
+
+void *nw_shim_protocol_copy_tcp_definition(void) {
+    return nw_protocol_copy_tcp_definition();
+}
+
+void *nw_shim_protocol_copy_udp_definition(void) {
+    return nw_protocol_copy_udp_definition();
+}
+
+void *nw_shim_protocol_copy_tls_definition(void) {
+    return nw_protocol_copy_tls_definition();
+}
+
+void *nw_shim_protocol_copy_ip_definition(void) {
+    return nw_protocol_copy_ip_definition();
+}
+
+void *nw_shim_protocol_copy_ws_definition(void) {
+    return nw_protocol_copy_ws_definition();
+}
+
+void *nw_shim_protocol_copy_quic_definition(void) {
+    return nw_protocol_copy_quic_definition();
+}
+
+void *nw_shim_protocol_create_tcp_options(void) {
+    return nw_tcp_create_options();
+}
+
+void *nw_shim_protocol_create_udp_options(void) {
+    return nw_udp_create_options();
+}
+
+void *nw_shim_protocol_create_tls_options(void) {
+    return nw_tls_create_options();
+}
+
+void *nw_shim_protocol_create_ip_options(void) {
+    nw_parameters_t parameters = nw_parameters_create();
+    if (!parameters) {
+        return NULL;
+    }
+    nw_protocol_stack_t stack = nw_parameters_copy_default_protocol_stack(parameters);
+    if (!stack) {
+        nw_release(parameters);
+        return NULL;
+    }
+    nw_protocol_options_t options = nw_protocol_stack_copy_internet_protocol(stack);
+    nw_release(stack);
+    nw_release(parameters);
+    return options;
+}
+
+void *nw_shim_protocol_create_ws_options(void) {
+    return nw_ws_create_options(nw_ws_version_13);
+}
+
+void *nw_shim_protocol_create_quic_options(void) {
+    return nw_quic_create_options();
+}
+
+int nw_shim_protocol_definition_is_equal(void *definition1, void *definition2) {
+    if (!definition1 || !definition2) {
+        return 0;
+    }
+    return nw_protocol_definition_is_equal((nw_protocol_definition_t)definition1, (nw_protocol_definition_t)definition2) ? 1 : 0;
+}
+
+void *nw_shim_protocol_options_copy_definition(void *options) {
+    return options ? nw_protocol_options_copy_definition((nw_protocol_options_t)options) : NULL;
+}
+
+void *nw_shim_protocol_metadata_copy_definition(void *metadata) {
+    return metadata ? nw_protocol_metadata_copy_definition((nw_protocol_metadata_t)metadata) : NULL;
+}
+
+int nw_shim_protocol_options_is_quic(void *options) {
+    return options && nw_protocol_options_is_quic((nw_protocol_options_t)options) ? 1 : 0;
+}
+
+void nw_shim_quic_add_tls_application_protocol(void *options, const char *application_protocol) {
+    if (!options || !application_protocol) {
+        return;
+    }
+    nw_quic_add_tls_application_protocol((nw_protocol_options_t)options, application_protocol);
+}
+
+int nw_shim_quic_get_stream_is_unidirectional(void *options) {
+    return options && nw_quic_get_stream_is_unidirectional((nw_protocol_options_t)options) ? 1 : 0;
+}
+
+void nw_shim_quic_set_stream_is_unidirectional(void *options, int is_unidirectional) {
+    if (!options) {
+        return;
+    }
+    nw_quic_set_stream_is_unidirectional((nw_protocol_options_t)options, is_unidirectional != 0);
+}
+
+int nw_shim_quic_get_stream_is_datagram(void *options) {
+    return options && nw_quic_get_stream_is_datagram((nw_protocol_options_t)options) ? 1 : 0;
+}
+
+void nw_shim_quic_set_stream_is_datagram(void *options, int is_datagram) {
+    if (!options) {
+        return;
+    }
+    nw_quic_set_stream_is_datagram((nw_protocol_options_t)options, is_datagram != 0);
+}
+
+uint64_t nw_shim_quic_get_initial_max_data(void *options) {
+    return options ? nw_quic_get_initial_max_data((nw_protocol_options_t)options) : 0;
+}
+
+void nw_shim_quic_set_initial_max_data(void *options, uint64_t initial_max_data) {
+    if (!options) {
+        return;
+    }
+    nw_quic_set_initial_max_data((nw_protocol_options_t)options, initial_max_data);
+}
+
+uint16_t nw_shim_quic_get_max_udp_payload_size(void *options) {
+    return options ? nw_quic_get_max_udp_payload_size((nw_protocol_options_t)options) : 0;
+}
+
+void nw_shim_quic_set_max_udp_payload_size(void *options, uint16_t max_udp_payload_size) {
+    if (!options) {
+        return;
+    }
+    nw_quic_set_max_udp_payload_size((nw_protocol_options_t)options, max_udp_payload_size);
+}
+
+uint32_t nw_shim_quic_get_idle_timeout(void *options) {
+    return options ? nw_quic_get_idle_timeout((nw_protocol_options_t)options) : 0;
+}
+
+void nw_shim_quic_set_idle_timeout(void *options, uint32_t idle_timeout) {
+    if (!options) {
+        return;
+    }
+    nw_quic_set_idle_timeout((nw_protocol_options_t)options, idle_timeout);
 }

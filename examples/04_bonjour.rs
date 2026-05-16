@@ -1,20 +1,18 @@
-use networkframework::{start_browser, BrowserEvent};
+use networkframework::{start_browser_with_descriptor, BrowseDescriptor};
 use std::time::Duration;
 
 fn main() -> Result<(), networkframework::NetworkError> {
-    // Look for a few common Bonjour service types.
-    for service in ["_airplay._tcp", "_http._tcp", "_ssh._tcp", "_raop._tcp"] {
-        println!("\nbrowsing {service} for 2s…");
-        let svc_copy = service.to_string();
-        let _guard = start_browser(service, None, move |evt| match evt {
-            BrowserEvent::Found(s) => {
-                println!("  + [{}] {:?} in {}", svc_copy, s.name, s.domain);
-            }
-            BrowserEvent::Lost(s) => {
-                println!("  - [{}] {:?}", svc_copy, s.name);
-            }
-        })?;
-        std::thread::sleep(Duration::from_secs(2));
-    }
+    let mut descriptor = BrowseDescriptor::bonjour_service("_http._tcp", Some("local"))?;
+    descriptor.set_include_txt_record(true);
+    println!(
+        "browsing type={:?} domain={:?} include_txt_record={}",
+        descriptor.bonjour_service_type(),
+        descriptor.bonjour_service_domain(),
+        descriptor.include_txt_record(),
+    );
+    let _browser = start_browser_with_descriptor(&descriptor, None, |event| {
+        println!("browser event: {event:?}");
+    })?;
+    std::thread::sleep(Duration::from_millis(250));
     Ok(())
 }

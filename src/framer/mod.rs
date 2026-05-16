@@ -3,7 +3,7 @@
 #![allow(
     clippy::missing_errors_doc,
     clippy::semicolon_if_nothing_returned,
-    clippy::use_self,
+    clippy::use_self
 )]
 
 use core::ffi::{c_int, c_void};
@@ -189,7 +189,8 @@ impl FramerMessage {
     pub fn set_u64(&mut self, key: &str, value: u64) -> Result<&mut Self, NetworkError> {
         let key = CString::new(key)
             .map_err(|e| NetworkError::InvalidArgument(format!("key NUL byte: {e}")))?;
-        let status = unsafe { ffi::nw_shim_framer_message_set_u64(self.handle, key.as_ptr(), value) };
+        let status =
+            unsafe { ffi::nw_shim_framer_message_set_u64(self.handle, key.as_ptr(), value) };
         if status != ffi::NW_OK {
             return Err(crate::error::from_status(status));
         }
@@ -239,7 +240,8 @@ impl FramerMessageView<'_> {
     pub fn get_u64(&self, key: &str) -> Option<u64> {
         let key = CString::new(key).ok()?;
         let mut value = 0_u64;
-        let found = unsafe { ffi::nw_shim_framer_message_get_u64(self.handle, key.as_ptr(), &mut value) };
+        let found =
+            unsafe { ffi::nw_shim_framer_message_get_u64(self.handle, key.as_ptr(), &mut value) };
         if found > 0 {
             Some(value)
         } else {
@@ -281,10 +283,10 @@ impl FramerContext {
     where
         F: FnMut(&[u8], bool) -> usize,
     {
-        let (temp_buffer, max_length) = temp_buffer.map_or(
-            (core::ptr::null_mut(), maximum_length),
-            |buffer| (buffer.as_mut_ptr(), buffer.len()),
-        );
+        let (temp_buffer, max_length) = temp_buffer
+            .map_or((core::ptr::null_mut(), maximum_length), |buffer| {
+                (buffer.as_mut_ptr(), buffer.len())
+            });
         unsafe {
             ffi::nw_shim_framer_parse_input(
                 self.handle,
@@ -308,10 +310,10 @@ impl FramerContext {
     where
         F: FnMut(&[u8], bool) -> usize,
     {
-        let (temp_buffer, max_length) = temp_buffer.map_or(
-            (core::ptr::null_mut(), maximum_length),
-            |buffer| (buffer.as_mut_ptr(), buffer.len()),
-        );
+        let (temp_buffer, max_length) = temp_buffer
+            .map_or((core::ptr::null_mut(), maximum_length), |buffer| {
+                (buffer.as_mut_ptr(), buffer.len())
+            });
         unsafe {
             ffi::nw_shim_framer_parse_output(
                 self.handle,

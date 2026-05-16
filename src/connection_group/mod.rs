@@ -12,8 +12,7 @@ use crate::ffi;
 use crate::parameters::KeepAlives;
 
 fn to_cstring(value: &str, field: &str) -> Result<CString, NetworkError> {
-    CString::new(value)
-        .map_err(|e| NetworkError::InvalidArgument(format!("{field} NUL byte: {e}")))
+    CString::new(value).map_err(|e| NetworkError::InvalidArgument(format!("{field} NUL byte: {e}")))
 }
 
 /// A group descriptor for multicast or multiplex connection groups.
@@ -40,9 +39,8 @@ impl ConnectionGroupDescriptor {
     /// Create a multicast group descriptor from an IP multicast address.
     pub fn multicast(group_address: &str, port: u16) -> Result<Self, NetworkError> {
         let group_address = to_cstring(group_address, "group_address")?;
-        let handle = unsafe {
-            ffi::nw_shim_group_descriptor_create_multicast(group_address.as_ptr(), port)
-        };
+        let handle =
+            unsafe { ffi::nw_shim_group_descriptor_create_multicast(group_address.as_ptr(), port) };
         if handle.is_null() {
             return Err(NetworkError::InvalidArgument(
                 "failed to create multicast group descriptor".into(),
@@ -54,7 +52,8 @@ impl ConnectionGroupDescriptor {
     /// Add another endpoint to the descriptor.
     pub fn add_endpoint(&mut self, host: &str, port: u16) -> Result<&mut Self, NetworkError> {
         let host = to_cstring(host, "host")?;
-        let added = unsafe { ffi::nw_shim_group_descriptor_add_endpoint(self.handle, host.as_ptr(), port) };
+        let added =
+            unsafe { ffi::nw_shim_group_descriptor_add_endpoint(self.handle, host.as_ptr(), port) };
         if added == 0 {
             return Err(NetworkError::InvalidArgument(
                 "failed to add endpoint to group descriptor".into(),

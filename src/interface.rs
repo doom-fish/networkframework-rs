@@ -82,7 +82,9 @@ unsafe extern "C" fn collect_interface_trampoline(
     let name = if name.is_null() {
         String::new()
     } else {
-        unsafe { CStr::from_ptr(name) }.to_string_lossy().into_owned()
+        unsafe { CStr::from_ptr(name) }
+            .to_string_lossy()
+            .into_owned()
     };
     interfaces.push(NetworkInterface {
         name,

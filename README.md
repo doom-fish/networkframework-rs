@@ -2,51 +2,74 @@
 
 Safe Rust bindings for Apple's
 [Network.framework](https://developer.apple.com/documentation/network),
-the modern (10.14+) replacement for BSD sockets / `CFNetwork` / `NSStream`.
+backed by a Swift bridge plus an opt-in raw FFI surface.
 
-v0.8 covers:
+## What's new in v0.9
 
-- `TcpClient`, `TcpListener`, `UdpClient`, `QuicConnection`, `WebSocket`, `Browser`, and `PathMonitor`.
-- `ConnectionParameters` for advanced protocol-stack configuration.
-- `ContentContext` for per-message priority, expiration, antecedents, and protocol metadata.
-- Custom protocol framers via `FramerDefinition`, `Framer`, `FramerContext`, and `FramerMessage`.
-- `ConnectionGroup` / `ConnectionGroupDescriptor` for multicast and multiplex groups.
-- Interface enumeration via `list_interfaces()` and `PathMonitor::list_interfaces()`.
-- `PrivacyContext`, `ProxyConfig`, and `ResolverConfig` for proxy and encrypted-DNS policy.
+- `SwiftPM` bridge modeled after the `screencapturekit-rs` layout.
+- Safe modules for the requested logical areas:
+  `Connection`, `Listener`, `Browser`, `Parameters`, `Endpoint`, `Path`,
+  `Framer`, `Group`, `Protocol`, `ContentContext`, `Resolver`, `Quic`,
+  `PrivacyContext`, `ProxyConfig`, and `AdvertiseDescriptor`.
+- `raw-ffi` feature for direct access to the low-level bridge symbols.
+- `COVERAGE.md`, per-area smoke tests, and runnable examples for every area.
 
-Built using a thin C shim around Apple's block-based `nw_*` C API; no
-Objective-C runtime, no Swift bridge required.
+## Crate layout
 
-## Why not just use `std::net`?
-
-`std::net` calls BSD sockets directly, which works but bypasses macOS's
-modern network stack (cellular fallback, Wi-Fi assist, Network
-Extensions, secure DNS, multipath, on-device proxying). Apps shipped
-via the Mac App Store **must** use Network.framework for many of those
-behaviours. This crate provides a tiny safe surface for that.
-
-## Remaining gaps
-
-The crate now covers most publicly useful `Network.framework` surfaces. Remaining
-work is focused on deeper protocol metadata helpers, richer connection-group
-operations such as extraction / reinsertion, and additional low-level protocol
-options.
+- Safe API: enabled by default.
+- Raw bridge API: `--features raw-ffi`
+- Coverage report: [`COVERAGE.md`](COVERAGE.md)
 
 ## Quick start
 
 ```rust,no_run
-use networkframework::TcpClient;
+use networkframework::{TcpClient, TcpListener};
 
-let client = TcpClient::connect("example.com", 80)?;
-client.send(b"GET / HTTP/1.0\r\nHost: example.com\r\n\r\n")?;
-let response = client.receive(8192)?;
-println!("got {} bytes", response.len());
+let listener = TcpListener::bind(0)?;
+let port = listener.local_port();
+let server = std::thread::spawn(move || -> Result<(), networkframework::NetworkError> {
+    let connection = listener.accept()?;
+    let request = connection.receive(1024)?;
+    assert_eq!(request, b"ping");
+    connection.send(b"pong")?;
+    Ok(())
+});
+
+let client = TcpClient::connect("127.0.0.1", port)?;
+client.send(b"ping")?;
+let reply = client.receive(1024)?;
+assert_eq!(reply, b"pong");
+server.join().expect("server thread")?;
 # Ok::<_, networkframework::NetworkError>(())
 ```
 
-## Included examples
+## Availability notes
 
-- `cargo run --example framer_length_prefix`
-- `cargo run --example interface_list`
-- `cargo run --example connection_group`
-- `cargo run --example 03_udp_and_path`
+Some Apple APIs are runtime-gated by the operating system:
+
+- Application-service browsing / advertising / parameters: macOS 13+
+- Relay and Oblivious HTTP proxy configuration: macOS 14+
+- Ultra-constrained path / parameter flags and link quality: newer SDK/runtime combinations
+
+The safe wrappers return `NetworkError::InvalidArgument` when a requested API is unavailable at runtime.
+
+## Examples
+
+```bash
+cargo run --example 01_get_example
+cargo run --example 04_bonjour
+cargo run --example 06_bonjour_advertise
+cargo run --example framer_length_prefix
+cargo run --example content_context_overview
+cargo run --example resolver_overview
+cargo run --example privacy_context_overview
+cargo run --example quic_options
+```
+
+## Validation
+
+```bash
+cargo clippy --all-targets -- -D warnings
+cargo test
+for ex in examples/*.rs; do cargo run --example "$(basename "$ex" .rs)"; done
+```

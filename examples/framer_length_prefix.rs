@@ -25,7 +25,9 @@ impl Framer for LengthPrefixFramer {
 
             let expected = self.pending_length.expect("header parsed");
             if expected == 0 {
-                let message = context.create_message().expect("create zero-length message");
+                let message = context
+                    .create_message()
+                    .expect("create zero-length message");
                 assert!(context.pass_input_data(0, Some(&message), true));
                 self.pending_length = None;
                 continue;

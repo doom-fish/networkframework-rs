@@ -1,24 +1,35 @@
-use networkframework::{start_path_monitor, UdpClient};
+use networkframework::{start_path_monitor, ConnectionParameters, Endpoint};
 use std::time::Duration;
 
 fn main() -> Result<(), networkframework::NetworkError> {
-    // 1) Send a UDP datagram to 1.1.1.1:53 (Cloudflare DNS). We won't
-    //    parse the response — we're just proving send+recv works.
-    let dns_query: [u8; 12] = [
-        0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00,
-    ];
-    let c = UdpClient::connect("1.1.1.1", 53)?;
-    c.send(&dns_query)?;
-    // (Real DNS query would have a question section appended; we'll
-    // just confirm the socket round-trips.)
-    println!("sent {} bytes to 1.1.1.1:53 via UDP", dns_query.len());
+    let _udp = ConnectionParameters::udp()?;
+    let host = Endpoint::host("example.com", 443)?;
+    let bonjour = Endpoint::bonjour_service(Some("demo"), "_http._tcp", Some("local"))?;
+    let url = Endpoint::url("https://example.com")?;
+    println!(
+        "host endpoint: {:?}:{:?}",
+        host.hostname(),
+        host.port_string()
+    );
+    println!("bonjour endpoint: {:?}", bonjour.bonjour_service_name());
+    println!("url endpoint: {:?}", url.url_string());
 
-    // 2) Start a path monitor for a couple of seconds, just to confirm
-    //    the callback fires at least once.
-    let _guard = start_path_monitor(|u| {
-        println!("path update: satisfied={}, iface={:?}", u.satisfied, u.interface);
+    let monitor = start_path_monitor(|update| {
+        println!(
+            "path update: satisfied={} interface={:?}",
+            update.satisfied, update.interface
+        );
     });
-    std::thread::sleep(Duration::from_millis(500));
+    std::thread::sleep(Duration::from_millis(250));
+    if let Some(path) = monitor.current_path() {
+        println!(
+            "current path: status={:?} interfaces={} ipv4={} ipv6={} dns={}",
+            path.status(),
+            path.interfaces().len(),
+            path.has_ipv4(),
+            path.has_ipv6(),
+            path.has_dns(),
+        );
+    }
     Ok(())
 }

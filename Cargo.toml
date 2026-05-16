@@ -1,6 +1,6 @@
 [package]
 name = "networkframework"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/doom-fish/networkframework-rs"
@@ -14,12 +14,18 @@ readme = "README.md"
 build = "build.rs"
 include = [
     "src/**/*",
+    "swift-bridge/**/*",
     "build.rs",
     "Cargo.toml",
     "README.md",
     "LICENSE-*",
     "CHANGELOG.md",
+    "COVERAGE.md",
 ]
+
+[features]
+default = []
+raw-ffi = []
 
 [lints.rust]
 
@@ -33,7 +39,6 @@ name = "networkframework"
 crate-type = ["lib"]
 
 [build-dependencies]
-cc = "1"
 
 [dependencies]
 
@@ -78,3 +83,15 @@ name = "interface_list"
 
 [[example]]
 name = "connection_group"
+
+[[example]]
+name = "content_context_overview"
+
+[[example]]
+name = "resolver_overview"
+
+[[example]]
+name = "privacy_context_overview"
+
+[[example]]
+name = "quic_options"

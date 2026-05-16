@@ -45,7 +45,9 @@ impl ContentContext {
         if ptr.is_null() {
             return String::new();
         }
-        unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned()
+        unsafe { CStr::from_ptr(ptr) }
+            .to_string_lossy()
+            .into_owned()
     }
 
     /// Whether this context marks the final message on a connection.
@@ -85,7 +87,9 @@ impl ContentContext {
 
     /// Set the relative priority between `0.0` and `1.0`.
     pub fn set_relative_priority(&mut self, relative_priority: f64) -> &mut Self {
-        unsafe { ffi::nw_shim_content_context_set_relative_priority(self.handle, relative_priority) };
+        unsafe {
+            ffi::nw_shim_content_context_set_relative_priority(self.handle, relative_priority)
+        };
         self
     }
 
@@ -112,7 +116,9 @@ impl ContentContext {
 
     /// Attach framer metadata to this content context.
     pub fn set_framer_message(&mut self, message: &crate::framer::FramerMessage) -> &mut Self {
-        unsafe { ffi::nw_shim_content_context_set_protocol_metadata(self.handle, message.as_ptr()) };
+        unsafe {
+            ffi::nw_shim_content_context_set_protocol_metadata(self.handle, message.as_ptr())
+        };
         self
     }
 

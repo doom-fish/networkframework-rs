@@ -66,9 +66,8 @@ impl TcpListener {
 
     fn bind_inner(port: u16, use_tls: bool) -> Result<Self, NetworkError> {
         let mut status: c_int = 0;
-        let handle = unsafe {
-            ffi::nw_shim_listener_create(port, c_int::from(use_tls), &mut status)
-        };
+        let handle =
+            unsafe { ffi::nw_shim_listener_create(port, c_int::from(use_tls), &mut status) };
         if status != ffi::NW_OK || handle.is_null() {
             return Err(from_status(status));
         }
@@ -100,9 +99,7 @@ impl TcpListener {
         // SAFETY: nw_shim_listener_accept returns the same shape as
         // nw_shim_tcp_connect — a `nw_conn_handle*`. We hand it to
         // TcpClient via a private constructor below.
-        Ok(unsafe {
-            TcpClient::from_raw_with_keepalives(conn_handle, self.keepalives.clone())
-        })
+        Ok(unsafe { TcpClient::from_raw_with_keepalives(conn_handle, self.keepalives.clone()) })
     }
 }
 

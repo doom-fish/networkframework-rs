@@ -1,12 +1,17 @@
-use networkframework::{Opcode, WebSocket};
+use networkframework::{ProtocolDefinition, ProtocolOptions};
 
 fn main() -> Result<(), networkframework::NetworkError> {
-    // Postman's public echo server at wss://ws.postman-echo.com/raw
-    let ws = WebSocket::connect("ws.postman-echo.com", 443, "/raw", true)?;
-    ws.send_text("hello from networkframework-rs")?;
-    let msg = ws.receive(4096)?;
-    let text = String::from_utf8_lossy(&msg.data);
-    println!("got {:?} message: {text} ({} bytes)", msg.opcode, msg.data.len());
-    assert_eq!(msg.opcode, Opcode::Text);
+    let websocket_definition = ProtocolDefinition::websocket()?;
+    let websocket_options = ProtocolOptions::websocket()?;
+    println!(
+        "websocket definition matches options: {}",
+        websocket_options
+            .definition()
+            .as_ref()
+            .is_some_and(|definition| definition == &websocket_definition)
+    );
+
+    let quic_options = ProtocolOptions::quic()?;
+    println!("quic options report is_quic={}", quic_options.is_quic());
     Ok(())
 }

@@ -122,9 +122,7 @@ impl WebSocket {
     pub fn receive(&self, max_len: usize) -> Result<WsMessage, NetworkError> {
         let mut buf = vec![0u8; max_len];
         let mut op: c_int = 0;
-        let n = unsafe {
-            ffi::nw_shim_ws_receive(self.handle, buf.as_mut_ptr(), max_len, &mut op)
-        };
+        let n = unsafe { ffi::nw_shim_ws_receive(self.handle, buf.as_mut_ptr(), max_len, &mut op) };
         if n < 0 {
             return Err(from_status(n as i32));
         }

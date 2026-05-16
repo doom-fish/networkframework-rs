@@ -2,15 +2,31 @@
 
 #![allow(clippy::missing_errors_doc)]
 
-use core::ffi::c_void;
-use std::ffi::CString;
+use core::ffi::{c_char, c_void};
+use std::ffi::{CStr, CString};
 
+use crate::endpoint::Endpoint;
 use crate::error::NetworkError;
 use crate::ffi;
+use crate::protocol::ProtocolOptions;
 
 fn to_cstring(value: &str, field: &str) -> Result<CString, NetworkError> {
-    CString::new(value)
-        .map_err(|e| NetworkError::InvalidArgument(format!("{field} NUL byte: {e}")))
+    CString::new(value).map_err(|e| NetworkError::InvalidArgument(format!("{field} NUL byte: {e}")))
+}
+
+unsafe extern "C" fn collect_string_trampoline(value: *const c_char, user_info: *mut c_void) {
+    if user_info.is_null() {
+        return;
+    }
+    let values = unsafe { &mut *user_info.cast::<Vec<String>>() };
+    let value = if value.is_null() {
+        String::new()
+    } else {
+        unsafe { CStr::from_ptr(value) }
+            .to_string_lossy()
+            .into_owned()
+    };
+    values.push(value);
 }
 
 /// Shared privacy and cache policy applied through [`crate::ConnectionParameters`].
@@ -32,6 +48,13 @@ impl PrivacyContext {
             ));
         }
         Ok(Self { handle })
+    }
+
+    /// Copy the process-global default privacy context.
+    #[must_use]
+    pub fn default_context() -> Self {
+        let handle = unsafe { ffi::nw_shim_privacy_context_copy_default() };
+        Self { handle }
     }
 
     /// Flush any caches associated with the context.
@@ -125,7 +148,11 @@ impl ResolverConfig {
     }
 
     /// Add a DNS server address to the resolver configuration.
-    pub fn add_server_address(&mut self, address: &str, port: u16) -> Result<&mut Self, NetworkError> {
+    pub fn add_server_address(
+        &mut self,
+        address: &str,
+        port: u16,
+    ) -> Result<&mut Self, NetworkError> {
         let address = to_cstring(address, "address")?;
         let status = unsafe {
             ffi::nw_shim_resolver_config_add_server_address(self.handle, address.as_ptr(), port)
@@ -150,6 +177,76 @@ impl Clone for ResolverConfig {
 }
 
 impl Drop for ResolverConfig {
+    fn drop(&mut self) {
+        if !self.handle.is_null() {
+            unsafe { ffi::nw_shim_release_object(self.handle) };
+            self.handle = core::ptr::null_mut();
+        }
+    }
+}
+
+/// A secure relay hop usable for relay and Oblivious HTTP proxy configurations.
+pub struct RelayHop {
+    handle: *mut c_void,
+}
+
+unsafe impl Send for RelayHop {}
+unsafe impl Sync for RelayHop {}
+
+impl RelayHop {
+    /// Create a relay hop using optional HTTP/3 and HTTP/2 endpoints.
+    pub fn new(
+        http3_endpoint: Option<&Endpoint>,
+        http2_endpoint: Option<&Endpoint>,
+        relay_tls_options: Option<&ProtocolOptions>,
+    ) -> Result<Self, NetworkError> {
+        let handle = unsafe {
+            ffi::nw_shim_relay_hop_create(
+                http3_endpoint.map_or(core::ptr::null_mut(), Endpoint::as_ptr),
+                http2_endpoint.map_or(core::ptr::null_mut(), Endpoint::as_ptr),
+                relay_tls_options.map_or(core::ptr::null_mut(), ProtocolOptions::as_ptr),
+            )
+        };
+        if handle.is_null() {
+            return Err(NetworkError::InvalidArgument(
+                "failed to create relay hop".into(),
+            ));
+        }
+        Ok(Self { handle })
+    }
+
+    /// Attach an extra HTTP header field to CONNECT requests.
+    pub fn add_additional_http_header_field(
+        &mut self,
+        field_name: &str,
+        field_value: &str,
+    ) -> Result<&mut Self, NetworkError> {
+        let field_name = to_cstring(field_name, "field_name")?;
+        let field_value = to_cstring(field_value, "field_value")?;
+        unsafe {
+            ffi::nw_shim_relay_hop_add_additional_http_header_field(
+                self.handle,
+                field_name.as_ptr(),
+                field_value.as_ptr(),
+            );
+        };
+        Ok(self)
+    }
+
+    #[must_use]
+    pub(crate) const fn as_ptr(&self) -> *mut c_void {
+        self.handle
+    }
+}
+
+impl Clone for RelayHop {
+    fn clone(&self) -> Self {
+        let handle = unsafe { ffi::nw_shim_retain_object(self.handle) };
+        Self { handle }
+    }
+}
+
+impl Drop for RelayHop {
     fn drop(&mut self) {
         if !self.handle.is_null() {
             unsafe { ffi::nw_shim_release_object(self.handle) };
@@ -193,6 +290,48 @@ impl ProxyConfig {
         Ok(Self { handle })
     }
 
+    /// Create a relay proxy configuration.
+    pub fn relay(
+        first_hop: &RelayHop,
+        second_hop: Option<&RelayHop>,
+    ) -> Result<Self, NetworkError> {
+        let handle = unsafe {
+            ffi::nw_shim_proxy_config_create_relay(
+                first_hop.as_ptr(),
+                second_hop.map_or(core::ptr::null_mut(), RelayHop::as_ptr),
+            )
+        };
+        if handle.is_null() {
+            return Err(NetworkError::InvalidArgument(
+                "failed to create relay proxy configuration".into(),
+            ));
+        }
+        Ok(Self { handle })
+    }
+
+    /// Create an Oblivious HTTP proxy configuration.
+    pub fn oblivious_http(
+        relay_hop: &RelayHop,
+        relay_resource_path: &str,
+        gateway_key_config: &[u8],
+    ) -> Result<Self, NetworkError> {
+        let relay_resource_path = to_cstring(relay_resource_path, "relay_resource_path")?;
+        let handle = unsafe {
+            ffi::nw_shim_proxy_config_create_oblivious_http(
+                relay_hop.as_ptr(),
+                relay_resource_path.as_ptr(),
+                gateway_key_config.as_ptr(),
+                gateway_key_config.len(),
+            )
+        };
+        if handle.is_null() {
+            return Err(NetworkError::InvalidArgument(
+                "failed to create Oblivious HTTP proxy configuration".into(),
+            ));
+        }
+        Ok(Self { handle })
+    }
+
     /// Configure proxy authentication credentials.
     pub fn set_credentials(
         &mut self,
@@ -208,7 +347,9 @@ impl ProxyConfig {
             ffi::nw_shim_proxy_config_set_username_password(
                 self.handle,
                 username.as_ptr(),
-                password.as_ref().map_or(core::ptr::null(), |value| value.as_ptr()),
+                password
+                    .as_ref()
+                    .map_or(core::ptr::null(), |value| value.as_ptr()),
             );
         }
         Ok(self)
@@ -217,7 +358,10 @@ impl ProxyConfig {
     /// Allow fallback to direct connections if the proxy path fails.
     pub fn set_failover_allowed(&mut self, failover_allowed: bool) -> &mut Self {
         unsafe {
-            ffi::nw_shim_proxy_config_set_failover_allowed(self.handle, i32::from(failover_allowed));
+            ffi::nw_shim_proxy_config_set_failover_allowed(
+                self.handle,
+                i32::from(failover_allowed),
+            );
         }
         self
     }
@@ -241,6 +385,20 @@ impl ProxyConfig {
         self
     }
 
+    /// Snapshot the currently configured match domains.
+    #[must_use]
+    pub fn match_domains(&self) -> Vec<String> {
+        let mut domains = Vec::new();
+        unsafe {
+            ffi::nw_shim_proxy_config_enumerate_match_domains(
+                self.handle,
+                collect_string_trampoline,
+                std::ptr::addr_of_mut!(domains).cast(),
+            );
+        };
+        domains
+    }
+
     /// Add a hostname suffix that should bypass this proxy.
     pub fn add_excluded_domain(&mut self, domain: &str) -> Result<&mut Self, NetworkError> {
         let domain = to_cstring(domain, "domain")?;
@@ -252,6 +410,20 @@ impl ProxyConfig {
     pub fn clear_excluded_domains(&mut self) -> &mut Self {
         unsafe { ffi::nw_shim_proxy_config_clear_excluded_domains(self.handle) };
         self
+    }
+
+    /// Snapshot the currently configured excluded domains.
+    #[must_use]
+    pub fn excluded_domains(&self) -> Vec<String> {
+        let mut domains = Vec::new();
+        unsafe {
+            ffi::nw_shim_proxy_config_enumerate_excluded_domains(
+                self.handle,
+                collect_string_trampoline,
+                std::ptr::addr_of_mut!(domains).cast(),
+            );
+        };
+        domains
     }
 }
 

@@ -37,6 +37,13 @@ impl PathMonitor {
     pub fn list_interfaces(&self) -> Vec<NetworkInterface> {
         list_interfaces_for_monitor(self.handle)
     }
+
+    /// Copy the latest path snapshot observed by the monitor.
+    #[must_use]
+    pub fn current_path(&self) -> Option<crate::path::Path> {
+        let handle = unsafe { ffi::nw_shim_path_monitor_copy_latest_path(self.handle) };
+        (!handle.is_null()).then_some(unsafe { crate::path::Path::from_raw(handle) })
+    }
 }
 
 impl Drop for PathMonitor {

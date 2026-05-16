@@ -86,12 +86,7 @@ impl TcpClient {
             .map_err(|e| NetworkError::InvalidArgument(format!("host NUL byte: {e}")))?;
         let mut status: c_int = 0;
         let handle = unsafe {
-            ffi::nw_shim_tcp_connect(
-                host_c.as_ptr(),
-                port,
-                c_int::from(use_tls),
-                &mut status,
-            )
+            ffi::nw_shim_tcp_connect(host_c.as_ptr(), port, c_int::from(use_tls), &mut status)
         };
         if status != ffi::NW_OK || handle.is_null() {
             return Err(from_status(status));
@@ -117,6 +112,27 @@ impl TcpClient {
             handle,
             _keepalives: keepalives,
         }
+    }
+
+    /// Copy the remote endpoint of the connection.
+    #[must_use]
+    pub fn endpoint(&self) -> Option<crate::endpoint::Endpoint> {
+        let handle = unsafe { ffi::nw_shim_connection_copy_endpoint(self.handle) };
+        (!handle.is_null()).then_some(unsafe { crate::endpoint::Endpoint::from_raw(handle) })
+    }
+
+    /// Copy the connection's parameters snapshot.
+    #[must_use]
+    pub fn parameters(&self) -> Option<ConnectionParameters> {
+        let handle = unsafe { ffi::nw_shim_connection_copy_parameters(self.handle) };
+        (!handle.is_null()).then_some(unsafe { ConnectionParameters::from_raw(handle) })
+    }
+
+    /// Copy the connection's current network path, if available.
+    #[must_use]
+    pub fn current_path(&self) -> Option<crate::path::Path> {
+        let handle = unsafe { ffi::nw_shim_connection_copy_current_path(self.handle) };
+        (!handle.is_null()).then_some(unsafe { crate::path::Path::from_raw(handle) })
     }
 
     /// Send `data` over the connection. Blocks until the framework has
