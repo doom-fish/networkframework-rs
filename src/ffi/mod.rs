@@ -83,6 +83,13 @@ extern "C" {
         max_len: usize,
         out_opcode: *mut c_int,
     ) -> isize;
+
+    pub fn nw_shim_quic_connect(
+        host: *const core::ffi::c_char,
+        port: u16,
+        alpn: *const core::ffi::c_char,
+        out_status: *mut c_int,
+    ) -> *mut c_void;
 }
 
 pub type BrowserServiceCallback = unsafe extern "C" fn(

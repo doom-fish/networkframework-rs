@@ -669,3 +669,80 @@ ssize_t nw_shim_ws_receive(void *handle, uint8_t *out_buf, size_t max_len, int *
     if (out_opcode) *out_opcode = op;
     return result;
 }
+
+// ---------------------------------------------------------------------
+// QUIC (single-stream) — v0.6
+// ---------------------------------------------------------------------
+// Builds a QUIC connection with one bidirectional stream by chaining
+// quic + IP into a custom nw_parameters_t. send/receive on the returned
+// handle work the same as the TCP variant.
+
+void *nw_shim_quic_connect(const char *host, uint16_t port, const char *alpn, int *out_status) {
+    if (!host) { if (out_status) *out_status = NW_INVALID_ARG; return NULL; }
+
+    nw_protocol_options_t quic_opts = nw_quic_create_options();
+    if (alpn && alpn[0]) {
+        nw_quic_add_tls_application_protocol(quic_opts, alpn);
+    }
+
+    nw_parameters_configure_protocol_block_t cfg_protocols =
+        ^(nw_protocol_options_t opts) {
+            (void)opts;
+        };
+    nw_parameters_t params = nw_parameters_create_secure_udp(
+        cfg_protocols,
+        NW_PARAMETERS_DEFAULT_CONFIGURATION);
+
+    nw_protocol_stack_t stack = nw_parameters_copy_default_protocol_stack(params);
+    nw_protocol_stack_prepend_application_protocol(stack, quic_opts);
+    nw_release(quic_opts);
+    nw_release(stack);
+
+    char port_str[8];
+    snprintf(port_str, sizeof(port_str), "%u", (unsigned)port);
+    nw_endpoint_t endpoint = nw_endpoint_create_host(host, port_str);
+    if (!endpoint) {
+        nw_release(params);
+        if (out_status) *out_status = NW_INVALID_ARG;
+        return NULL;
+    }
+
+    nw_connection_t conn = nw_connection_create(endpoint, params);
+    nw_release(endpoint);
+    nw_release(params);
+    if (!conn) { if (out_status) *out_status = NW_CONNECT_FAILED; return NULL; }
+
+    nw_conn_handle *h = (nw_conn_handle *)calloc(1, sizeof(nw_conn_handle));
+    h->conn = conn;
+    h->queue = dispatch_queue_create("networkframework-rs.quic", DISPATCH_QUEUE_SERIAL);
+    h->ready = dispatch_semaphore_create(0);
+    atomic_store(&h->state_code, 0);
+
+    nw_connection_set_queue(conn, h->queue);
+    nw_connection_set_state_changed_handler(conn, ^(nw_connection_state_t state, nw_error_t error) {
+        (void)error;
+        if (state == nw_connection_state_ready) {
+            atomic_store(&h->state_code, 1);
+            dispatch_semaphore_signal(h->ready);
+        } else if (state == nw_connection_state_cancelled) {
+            atomic_store(&h->state_code, 2);
+            dispatch_semaphore_signal(h->ready);
+        } else if (state == nw_connection_state_failed) {
+            atomic_store(&h->state_code, 3);
+            dispatch_semaphore_signal(h->ready);
+        }
+    });
+    nw_connection_start(conn);
+
+    dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, 30LL * NSEC_PER_SEC);
+    if (dispatch_semaphore_wait(h->ready, deadline) != 0
+        || atomic_load(&h->state_code) != 1) {
+        nw_connection_cancel(conn);
+        destroy_handle(h);
+        if (out_status) *out_status = NW_CONNECT_FAILED;
+        return NULL;
+    }
+
+    if (out_status) *out_status = NW_OK;
+    return h;
+}
