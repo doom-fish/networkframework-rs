@@ -90,6 +90,16 @@ extern "C" {
         alpn: *const core::ffi::c_char,
         out_status: *mut c_int,
     ) -> *mut c_void;
+
+    pub fn nw_shim_bonjour_advertise_start(
+        service_type: *const core::ffi::c_char,
+        service_name: *const core::ffi::c_char,
+        domain: *const core::ffi::c_char,
+        port: u16,
+        out_status: *mut c_int,
+    ) -> *mut c_void;
+
+    pub fn nw_shim_bonjour_advertise_stop(handle: *mut c_void);
 }
 
 pub type BrowserServiceCallback = unsafe extern "C" fn(

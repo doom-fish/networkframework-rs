@@ -746,3 +746,104 @@ void *nw_shim_quic_connect(const char *host, uint16_t port, const char *alpn, in
     if (out_status) *out_status = NW_OK;
     return h;
 }
+
+// ---------------------------------------------------------------------
+// Bonjour advertisement (nw_listener with a bonjour service endpoint)
+// ---------------------------------------------------------------------
+
+typedef struct nw_bonjour_advertise_handle {
+    nw_listener_t listener;
+    dispatch_queue_t queue;
+    dispatch_semaphore_t ready;
+    _Atomic int state_code;
+} nw_bonjour_advertise_handle;
+
+void *nw_shim_bonjour_advertise_start(
+    const char *service_type,
+    const char *service_name,
+    const char *domain,
+    uint16_t port,
+    int *out_status
+) {
+    if (!service_type || !service_name) {
+        if (out_status) *out_status = NW_INVALID_ARG;
+        return NULL;
+    }
+
+    nw_parameters_t params = nw_parameters_create_secure_tcp(
+        NW_PARAMETERS_DISABLE_PROTOCOL,
+        NW_PARAMETERS_DEFAULT_CONFIGURATION);
+
+    char port_str[8];
+    snprintf(port_str, sizeof(port_str), "%u", (unsigned)port);
+    nw_listener_t listener = nw_listener_create_with_port(port_str, params);
+    nw_release(params);
+    if (!listener) {
+        if (out_status) *out_status = NW_LISTEN_FAILED;
+        return NULL;
+    }
+
+    nw_advertise_descriptor_t adv = nw_advertise_descriptor_create_bonjour_service(
+        service_name,
+        service_type,
+        (domain && domain[0]) ? domain : NULL);
+    if (!adv) {
+        nw_release(listener);
+        if (out_status) *out_status = NW_INVALID_ARG;
+        return NULL;
+    }
+    nw_listener_set_advertise_descriptor(listener, adv);
+    nw_release(adv);
+
+    nw_bonjour_advertise_handle *h = (nw_bonjour_advertise_handle *)calloc(
+        1, sizeof(nw_bonjour_advertise_handle));
+    h->listener = listener;
+    h->queue = dispatch_queue_create("networkframework-rs.bonjour-adv", DISPATCH_QUEUE_SERIAL);
+    h->ready = dispatch_semaphore_create(0);
+    atomic_store(&h->state_code, 0);
+
+    nw_listener_set_queue(listener, h->queue);
+    nw_listener_set_state_changed_handler(listener, ^(nw_listener_state_t state, nw_error_t error) {
+        (void)error;
+        if (state == nw_listener_state_ready) {
+            atomic_store(&h->state_code, 1);
+            dispatch_semaphore_signal(h->ready);
+        } else if (state == nw_listener_state_cancelled) {
+            atomic_store(&h->state_code, 2);
+            dispatch_semaphore_signal(h->ready);
+        } else if (state == nw_listener_state_failed) {
+            atomic_store(&h->state_code, 3);
+            dispatch_semaphore_signal(h->ready);
+        }
+    });
+    nw_listener_set_new_connection_handler(listener, ^(nw_connection_t conn) {
+        // Drop inbound connections — we're advertising only.
+        nw_connection_cancel(conn);
+    });
+    nw_listener_start(listener);
+
+    dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, 10LL * NSEC_PER_SEC);
+    if (dispatch_semaphore_wait(h->ready, deadline) != 0
+        || atomic_load(&h->state_code) != 1) {
+        nw_listener_cancel(listener);
+        nw_release(h->listener);
+        dispatch_release(h->queue);
+        dispatch_release(h->ready);
+        free(h);
+        if (out_status) *out_status = NW_LISTEN_FAILED;
+        return NULL;
+    }
+
+    if (out_status) *out_status = NW_OK;
+    return h;
+}
+
+void nw_shim_bonjour_advertise_stop(void *handle) {
+    nw_bonjour_advertise_handle *h = (nw_bonjour_advertise_handle *)handle;
+    if (!h) return;
+    nw_listener_cancel(h->listener);
+    nw_release(h->listener);
+    dispatch_release(h->queue);
+    dispatch_release(h->ready);
+    free(h);
+}

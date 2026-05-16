@@ -153,3 +153,67 @@ where
         _callback: arc,
     })
 }
+
+/// RAII guard for a running Bonjour service advertisement. Drop to
+/// stop publishing the service to the local network.
+pub struct BonjourAdvertiser {
+    handle: *mut c_void,
+}
+
+unsafe impl Send for BonjourAdvertiser {}
+unsafe impl Sync for BonjourAdvertiser {}
+
+impl Drop for BonjourAdvertiser {
+    fn drop(&mut self) {
+        if !self.handle.is_null() {
+            unsafe { ffi::nw_shim_bonjour_advertise_stop(self.handle) };
+            self.handle = core::ptr::null_mut();
+        }
+    }
+}
+
+/// Publish a Bonjour service on the local network. The OS announces
+/// `service_name` of type `service_type` (e.g. `"_http._tcp"`) on
+/// the given TCP `port`.
+///
+/// Returned [`BonjourAdvertiser`] guard keeps the service alive
+/// until dropped. The listener accepts no connections — this is
+/// publish-only (use [`crate::TcpListener`] alongside for the
+/// accepting side).
+///
+/// # Errors
+///
+/// Returns [`NetworkError::InvalidArgument`] on NUL bytes in any
+/// string, or [`NetworkError::ListenFailed`] if Apple refuses.
+pub fn advertise_bonjour_service(
+    service_type: &str,
+    service_name: &str,
+    domain: Option<&str>,
+    port: u16,
+) -> Result<BonjourAdvertiser, NetworkError> {
+    let svc_type = CString::new(service_type)
+        .map_err(|e| NetworkError::InvalidArgument(format!("service_type NUL: {e}")))?;
+    let svc_name = CString::new(service_name)
+        .map_err(|e| NetworkError::InvalidArgument(format!("service_name NUL: {e}")))?;
+    let dom = match domain {
+        Some(d) => Some(
+            CString::new(d)
+                .map_err(|e| NetworkError::InvalidArgument(format!("domain NUL: {e}")))?,
+        ),
+        None => None,
+    };
+    let mut status: core::ffi::c_int = 0;
+    let handle = unsafe {
+        ffi::nw_shim_bonjour_advertise_start(
+            svc_type.as_ptr(),
+            svc_name.as_ptr(),
+            dom.as_ref().map_or(core::ptr::null(), |c| c.as_ptr()),
+            port,
+            &mut status,
+        )
+    };
+    if status != ffi::NW_OK || handle.is_null() {
+        return Err(crate::error::from_status(status));
+    }
+    Ok(BonjourAdvertiser { handle })
+}

@@ -16,7 +16,10 @@ pub mod quic;
 pub mod udp;
 pub mod websocket;
 
-pub use browser::{start_browser, Browser, BrowserEvent, DiscoveredService};
+pub use browser::{
+    advertise_bonjour_service, start_browser, BonjourAdvertiser, Browser, BrowserEvent,
+    DiscoveredService,
+};
 pub use client::TcpClient;
 pub use error::NetworkError;
 pub use listener::TcpListener;
@@ -27,7 +30,10 @@ pub use websocket::{Opcode, WebSocket, WsMessage};
 
 /// Common imports.
 pub mod prelude {
-    pub use crate::browser::{start_browser, Browser, BrowserEvent, DiscoveredService};
+    pub use crate::browser::{
+        advertise_bonjour_service, start_browser, BonjourAdvertiser, Browser, BrowserEvent,
+        DiscoveredService,
+    };
     pub use crate::client::TcpClient;
     pub use crate::error::NetworkError;
     pub use crate::listener::TcpListener;
