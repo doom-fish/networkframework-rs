@@ -38,4 +38,23 @@ extern "C" {
     pub fn nw_shim_listener_accept(handle: *mut c_void, out_status: *mut c_int) -> *mut c_void;
 
     pub fn nw_shim_listener_close(handle: *mut c_void);
+
+    pub fn nw_shim_udp_connect(
+        host: *const core::ffi::c_char,
+        port: u16,
+        out_status: *mut c_int,
+    ) -> *mut c_void;
+
+    pub fn nw_shim_path_monitor_start(
+        callback: PathMonitorCallback,
+        user_info: *mut c_void,
+    ) -> *mut c_void;
+
+    pub fn nw_shim_path_monitor_stop(handle: *mut c_void);
 }
+
+pub type PathMonitorCallback = unsafe extern "C" fn(
+    satisfied: c_int,
+    interface_type: c_int,
+    user_info: *mut c_void,
+);

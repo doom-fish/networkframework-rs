@@ -325,3 +325,113 @@ void nw_shim_listener_close(void *handle) {
     dispatch_release(h->accept_sem);
     free(h);
 }
+
+// ---------------------------------------------------------------------
+// UDP (datagram) connection
+// ---------------------------------------------------------------------
+
+void *nw_shim_udp_connect(const char *host, uint16_t port, int *out_status) {
+    if (!host) { if (out_status) *out_status = NW_INVALID_ARG; return NULL; }
+
+    char port_str[8];
+    snprintf(port_str, sizeof(port_str), "%u", (unsigned)port);
+    nw_endpoint_t endpoint = nw_endpoint_create_host(host, port_str);
+    if (!endpoint) { if (out_status) *out_status = NW_INVALID_ARG; return NULL; }
+
+    nw_parameters_t params = nw_parameters_create_secure_udp(
+        NW_PARAMETERS_DISABLE_PROTOCOL,
+        NW_PARAMETERS_DEFAULT_CONFIGURATION);
+
+    nw_connection_t conn = nw_connection_create(endpoint, params);
+    nw_release(endpoint);
+    nw_release(params);
+    if (!conn) { if (out_status) *out_status = NW_CONNECT_FAILED; return NULL; }
+
+    nw_conn_handle *h = (nw_conn_handle *)calloc(1, sizeof(nw_conn_handle));
+    h->conn = conn;
+    h->queue = dispatch_queue_create("networkframework-rs.udp", DISPATCH_QUEUE_SERIAL);
+    h->ready = dispatch_semaphore_create(0);
+    atomic_store(&h->state_code, 0);
+
+    nw_connection_set_queue(conn, h->queue);
+
+    nw_connection_set_state_changed_handler(conn, ^(nw_connection_state_t state, nw_error_t error) {
+        (void)error;
+        if (state == nw_connection_state_ready) {
+            atomic_store(&h->state_code, 1);
+            dispatch_semaphore_signal(h->ready);
+        } else if (state == nw_connection_state_cancelled) {
+            atomic_store(&h->state_code, 2);
+            dispatch_semaphore_signal(h->ready);
+        } else if (state == nw_connection_state_failed) {
+            atomic_store(&h->state_code, 3);
+            dispatch_semaphore_signal(h->ready);
+        }
+    });
+
+    nw_connection_start(conn);
+
+    dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, 10LL * NSEC_PER_SEC);
+    if (dispatch_semaphore_wait(h->ready, deadline) != 0
+        || atomic_load(&h->state_code) != 1) {
+        nw_connection_cancel(conn);
+        destroy_handle(h);
+        if (out_status) *out_status = NW_CONNECT_FAILED;
+        return NULL;
+    }
+
+    if (out_status) *out_status = NW_OK;
+    return h;
+}
+
+// UDP send / receive / close all use the same TCP shim entrypoints
+// (nw_connection_send / nw_connection_receive), so callers can just use
+// nw_shim_tcp_send / nw_shim_tcp_receive / nw_shim_tcp_close with a UDP
+// handle.
+
+// ---------------------------------------------------------------------
+// Path monitor (network reachability / interface changes)
+// ---------------------------------------------------------------------
+
+typedef struct nw_path_handle {
+    nw_path_monitor_t monitor;
+    dispatch_queue_t queue;
+    void (*callback)(int satisfied, int interface_type, void *user_info);
+    void *user_info;
+} nw_path_handle;
+
+// interface_type matches nw_interface_type_t:
+//   0=other, 1=wifi, 2=cellular, 3=wired, 4=loopback
+void *nw_shim_path_monitor_start(
+    void (*callback)(int satisfied, int interface_type, void *user_info),
+    void *user_info
+) {
+    nw_path_handle *h = (nw_path_handle *)calloc(1, sizeof(nw_path_handle));
+    h->monitor = nw_path_monitor_create();
+    h->queue = dispatch_queue_create("networkframework-rs.path", DISPATCH_QUEUE_SERIAL);
+    h->callback = callback;
+    h->user_info = user_info;
+
+    nw_path_monitor_set_queue(h->monitor, h->queue);
+    nw_path_monitor_set_update_handler(h->monitor, ^(nw_path_t path) {
+        if (!h->callback) return;
+        int satisfied = (nw_path_get_status(path) == nw_path_status_satisfied) ? 1 : 0;
+        int iface = 0;
+        if (nw_path_uses_interface_type(path, nw_interface_type_wifi)) iface = 1;
+        else if (nw_path_uses_interface_type(path, nw_interface_type_cellular)) iface = 2;
+        else if (nw_path_uses_interface_type(path, nw_interface_type_wired)) iface = 3;
+        else if (nw_path_uses_interface_type(path, nw_interface_type_loopback)) iface = 4;
+        h->callback(satisfied, iface, h->user_info);
+    });
+    nw_path_monitor_start(h->monitor);
+    return h;
+}
+
+void nw_shim_path_monitor_stop(void *handle) {
+    nw_path_handle *h = (nw_path_handle *)handle;
+    if (!h) return;
+    nw_path_monitor_cancel(h->monitor);
+    nw_release(h->monitor);
+    dispatch_release(h->queue);
+    free(h);
+}
