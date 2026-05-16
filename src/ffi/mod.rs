@@ -51,7 +51,24 @@ extern "C" {
     ) -> *mut c_void;
 
     pub fn nw_shim_path_monitor_stop(handle: *mut c_void);
+
+    pub fn nw_shim_browser_start(
+        service_type: *const core::ffi::c_char,
+        domain: *const core::ffi::c_char,
+        found_callback: BrowserServiceCallback,
+        lost_callback: BrowserServiceCallback,
+        user_info: *mut c_void,
+    ) -> *mut c_void;
+
+    pub fn nw_shim_browser_stop(handle: *mut c_void);
 }
+
+pub type BrowserServiceCallback = unsafe extern "C" fn(
+    name: *const core::ffi::c_char,
+    service_type: *const core::ffi::c_char,
+    domain: *const core::ffi::c_char,
+    user_info: *mut c_void,
+);
 
 pub type PathMonitorCallback = unsafe extern "C" fn(
     satisfied: c_int,

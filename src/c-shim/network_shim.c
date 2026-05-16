@@ -435,3 +435,88 @@ void nw_shim_path_monitor_stop(void *handle) {
     dispatch_release(h->queue);
     free(h);
 }
+
+// ---------------------------------------------------------------------
+// Bonjour browser (nw_browser)
+// ---------------------------------------------------------------------
+
+typedef struct nw_browser_handle {
+    nw_browser_t browser;
+    dispatch_queue_t queue;
+    void (*found_callback)(const char *name, const char *service_type,
+                           const char *domain, void *user_info);
+    void (*lost_callback)(const char *name, const char *service_type,
+                          const char *domain, void *user_info);
+    void *user_info;
+} nw_browser_handle;
+
+void *nw_shim_browser_start(
+    const char *service_type,
+    const char *domain,
+    void (*found_callback)(const char *name, const char *service_type,
+                           const char *domain, void *user_info),
+    void (*lost_callback)(const char *name, const char *service_type,
+                          const char *domain, void *user_info),
+    void *user_info
+) {
+    if (!service_type) return NULL;
+    nw_browse_descriptor_t desc = nw_browse_descriptor_create_bonjour_service(
+        service_type, domain);
+    if (!desc) return NULL;
+    nw_parameters_t params = nw_parameters_create();
+    nw_browser_t browser = nw_browser_create(desc, params);
+    nw_release(desc);
+    nw_release(params);
+    if (!browser) return NULL;
+
+    nw_browser_handle *h = (nw_browser_handle *)calloc(1, sizeof(nw_browser_handle));
+    h->browser = browser;
+    h->queue = dispatch_queue_create("networkframework-rs.browser", DISPATCH_QUEUE_SERIAL);
+    h->found_callback = found_callback;
+    h->lost_callback = lost_callback;
+    h->user_info = user_info;
+
+    nw_browser_set_queue(browser, h->queue);
+
+    nw_browser_set_browse_results_changed_handler(browser,
+        ^(nw_browse_result_t old_result, nw_browse_result_t new_result, bool batch_complete) {
+            (void)batch_complete;
+            if (!old_result && new_result) {
+                // added
+                nw_endpoint_t ep = nw_browse_result_copy_endpoint(new_result);
+                if (ep && h->found_callback) {
+                    const char *name = nw_endpoint_get_bonjour_service_name(ep);
+                    const char *type = nw_endpoint_get_bonjour_service_type(ep);
+                    const char *dom = nw_endpoint_get_bonjour_service_domain(ep);
+                    h->found_callback(
+                        name ? name : "", type ? type : "", dom ? dom : "",
+                        h->user_info);
+                }
+                if (ep) nw_release(ep);
+            } else if (old_result && !new_result) {
+                // removed
+                nw_endpoint_t ep = nw_browse_result_copy_endpoint(old_result);
+                if (ep && h->lost_callback) {
+                    const char *name = nw_endpoint_get_bonjour_service_name(ep);
+                    const char *type = nw_endpoint_get_bonjour_service_type(ep);
+                    const char *dom = nw_endpoint_get_bonjour_service_domain(ep);
+                    h->lost_callback(
+                        name ? name : "", type ? type : "", dom ? dom : "",
+                        h->user_info);
+                }
+                if (ep) nw_release(ep);
+            }
+        });
+
+    nw_browser_start(browser);
+    return h;
+}
+
+void nw_shim_browser_stop(void *handle) {
+    nw_browser_handle *h = (nw_browser_handle *)handle;
+    if (!h) return;
+    nw_browser_cancel(h->browser);
+    nw_release(h->browser);
+    dispatch_release(h->queue);
+    free(h);
+}
