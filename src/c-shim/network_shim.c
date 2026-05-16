@@ -3035,3 +3035,1182 @@ void nw_shim_quic_set_idle_timeout(void *options, uint32_t idle_timeout) {
     }
     nw_quic_set_idle_timeout((nw_protocol_options_t)options, idle_timeout);
 }
+
+
+uint64_t nw_shim_quic_get_initial_max_streams_bidirectional(void *options) {
+    return options ? nw_quic_get_initial_max_streams_bidirectional((nw_protocol_options_t)options) : 0;
+}
+
+void nw_shim_quic_set_initial_max_streams_bidirectional(void *options, uint64_t initial_max_streams_bidirectional) {
+    if (!options) {
+        return;
+    }
+    nw_quic_set_initial_max_streams_bidirectional((nw_protocol_options_t)options, initial_max_streams_bidirectional);
+}
+
+uint64_t nw_shim_quic_get_initial_max_streams_unidirectional(void *options) {
+    return options ? nw_quic_get_initial_max_streams_unidirectional((nw_protocol_options_t)options) : 0;
+}
+
+void nw_shim_quic_set_initial_max_streams_unidirectional(void *options, uint64_t initial_max_streams_unidirectional) {
+    if (!options) {
+        return;
+    }
+    nw_quic_set_initial_max_streams_unidirectional((nw_protocol_options_t)options, initial_max_streams_unidirectional);
+}
+
+uint64_t nw_shim_quic_get_initial_max_stream_data_bidirectional_local(void *options) {
+    return options ? nw_quic_get_initial_max_stream_data_bidirectional_local((nw_protocol_options_t)options) : 0;
+}
+
+void nw_shim_quic_set_initial_max_stream_data_bidirectional_local(void *options, uint64_t initial_max_stream_data_bidirectional_local) {
+    if (!options) {
+        return;
+    }
+    nw_quic_set_initial_max_stream_data_bidirectional_local((nw_protocol_options_t)options, initial_max_stream_data_bidirectional_local);
+}
+
+uint64_t nw_shim_quic_get_initial_max_stream_data_bidirectional_remote(void *options) {
+    return options ? nw_quic_get_initial_max_stream_data_bidirectional_remote((nw_protocol_options_t)options) : 0;
+}
+
+void nw_shim_quic_set_initial_max_stream_data_bidirectional_remote(void *options, uint64_t initial_max_stream_data_bidirectional_remote) {
+    if (!options) {
+        return;
+    }
+    nw_quic_set_initial_max_stream_data_bidirectional_remote((nw_protocol_options_t)options, initial_max_stream_data_bidirectional_remote);
+}
+
+uint64_t nw_shim_quic_get_initial_max_stream_data_unidirectional(void *options) {
+    return options ? nw_quic_get_initial_max_stream_data_unidirectional((nw_protocol_options_t)options) : 0;
+}
+
+void nw_shim_quic_set_initial_max_stream_data_unidirectional(void *options, uint64_t initial_max_stream_data_unidirectional) {
+    if (!options) {
+        return;
+    }
+    nw_quic_set_initial_max_stream_data_unidirectional((nw_protocol_options_t)options, initial_max_stream_data_unidirectional);
+}
+
+uint16_t nw_shim_quic_get_max_datagram_frame_size(void *options) {
+    return options ? nw_quic_get_max_datagram_frame_size((nw_protocol_options_t)options) : 0;
+}
+
+void nw_shim_quic_set_max_datagram_frame_size(void *options, uint16_t max_datagram_frame_size) {
+    if (!options) {
+        return;
+    }
+    nw_quic_set_max_datagram_frame_size((nw_protocol_options_t)options, max_datagram_frame_size);
+}
+
+static nw_protocol_metadata_t nw_shim_copy_quic_metadata_for_definition_from_connection(nw_connection_t connection) {
+    if (!connection) {
+        return NULL;
+    }
+    nw_protocol_definition_t definition = nw_protocol_copy_quic_definition();
+    if (!definition) {
+        return NULL;
+    }
+    nw_protocol_metadata_t metadata = nw_connection_copy_protocol_metadata(connection, definition);
+    nw_release(definition);
+    return metadata;
+}
+
+void *nw_shim_connection_copy_quic_metadata(void *handle) {
+    nw_conn_handle *h = (nw_conn_handle *)handle;
+    if (!h) {
+        return NULL;
+    }
+    return nw_shim_copy_quic_metadata_for_definition_from_connection(h->conn);
+}
+
+void *nw_shim_content_context_copy_quic_metadata(void *context) {
+    if (!context) {
+        return NULL;
+    }
+    nw_protocol_definition_t definition = nw_protocol_copy_quic_definition();
+    if (!definition) {
+        return NULL;
+    }
+    nw_protocol_metadata_t metadata = nw_content_context_copy_protocol_metadata((nw_content_context_t)context, definition);
+    nw_release(definition);
+    return metadata;
+}
+
+int nw_shim_protocol_metadata_is_quic(void *metadata) {
+    return metadata && nw_protocol_metadata_is_quic((nw_protocol_metadata_t)metadata) ? 1 : 0;
+}
+
+void *nw_shim_quic_copy_sec_protocol_options(void *options) {
+    return options ? nw_quic_copy_sec_protocol_options((nw_protocol_options_t)options) : NULL;
+}
+
+void *nw_shim_quic_copy_sec_protocol_metadata(void *metadata) {
+    return metadata ? nw_quic_copy_sec_protocol_metadata((nw_protocol_metadata_t)metadata) : NULL;
+}
+
+uint64_t nw_shim_quic_get_stream_id(void *metadata) {
+    return metadata ? nw_quic_get_stream_id((nw_protocol_metadata_t)metadata) : 0;
+}
+
+int nw_shim_quic_get_stream_type(void *metadata) {
+    return metadata ? (int)nw_quic_get_stream_type((nw_protocol_metadata_t)metadata) : 0;
+}
+
+uint64_t nw_shim_quic_get_stream_application_error(void *metadata) {
+    return metadata ? nw_quic_get_stream_application_error((nw_protocol_metadata_t)metadata) : UINT64_MAX;
+}
+
+void nw_shim_quic_set_stream_application_error(void *metadata, uint64_t application_error) {
+    if (!metadata) {
+        return;
+    }
+    nw_quic_set_stream_application_error((nw_protocol_metadata_t)metadata, application_error);
+}
+
+uint64_t nw_shim_quic_get_local_max_streams_bidirectional(void *metadata) {
+    return metadata ? nw_quic_get_local_max_streams_bidirectional((nw_protocol_metadata_t)metadata) : 0;
+}
+
+void nw_shim_quic_set_local_max_streams_bidirectional(void *metadata, uint64_t max_streams_bidirectional) {
+    if (!metadata) {
+        return;
+    }
+    nw_quic_set_local_max_streams_bidirectional((nw_protocol_metadata_t)metadata, max_streams_bidirectional);
+}
+
+uint64_t nw_shim_quic_get_local_max_streams_unidirectional(void *metadata) {
+    return metadata ? nw_quic_get_local_max_streams_unidirectional((nw_protocol_metadata_t)metadata) : 0;
+}
+
+void nw_shim_quic_set_local_max_streams_unidirectional(void *metadata, uint64_t max_streams_unidirectional) {
+    if (!metadata) {
+        return;
+    }
+    nw_quic_set_local_max_streams_unidirectional((nw_protocol_metadata_t)metadata, max_streams_unidirectional);
+}
+
+uint64_t nw_shim_quic_get_remote_max_streams_bidirectional(void *metadata) {
+    return metadata ? nw_quic_get_remote_max_streams_bidirectional((nw_protocol_metadata_t)metadata) : 0;
+}
+
+uint64_t nw_shim_quic_get_remote_max_streams_unidirectional(void *metadata) {
+    return metadata ? nw_quic_get_remote_max_streams_unidirectional((nw_protocol_metadata_t)metadata) : 0;
+}
+
+uint16_t nw_shim_quic_get_stream_usable_datagram_frame_size(void *metadata) {
+    return metadata ? nw_quic_get_stream_usable_datagram_frame_size((nw_protocol_metadata_t)metadata) : 0;
+}
+
+uint64_t nw_shim_quic_get_application_error(void *metadata) {
+    return metadata ? nw_quic_get_application_error((nw_protocol_metadata_t)metadata) : UINT64_MAX;
+}
+
+char *nw_shim_quic_copy_application_error_reason(void *metadata) {
+    if (!metadata) {
+        return NULL;
+    }
+    const char *reason = nw_quic_get_application_error_reason((nw_protocol_metadata_t)metadata);
+    return reason ? strdup(reason) : NULL;
+}
+
+void nw_shim_quic_set_application_error(void *metadata, uint64_t application_error, const char *reason) {
+    if (!metadata) {
+        return;
+    }
+    nw_quic_set_application_error((nw_protocol_metadata_t)metadata, application_error, reason);
+}
+
+uint16_t nw_shim_quic_get_keepalive_interval(void *metadata) {
+    return metadata ? nw_quic_get_keepalive_interval((nw_protocol_metadata_t)metadata) : 0;
+}
+
+void nw_shim_quic_set_keepalive_interval(void *metadata, uint16_t keepalive_interval) {
+    if (!metadata) {
+        return;
+    }
+    nw_quic_set_keepalive_interval((nw_protocol_metadata_t)metadata, keepalive_interval);
+}
+
+uint64_t nw_shim_quic_get_remote_idle_timeout(void *metadata) {
+    return metadata ? nw_quic_get_remote_idle_timeout((nw_protocol_metadata_t)metadata) : 0;
+}
+
+void *nw_shim_sec_retain(void *object) {
+    return object ? sec_retain(object) : NULL;
+}
+
+void nw_shim_sec_release(void *object) {
+    if (!object) {
+        return;
+    }
+    sec_release(object);
+}
+
+char *nw_shim_interface_copy_name(void *interface) {
+    if (!interface) {
+        return NULL;
+    }
+    const char *name = nw_interface_get_name((nw_interface_t)interface);
+    return name ? strdup(name) : NULL;
+}
+
+int nw_shim_interface_get_type(void *interface) {
+    return interface ? (int)nw_interface_get_type((nw_interface_t)interface) : 0;
+}
+
+uint32_t nw_shim_interface_get_index(void *interface) {
+    return interface ? nw_interface_get_index((nw_interface_t)interface) : 0;
+}
+
+static bool nw_shim_interface_matches(nw_interface_t interface, const char *name, int interface_type, uint32_t index) {
+    if (!interface) {
+        return false;
+    }
+    if (name && name[0] != '\0') {
+        const char *candidate = nw_interface_get_name(interface);
+        if (!candidate || strcmp(candidate, name) != 0) {
+            return false;
+        }
+    }
+    if ((int)nw_interface_get_type(interface) != interface_type) {
+        return false;
+    }
+    if (index != 0 && nw_interface_get_index(interface) != index) {
+        return false;
+    }
+    return true;
+}
+
+static nw_interface_t nw_shim_copy_matching_interface_from_path(nw_path_t path, const char *name, int interface_type, uint32_t index) {
+    if (!path) {
+        return NULL;
+    }
+    __block nw_interface_t result = NULL;
+    nw_path_enumerate_interfaces(path, ^bool(nw_interface_t interface) {
+        if (nw_shim_interface_matches(interface, name, interface_type, index)) {
+            result = nw_retain(interface);
+            return false;
+        }
+        return true;
+    });
+    return result;
+}
+
+static nw_interface_t nw_shim_copy_matching_interface(const char *name, int interface_type, uint32_t index) {
+    __block nw_path_t captured_path = NULL;
+    dispatch_queue_t queue = dispatch_queue_create("networkframework-rs.interface-lookup", DISPATCH_QUEUE_SERIAL);
+    dispatch_semaphore_t ready = dispatch_semaphore_create(0);
+    nw_path_monitor_t monitor = nw_path_monitor_create();
+    if (!monitor) {
+        dispatch_release(queue);
+        dispatch_release(ready);
+        return NULL;
+    }
+
+    nw_path_monitor_set_queue(monitor, queue);
+    nw_path_monitor_set_update_handler(monitor, ^(nw_path_t path) {
+        if (!captured_path && path) {
+            captured_path = nw_retain(path);
+            dispatch_semaphore_signal(ready);
+        }
+    });
+    nw_path_monitor_start(monitor);
+
+    dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, 5LL * NSEC_PER_SEC);
+    if (dispatch_semaphore_wait(ready, deadline) != 0) {
+        nw_path_monitor_cancel(monitor);
+        nw_release(monitor);
+        dispatch_release(queue);
+        dispatch_release(ready);
+        return NULL;
+    }
+
+    nw_interface_t interface = nw_shim_copy_matching_interface_from_path(captured_path, name, interface_type, index);
+    nw_path_monitor_cancel(monitor);
+    if (captured_path) {
+        nw_release(captured_path);
+    }
+    nw_release(monitor);
+    dispatch_release(queue);
+    dispatch_release(ready);
+    return interface;
+}
+
+void nw_shim_parameters_require_interface(void *parameters, const char *name, int interface_type, uint32_t index) {
+    if (!parameters) {
+        return;
+    }
+    if (!name && index == 0) {
+        nw_parameters_require_interface((nw_parameters_t)parameters, NULL);
+        return;
+    }
+    nw_interface_t interface = nw_shim_copy_matching_interface(name, interface_type, index);
+    nw_parameters_require_interface((nw_parameters_t)parameters, interface);
+    if (interface) {
+        nw_release(interface);
+    }
+}
+
+int nw_shim_parameters_copy_required_interface(void *parameters, char **out_name, int *out_type, uint32_t *out_index) {
+    if (out_name) {
+        *out_name = NULL;
+    }
+    if (out_type) {
+        *out_type = 0;
+    }
+    if (out_index) {
+        *out_index = 0;
+    }
+    if (!parameters) {
+        return 0;
+    }
+    nw_interface_t interface = nw_parameters_copy_required_interface((nw_parameters_t)parameters);
+    if (!interface) {
+        return 0;
+    }
+    if (out_name) {
+        const char *name = nw_interface_get_name(interface);
+        *out_name = name ? strdup(name) : NULL;
+    }
+    if (out_type) {
+        *out_type = (int)nw_interface_get_type(interface);
+    }
+    if (out_index) {
+        *out_index = nw_interface_get_index(interface);
+    }
+    nw_release(interface);
+    return 1;
+}
+
+void nw_shim_parameters_prohibit_interface(void *parameters, const char *name, int interface_type, uint32_t index) {
+    if (!parameters || !name) {
+        return;
+    }
+    nw_interface_t interface = nw_shim_copy_matching_interface(name, interface_type, index);
+    if (!interface) {
+        return;
+    }
+    nw_parameters_prohibit_interface((nw_parameters_t)parameters, interface);
+    nw_release(interface);
+}
+
+void nw_shim_parameters_clear_prohibited_interfaces(void *parameters) {
+    if (!parameters) {
+        return;
+    }
+    nw_parameters_clear_prohibited_interfaces((nw_parameters_t)parameters);
+}
+
+void **nw_shim_parameters_copy_prohibited_interfaces(void *parameters, size_t *out_count) {
+    if (out_count) {
+        *out_count = 0;
+    }
+    if (!parameters) {
+        return NULL;
+    }
+    __block size_t count = 0;
+    nw_parameters_iterate_prohibited_interfaces((nw_parameters_t)parameters, ^bool(nw_interface_t interface) {
+        (void)interface;
+        count += 1;
+        return true;
+    });
+    if (count == 0) {
+        return NULL;
+    }
+    void **items = (void **)calloc(count, sizeof(void *));
+    if (!items) {
+        return NULL;
+    }
+    __block size_t index = 0;
+    nw_parameters_iterate_prohibited_interfaces((nw_parameters_t)parameters, ^bool(nw_interface_t interface) {
+        if (index < count) {
+            items[index++] = nw_retain(interface);
+        }
+        return true;
+    });
+    if (out_count) {
+        *out_count = count;
+    }
+    return items;
+}
+
+void nw_shim_parameters_prohibit_interface_type(void *parameters, int interface_type) {
+    if (!parameters) {
+        return;
+    }
+    nw_parameters_prohibit_interface_type((nw_parameters_t)parameters, (nw_interface_type_t)interface_type);
+}
+
+void nw_shim_parameters_clear_prohibited_interface_types(void *parameters) {
+    if (!parameters) {
+        return;
+    }
+    nw_parameters_clear_prohibited_interface_types((nw_parameters_t)parameters);
+}
+
+int *nw_shim_parameters_copy_prohibited_interface_types(void *parameters, size_t *out_count) {
+    if (out_count) {
+        *out_count = 0;
+    }
+    if (!parameters) {
+        return NULL;
+    }
+    __block size_t count = 0;
+    nw_parameters_iterate_prohibited_interface_types((nw_parameters_t)parameters, ^bool(nw_interface_type_t interface_type) {
+        (void)interface_type;
+        count += 1;
+        return true;
+    });
+    if (count == 0) {
+        return NULL;
+    }
+    int *items = (int *)calloc(count, sizeof(int));
+    if (!items) {
+        return NULL;
+    }
+    __block size_t index = 0;
+    nw_parameters_iterate_prohibited_interface_types((nw_parameters_t)parameters, ^bool(nw_interface_type_t interface_type) {
+        if (index < count) {
+            items[index++] = (int)interface_type;
+        }
+        return true;
+    });
+    if (out_count) {
+        *out_count = count;
+    }
+    return items;
+}
+
+void nw_shim_parameters_set_reuse_local_address(void *parameters, int reuse_local_address) {
+    if (!parameters) {
+        return;
+    }
+    nw_parameters_set_reuse_local_address((nw_parameters_t)parameters, reuse_local_address != 0);
+}
+
+int nw_shim_parameters_get_reuse_local_address(void *parameters) {
+    return parameters && nw_parameters_get_reuse_local_address((nw_parameters_t)parameters) ? 1 : 0;
+}
+
+void nw_shim_parameters_set_local_endpoint(void *parameters, void *local_endpoint) {
+    if (!parameters) {
+        return;
+    }
+    nw_parameters_set_local_endpoint((nw_parameters_t)parameters, (nw_endpoint_t)local_endpoint);
+}
+
+void *nw_shim_parameters_copy_local_endpoint(void *parameters) {
+    return parameters ? nw_parameters_copy_local_endpoint((nw_parameters_t)parameters) : NULL;
+}
+
+void nw_shim_parameters_set_include_peer_to_peer(void *parameters, int include_peer_to_peer) {
+    if (!parameters) {
+        return;
+    }
+    nw_parameters_set_include_peer_to_peer((nw_parameters_t)parameters, include_peer_to_peer != 0);
+}
+
+int nw_shim_parameters_get_include_peer_to_peer(void *parameters) {
+    return parameters && nw_parameters_get_include_peer_to_peer((nw_parameters_t)parameters) ? 1 : 0;
+}
+
+void nw_shim_parameters_set_fast_open_enabled(void *parameters, int fast_open_enabled) {
+    if (!parameters) {
+        return;
+    }
+    nw_parameters_set_fast_open_enabled((nw_parameters_t)parameters, fast_open_enabled != 0);
+}
+
+int nw_shim_parameters_get_fast_open_enabled(void *parameters) {
+    return parameters && nw_parameters_get_fast_open_enabled((nw_parameters_t)parameters) ? 1 : 0;
+}
+
+void nw_shim_parameters_set_service_class(void *parameters, int service_class) {
+    if (!parameters) {
+        return;
+    }
+    nw_parameters_set_service_class((nw_parameters_t)parameters, (nw_service_class_t)service_class);
+}
+
+int nw_shim_parameters_get_service_class(void *parameters) {
+    return parameters ? (int)nw_parameters_get_service_class((nw_parameters_t)parameters) : 0;
+}
+
+void nw_shim_parameters_set_multipath_service(void *parameters, int multipath_service) {
+    if (!parameters) {
+        return;
+    }
+    nw_parameters_set_multipath_service((nw_parameters_t)parameters, (nw_multipath_service_t)multipath_service);
+}
+
+int nw_shim_parameters_get_multipath_service(void *parameters) {
+    return parameters ? (int)nw_parameters_get_multipath_service((nw_parameters_t)parameters) : 0;
+}
+
+void *nw_shim_parameters_copy_default_protocol_stack(void *parameters) {
+    return parameters ? nw_parameters_copy_default_protocol_stack((nw_parameters_t)parameters) : NULL;
+}
+
+void nw_shim_protocol_stack_clear_application_protocols(void *stack) {
+    if (!stack) {
+        return;
+    }
+    nw_protocol_stack_clear_application_protocols((nw_protocol_stack_t)stack);
+}
+
+void **nw_shim_protocol_stack_copy_application_protocols(void *stack, size_t *out_count) {
+    if (out_count) {
+        *out_count = 0;
+    }
+    if (!stack) {
+        return NULL;
+    }
+    __block size_t count = 0;
+    nw_protocol_stack_iterate_application_protocols((nw_protocol_stack_t)stack, ^(nw_protocol_options_t protocol) {
+        (void)protocol;
+        count += 1;
+    });
+    if (count == 0) {
+        return NULL;
+    }
+    void **items = (void **)calloc(count, sizeof(void *));
+    if (!items) {
+        return NULL;
+    }
+    __block size_t index = 0;
+    nw_protocol_stack_iterate_application_protocols((nw_protocol_stack_t)stack, ^(nw_protocol_options_t protocol) {
+        if (index < count) {
+            items[index++] = nw_retain(protocol);
+        }
+    });
+    if (out_count) {
+        *out_count = count;
+    }
+    return items;
+}
+
+void *nw_shim_protocol_stack_copy_transport_protocol(void *stack) {
+    return stack ? nw_protocol_stack_copy_transport_protocol((nw_protocol_stack_t)stack) : NULL;
+}
+
+void nw_shim_protocol_stack_set_transport_protocol(void *stack, void *protocol) {
+    if (!stack) {
+        return;
+    }
+    nw_protocol_stack_set_transport_protocol((nw_protocol_stack_t)stack, (nw_protocol_options_t)protocol);
+}
+
+void *nw_shim_protocol_stack_copy_internet_protocol(void *stack) {
+    return stack ? nw_protocol_stack_copy_internet_protocol((nw_protocol_stack_t)stack) : NULL;
+}
+
+void nw_shim_parameters_set_local_only(void *parameters, int local_only) {
+    if (!parameters) {
+        return;
+    }
+    nw_parameters_set_local_only((nw_parameters_t)parameters, local_only != 0);
+}
+
+int nw_shim_parameters_get_local_only(void *parameters) {
+    return parameters && nw_parameters_get_local_only((nw_parameters_t)parameters) ? 1 : 0;
+}
+
+int nw_shim_parameters_get_prefer_no_proxy(void *parameters) {
+    return parameters && nw_parameters_get_prefer_no_proxy((nw_parameters_t)parameters) ? 1 : 0;
+}
+
+void nw_shim_parameters_set_expired_dns_behavior(void *parameters, int expired_dns_behavior) {
+    if (!parameters) {
+        return;
+    }
+    nw_parameters_set_expired_dns_behavior((nw_parameters_t)parameters, (nw_parameters_expired_dns_behavior_t)expired_dns_behavior);
+}
+
+int nw_shim_parameters_get_expired_dns_behavior(void *parameters) {
+    return parameters ? (int)nw_parameters_get_expired_dns_behavior((nw_parameters_t)parameters) : 0;
+}
+
+void nw_shim_parameters_set_requires_dnssec_validation(void *parameters, int requires_dnssec_validation) {
+    if (!parameters) {
+        return;
+    }
+    nw_parameters_set_requires_dnssec_validation((nw_parameters_t)parameters, requires_dnssec_validation != 0);
+}
+
+int nw_shim_parameters_requires_dnssec_validation(void *parameters) {
+    return parameters && nw_parameters_requires_dnssec_validation((nw_parameters_t)parameters) ? 1 : 0;
+}
+
+void *nw_shim_connection_copy_establishment_report(void *handle) {
+    nw_conn_handle *h = (nw_conn_handle *)handle;
+    if (!h) {
+        return NULL;
+    }
+    __block nw_establishment_report_t report = NULL;
+    dispatch_semaphore_t ready = dispatch_semaphore_create(0);
+    nw_connection_access_establishment_report(h->conn, h->queue, ^(nw_establishment_report_t accessed_report) {
+        if (accessed_report) {
+            report = nw_retain(accessed_report);
+        }
+        dispatch_semaphore_signal(ready);
+    });
+    dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, 30LL * NSEC_PER_SEC);
+    if (dispatch_semaphore_wait(ready, deadline) != 0) {
+        dispatch_release(ready);
+        if (report) {
+            nw_release(report);
+        }
+        return NULL;
+    }
+    dispatch_release(ready);
+    return report;
+}
+
+uint64_t nw_shim_establishment_report_get_duration_milliseconds(void *report) {
+    return report ? nw_establishment_report_get_duration_milliseconds((nw_establishment_report_t)report) : 0;
+}
+
+uint64_t nw_shim_establishment_report_get_attempt_started_after_milliseconds(void *report) {
+    return report ? nw_establishment_report_get_attempt_started_after_milliseconds((nw_establishment_report_t)report) : 0;
+}
+
+uint32_t nw_shim_establishment_report_get_previous_attempt_count(void *report) {
+    return report ? nw_establishment_report_get_previous_attempt_count((nw_establishment_report_t)report) : 0;
+}
+
+int nw_shim_establishment_report_get_used_proxy(void *report) {
+    return report && nw_establishment_report_get_used_proxy((nw_establishment_report_t)report) ? 1 : 0;
+}
+
+int nw_shim_establishment_report_get_proxy_configured(void *report) {
+    return report && nw_establishment_report_get_proxy_configured((nw_establishment_report_t)report) ? 1 : 0;
+}
+
+void *nw_shim_establishment_report_copy_proxy_endpoint(void *report) {
+    return report ? nw_establishment_report_copy_proxy_endpoint((nw_establishment_report_t)report) : NULL;
+}
+
+nw_shim_establishment_protocol_info *nw_shim_establishment_report_copy_protocols(void *report, size_t *out_count) {
+    if (out_count) {
+        *out_count = 0;
+    }
+    if (!report) {
+        return NULL;
+    }
+    __block size_t count = 0;
+    nw_establishment_report_enumerate_protocols((nw_establishment_report_t)report, ^bool(nw_protocol_definition_t protocol, uint64_t handshake_milliseconds, uint64_t handshake_rtt_milliseconds) {
+        (void)protocol;
+        (void)handshake_milliseconds;
+        (void)handshake_rtt_milliseconds;
+        count += 1;
+        return true;
+    });
+    if (count == 0) {
+        return NULL;
+    }
+    nw_shim_establishment_protocol_info *items = (nw_shim_establishment_protocol_info *)calloc(count, sizeof(nw_shim_establishment_protocol_info));
+    if (!items) {
+        return NULL;
+    }
+    __block size_t index = 0;
+    nw_establishment_report_enumerate_protocols((nw_establishment_report_t)report, ^bool(nw_protocol_definition_t protocol, uint64_t handshake_milliseconds, uint64_t handshake_rtt_milliseconds) {
+        if (index < count) {
+            items[index].protocol_definition = protocol ? nw_retain(protocol) : NULL;
+            items[index].handshake_milliseconds = handshake_milliseconds;
+            items[index].handshake_rtt_milliseconds = handshake_rtt_milliseconds;
+            index += 1;
+        }
+        return true;
+    });
+    if (out_count) {
+        *out_count = count;
+    }
+    return items;
+}
+
+nw_shim_resolution_step_info *nw_shim_establishment_report_copy_resolutions(void *report, size_t *out_count) {
+    if (out_count) {
+        *out_count = 0;
+    }
+    if (!report) {
+        return NULL;
+    }
+    __block size_t count = 0;
+    nw_establishment_report_enumerate_resolutions((nw_establishment_report_t)report, ^bool(nw_report_resolution_source_t source, uint64_t milliseconds, uint32_t endpoint_count, nw_endpoint_t successful_endpoint, nw_endpoint_t preferred_endpoint) {
+        (void)source;
+        (void)milliseconds;
+        (void)endpoint_count;
+        (void)successful_endpoint;
+        (void)preferred_endpoint;
+        count += 1;
+        return true;
+    });
+    if (count == 0) {
+        return NULL;
+    }
+    nw_shim_resolution_step_info *items = (nw_shim_resolution_step_info *)calloc(count, sizeof(nw_shim_resolution_step_info));
+    if (!items) {
+        return NULL;
+    }
+    __block size_t index = 0;
+    nw_establishment_report_enumerate_resolutions((nw_establishment_report_t)report, ^bool(nw_report_resolution_source_t source, uint64_t milliseconds, uint32_t endpoint_count, nw_endpoint_t successful_endpoint, nw_endpoint_t preferred_endpoint) {
+        if (index < count) {
+            items[index].source = (int)source;
+            items[index].milliseconds = milliseconds;
+            items[index].endpoint_count = endpoint_count;
+            items[index].successful_endpoint = successful_endpoint ? nw_retain(successful_endpoint) : NULL;
+            items[index].preferred_endpoint = preferred_endpoint ? nw_retain(preferred_endpoint) : NULL;
+            index += 1;
+        }
+        return true;
+    });
+    if (out_count) {
+        *out_count = count;
+    }
+    return items;
+}
+
+void **nw_shim_establishment_report_copy_resolution_reports(void *report, size_t *out_count) {
+    if (out_count) {
+        *out_count = 0;
+    }
+    if (!report) {
+        return NULL;
+    }
+    __block size_t count = 0;
+    nw_establishment_report_enumerate_resolution_reports((nw_establishment_report_t)report, ^bool(nw_resolution_report_t resolution_report) {
+        (void)resolution_report;
+        count += 1;
+        return true;
+    });
+    if (count == 0) {
+        return NULL;
+    }
+    void **items = (void **)calloc(count, sizeof(void *));
+    if (!items) {
+        return NULL;
+    }
+    __block size_t index = 0;
+    nw_establishment_report_enumerate_resolution_reports((nw_establishment_report_t)report, ^bool(nw_resolution_report_t resolution_report) {
+        if (index < count) {
+            items[index++] = resolution_report ? nw_retain(resolution_report) : NULL;
+        }
+        return true;
+    });
+    if (out_count) {
+        *out_count = count;
+    }
+    return items;
+}
+
+int nw_shim_resolution_report_get_source(void *report) {
+    return report ? (int)nw_resolution_report_get_source((nw_resolution_report_t)report) : 0;
+}
+
+uint64_t nw_shim_resolution_report_get_milliseconds(void *report) {
+    return report ? nw_resolution_report_get_milliseconds((nw_resolution_report_t)report) : 0;
+}
+
+uint32_t nw_shim_resolution_report_get_endpoint_count(void *report) {
+    return report ? nw_resolution_report_get_endpoint_count((nw_resolution_report_t)report) : 0;
+}
+
+void *nw_shim_resolution_report_copy_successful_endpoint(void *report) {
+    return report ? nw_resolution_report_copy_successful_endpoint((nw_resolution_report_t)report) : NULL;
+}
+
+void *nw_shim_resolution_report_copy_preferred_endpoint(void *report) {
+    return report ? nw_resolution_report_copy_preferred_endpoint((nw_resolution_report_t)report) : NULL;
+}
+
+int nw_shim_resolution_report_get_protocol(void *report) {
+    return report ? (int)nw_resolution_report_get_protocol((nw_resolution_report_t)report) : 0;
+}
+
+void *nw_shim_connection_create_data_transfer_report(void *handle) {
+    nw_conn_handle *h = (nw_conn_handle *)handle;
+    if (!h) {
+        return NULL;
+    }
+    return nw_connection_create_new_data_transfer_report(h->conn);
+}
+
+int nw_shim_data_transfer_report_collect(void *report) {
+    if (!report) {
+        return NW_INVALID_ARG;
+    }
+    dispatch_queue_t queue = dispatch_queue_create("networkframework-rs.data-transfer-report", DISPATCH_QUEUE_SERIAL);
+    dispatch_semaphore_t ready = dispatch_semaphore_create(0);
+    nw_data_transfer_report_collect((nw_data_transfer_report_t)report, queue, ^(nw_data_transfer_report_t collected_report) {
+        (void)collected_report;
+        dispatch_semaphore_signal(ready);
+    });
+    dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, 30LL * NSEC_PER_SEC);
+    int status = dispatch_semaphore_wait(ready, deadline) == 0 ? NW_OK : NW_TIMEOUT;
+    dispatch_release(queue);
+    dispatch_release(ready);
+    return status;
+}
+
+int nw_shim_data_transfer_report_get_state(void *report) {
+    return report ? (int)nw_data_transfer_report_get_state((nw_data_transfer_report_t)report) : 0;
+}
+
+uint32_t nw_shim_data_transfer_report_all_paths(void) {
+    return NW_ALL_PATHS;
+}
+
+uint64_t nw_shim_data_transfer_report_get_duration_milliseconds(void *report) {
+    return report ? nw_data_transfer_report_get_duration_milliseconds((nw_data_transfer_report_t)report) : 0;
+}
+
+uint32_t nw_shim_data_transfer_report_get_path_count(void *report) {
+    return report ? nw_data_transfer_report_get_path_count((nw_data_transfer_report_t)report) : 0;
+}
+
+uint64_t nw_shim_data_transfer_report_get_received_ip_packet_count(void *report, uint32_t path_index) {
+    return report ? nw_data_transfer_report_get_received_ip_packet_count((nw_data_transfer_report_t)report, path_index) : 0;
+}
+
+uint64_t nw_shim_data_transfer_report_get_sent_ip_packet_count(void *report, uint32_t path_index) {
+    return report ? nw_data_transfer_report_get_sent_ip_packet_count((nw_data_transfer_report_t)report, path_index) : 0;
+}
+
+uint64_t nw_shim_data_transfer_report_get_received_transport_byte_count(void *report, uint32_t path_index) {
+    return report ? nw_data_transfer_report_get_received_transport_byte_count((nw_data_transfer_report_t)report, path_index) : 0;
+}
+
+uint64_t nw_shim_data_transfer_report_get_received_transport_duplicate_byte_count(void *report, uint32_t path_index) {
+    return report ? nw_data_transfer_report_get_received_transport_duplicate_byte_count((nw_data_transfer_report_t)report, path_index) : 0;
+}
+
+uint64_t nw_shim_data_transfer_report_get_received_transport_out_of_order_byte_count(void *report, uint32_t path_index) {
+    return report ? nw_data_transfer_report_get_received_transport_out_of_order_byte_count((nw_data_transfer_report_t)report, path_index) : 0;
+}
+
+uint64_t nw_shim_data_transfer_report_get_sent_transport_byte_count(void *report, uint32_t path_index) {
+    return report ? nw_data_transfer_report_get_sent_transport_byte_count((nw_data_transfer_report_t)report, path_index) : 0;
+}
+
+uint64_t nw_shim_data_transfer_report_get_sent_transport_retransmitted_byte_count(void *report, uint32_t path_index) {
+    return report ? nw_data_transfer_report_get_sent_transport_retransmitted_byte_count((nw_data_transfer_report_t)report, path_index) : 0;
+}
+
+uint64_t nw_shim_data_transfer_report_get_transport_smoothed_rtt_milliseconds(void *report, uint32_t path_index) {
+    return report ? nw_data_transfer_report_get_transport_smoothed_rtt_milliseconds((nw_data_transfer_report_t)report, path_index) : 0;
+}
+
+uint64_t nw_shim_data_transfer_report_get_transport_minimum_rtt_milliseconds(void *report, uint32_t path_index) {
+    return report ? nw_data_transfer_report_get_transport_minimum_rtt_milliseconds((nw_data_transfer_report_t)report, path_index) : 0;
+}
+
+uint64_t nw_shim_data_transfer_report_get_transport_rtt_variance(void *report, uint32_t path_index) {
+    return report ? nw_data_transfer_report_get_transport_rtt_variance((nw_data_transfer_report_t)report, path_index) : 0;
+}
+
+uint64_t nw_shim_data_transfer_report_get_received_application_byte_count(void *report, uint32_t path_index) {
+    return report ? nw_data_transfer_report_get_received_application_byte_count((nw_data_transfer_report_t)report, path_index) : 0;
+}
+
+uint64_t nw_shim_data_transfer_report_get_sent_application_byte_count(void *report, uint32_t path_index) {
+    return report ? nw_data_transfer_report_get_sent_application_byte_count((nw_data_transfer_report_t)report, path_index) : 0;
+}
+
+void *nw_shim_data_transfer_report_copy_path_interface(void *report, uint32_t path_index) {
+    return report ? nw_data_transfer_report_copy_path_interface((nw_data_transfer_report_t)report, path_index) : NULL;
+}
+
+int nw_shim_data_transfer_report_get_path_radio_type(void *report, uint32_t path_index) {
+    return report ? (int)nw_data_transfer_report_get_path_radio_type((nw_data_transfer_report_t)report, path_index) : 0;
+}
+
+size_t nw_shim_endpoint_copy_address(void *endpoint, void *out_buffer, size_t out_buffer_length) {
+    if (!endpoint) {
+        return 0;
+    }
+    const struct sockaddr *address = nw_endpoint_get_address((nw_endpoint_t)endpoint);
+    if (!address) {
+        return 0;
+    }
+    size_t address_length = address->sa_len;
+    if (address_length == 0) {
+        switch (address->sa_family) {
+            case AF_INET:
+                address_length = sizeof(struct sockaddr_in);
+                break;
+            case AF_INET6:
+                address_length = sizeof(struct sockaddr_in6);
+                break;
+            default:
+                address_length = sizeof(struct sockaddr);
+                break;
+        }
+    }
+    if (out_buffer && out_buffer_length >= address_length) {
+        memcpy(out_buffer, address, address_length);
+    }
+    return address_length;
+}
+
+void *nw_shim_endpoint_copy_txt_record(void *endpoint) {
+    return endpoint ? nw_endpoint_copy_txt_record((nw_endpoint_t)endpoint) : NULL;
+}
+
+void *nw_shim_txt_record_create_with_bytes(const uint8_t *txt_bytes, size_t txt_length) {
+    if (!txt_bytes || txt_length == 0) {
+        return NULL;
+    }
+    return nw_txt_record_create_with_bytes(txt_bytes, txt_length);
+}
+
+void *nw_shim_txt_record_create_dictionary(void) {
+    return nw_txt_record_create_dictionary();
+}
+
+void *nw_shim_txt_record_copy(void *txt_record) {
+    return txt_record ? nw_txt_record_copy((nw_txt_record_t)txt_record) : NULL;
+}
+
+int nw_shim_txt_record_find_key(void *txt_record, const char *key) {
+    if (!txt_record || !key) {
+        return 0;
+    }
+    return (int)nw_txt_record_find_key((nw_txt_record_t)txt_record, key);
+}
+
+uint8_t *nw_shim_txt_record_copy_value(void *txt_record, const char *key, size_t *out_value_length, int *out_found) {
+    if (out_value_length) {
+        *out_value_length = 0;
+    }
+    if (out_found) {
+        *out_found = 0;
+    }
+    if (!txt_record || !key) {
+        return NULL;
+    }
+    __block int found = 0;
+    __block uint8_t *bytes = NULL;
+    __block size_t length = 0;
+    nw_txt_record_access_key((nw_txt_record_t)txt_record, key, ^bool(const char *access_key, const nw_txt_record_find_key_t access_found, const uint8_t *value, const size_t value_len) {
+        (void)access_key;
+        found = (int)access_found;
+        if (value && value_len > 0) {
+            bytes = (uint8_t *)malloc(value_len);
+            if (bytes) {
+                memcpy(bytes, value, value_len);
+                length = value_len;
+            }
+        }
+        return true;
+    });
+    if (out_value_length) {
+        *out_value_length = length;
+    }
+    if (out_found) {
+        *out_found = found;
+    }
+    return bytes;
+}
+
+int nw_shim_txt_record_set_key(void *txt_record, const char *key, const uint8_t *value, size_t value_length) {
+    if (!txt_record || !key) {
+        return 0;
+    }
+    return nw_txt_record_set_key((nw_txt_record_t)txt_record, key, value, value_length) ? 1 : 0;
+}
+
+int nw_shim_txt_record_remove_key(void *txt_record, const char *key) {
+    if (!txt_record || !key) {
+        return 0;
+    }
+    return nw_txt_record_remove_key((nw_txt_record_t)txt_record, key) ? 1 : 0;
+}
+
+size_t nw_shim_txt_record_get_key_count(void *txt_record) {
+    return txt_record ? nw_txt_record_get_key_count((nw_txt_record_t)txt_record) : 0;
+}
+
+uint8_t *nw_shim_txt_record_copy_bytes(void *txt_record, size_t *out_length) {
+    if (out_length) {
+        *out_length = 0;
+    }
+    if (!txt_record) {
+        return NULL;
+    }
+    __block uint8_t *bytes = NULL;
+    __block size_t length = 0;
+    nw_txt_record_access_bytes((nw_txt_record_t)txt_record, ^bool(const uint8_t *raw_txt_record, size_t raw_length) {
+        if (raw_txt_record && raw_length > 0) {
+            bytes = (uint8_t *)malloc(raw_length);
+            if (bytes) {
+                memcpy(bytes, raw_txt_record, raw_length);
+                length = raw_length;
+            }
+        }
+        return true;
+    });
+    if (out_length) {
+        *out_length = length;
+    }
+    return bytes;
+}
+
+int nw_shim_txt_record_apply(void *txt_record, TxtRecordEntryCallback callback, void *user_info) {
+    if (!txt_record || !callback) {
+        return 0;
+    }
+    __block int count = 0;
+    nw_txt_record_apply((nw_txt_record_t)txt_record, ^bool(const char *key, const nw_txt_record_find_key_t found, const uint8_t *value, const size_t value_len) {
+        count += 1;
+        return callback(key ? key : "", (int)found, value, value_len, user_info) != 0;
+    });
+    return count;
+}
+
+int nw_shim_txt_record_is_dictionary(void *txt_record) {
+    return txt_record && nw_txt_record_is_dictionary((nw_txt_record_t)txt_record) ? 1 : 0;
+}
+
+int nw_shim_txt_record_is_equal(void *txt_record, void *other_txt_record) {
+    if (!txt_record || !other_txt_record) {
+        return 0;
+    }
+    return nw_txt_record_is_equal((nw_txt_record_t)txt_record, (nw_txt_record_t)other_txt_record) ? 1 : 0;
+}
+
+typedef struct nw_ethernet_channel_handle {
+    nw_ethernet_channel_t channel;
+    dispatch_queue_t queue;
+} nw_ethernet_channel_handle;
+
+static void nw_shim_destroy_ethernet_channel_handle(nw_ethernet_channel_handle *handle) {
+    if (!handle) {
+        return;
+    }
+    if (handle->channel) {
+        nw_release(handle->channel);
+    }
+    if (handle->queue) {
+        dispatch_release(handle->queue);
+    }
+    free(handle);
+}
+
+static nw_ethernet_channel_handle *nw_shim_create_ethernet_channel_handle(nw_ethernet_channel_t channel) {
+    if (!channel) {
+        return NULL;
+    }
+    nw_ethernet_channel_handle *handle = (nw_ethernet_channel_handle *)calloc(1, sizeof(nw_ethernet_channel_handle));
+    if (!handle) {
+        nw_release(channel);
+        return NULL;
+    }
+    handle->channel = channel;
+    handle->queue = dispatch_queue_create("networkframework-rs.ethernet-channel", DISPATCH_QUEUE_SERIAL);
+    nw_ethernet_channel_set_queue(channel, handle->queue);
+    return handle;
+}
+
+void *nw_shim_ethernet_channel_create(uint16_t ether_type, const char *name, int interface_type, uint32_t index) {
+    if (!name) {
+        return NULL;
+    }
+    nw_interface_t interface = nw_shim_copy_matching_interface(name, interface_type, index);
+    if (!interface) {
+        return NULL;
+    }
+    nw_ethernet_channel_t channel = nw_ethernet_channel_create(ether_type, interface);
+    nw_release(interface);
+    return nw_shim_create_ethernet_channel_handle(channel);
+}
+
+void *nw_shim_ethernet_channel_create_with_parameters(uint16_t ether_type, const char *name, int interface_type, uint32_t index, void *parameters) {
+    if (!name || !parameters) {
+        return NULL;
+    }
+    nw_interface_t interface = nw_shim_copy_matching_interface(name, interface_type, index);
+    if (!interface) {
+        return NULL;
+    }
+    nw_ethernet_channel_t channel = nw_ethernet_channel_create_with_parameters(ether_type, interface, (nw_parameters_t)parameters);
+    nw_release(interface);
+    return nw_shim_create_ethernet_channel_handle(channel);
+}
+
+void nw_shim_ethernet_channel_set_state_changed_handler(void *handle, EthernetChannelStateCallback callback, void *user_info) {
+    nw_ethernet_channel_handle *h = (nw_ethernet_channel_handle *)handle;
+    if (!h) {
+        return;
+    }
+    nw_ethernet_channel_set_state_changed_handler(h->channel, callback ? ^(nw_ethernet_channel_state_t state, nw_error_t error) {
+        (void)error;
+        callback((int)state, user_info);
+    } : NULL);
+}
+
+void nw_shim_ethernet_channel_set_receive_handler(void *handle, EthernetChannelReceiveCallback callback, void *user_info) {
+    nw_ethernet_channel_handle *h = (nw_ethernet_channel_handle *)handle;
+    if (!h) {
+        return;
+    }
+    nw_ethernet_channel_set_receive_handler(h->channel, callback ? ^(dispatch_data_t content, uint16_t vlan_tag, nw_ethernet_address_t local_address, nw_ethernet_address_t remote_address) {
+        uint8_t *bytes = NULL;
+        size_t length = nw_shim_copy_dispatch_data(content, &bytes);
+        callback(bytes, length, vlan_tag, local_address, remote_address, user_info);
+        if (bytes) {
+            free(bytes);
+        }
+    } : NULL);
+}
+
+uint32_t nw_shim_ethernet_channel_get_maximum_payload_size(void *handle) {
+    nw_ethernet_channel_handle *h = (nw_ethernet_channel_handle *)handle;
+    return h ? nw_ethernet_channel_get_maximum_payload_size(h->channel) : 0;
+}
+
+void nw_shim_ethernet_channel_start(void *handle) {
+    nw_ethernet_channel_handle *h = (nw_ethernet_channel_handle *)handle;
+    if (!h) {
+        return;
+    }
+    nw_ethernet_channel_start(h->channel);
+}
+
+void nw_shim_ethernet_channel_cancel(void *handle) {
+    nw_ethernet_channel_handle *h = (nw_ethernet_channel_handle *)handle;
+    if (!h) {
+        return;
+    }
+    nw_ethernet_channel_cancel(h->channel);
+}
+
+int nw_shim_ethernet_channel_send(void *handle, const uint8_t *data, size_t len, uint16_t vlan_tag, const uint8_t *remote_address) {
+    nw_ethernet_channel_handle *h = (nw_ethernet_channel_handle *)handle;
+    if (!h || !data || !remote_address) {
+        return NW_INVALID_ARG;
+    }
+    dispatch_data_t payload = dispatch_data_create(data, len, h->queue, DISPATCH_DATA_DESTRUCTOR_DEFAULT);
+    nw_ethernet_address_t destination;
+    memcpy(destination, remote_address, sizeof(destination));
+    __block int result = NW_OK;
+    dispatch_semaphore_t done = dispatch_semaphore_create(0);
+    nw_ethernet_channel_send(h->channel, payload, vlan_tag, destination, ^(nw_error_t error) {
+        if (error) {
+            result = NW_SEND_FAILED;
+        }
+        dispatch_semaphore_signal(done);
+    });
+    dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
+    dispatch_release(done);
+    dispatch_release(payload);
+    return result;
+}
+
+void nw_shim_ethernet_channel_release(void *handle) {
+    nw_ethernet_channel_handle *h = (nw_ethernet_channel_handle *)handle;
+    if (!h) {
+        return;
+    }
+    nw_shim_destroy_ethernet_channel_handle(h);
+}

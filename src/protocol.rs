@@ -188,6 +188,11 @@ impl ProtocolOptions {
     }
 
     #[must_use]
+    pub(crate) const unsafe fn from_raw(handle: *mut c_void) -> Self {
+        Self { handle }
+    }
+
+    #[must_use]
     pub(crate) fn clone_from_raw(handle: *mut c_void) -> Self {
         let handle = unsafe { ffi::nw_shim_retain_object(handle) };
         Self { handle }

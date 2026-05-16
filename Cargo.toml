@@ -1,6 +1,6 @@
 [package]
 name = "networkframework"
-version = "0.9.0"
+version = "0.9.1"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/doom-fish/networkframework-rs"
@@ -14,7 +14,8 @@ readme = "README.md"
 build = "build.rs"
 include = [
     "src/**/*",
-    "swift-bridge/**/*",
+    "swift-bridge/Package.swift",
+    "swift-bridge/Sources/**/*",
     "build.rs",
     "Cargo.toml",
     "README.md",

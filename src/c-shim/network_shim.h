@@ -74,6 +74,38 @@ typedef void (*ConnectionGroupReceiveCallback)(
     void *user_info
 );
 
+typedef int (*TxtRecordEntryCallback)(
+    const char *key,
+    int found,
+    const uint8_t *value,
+    size_t value_len,
+    void *user_info
+);
+
+typedef void (*EthernetChannelStateCallback)(int state, void *user_info);
+typedef void (*EthernetChannelReceiveCallback)(
+    const uint8_t *data,
+    size_t len,
+    uint16_t vlan_tag,
+    const uint8_t *local_address,
+    const uint8_t *remote_address,
+    void *user_info
+);
+
+typedef struct nw_shim_establishment_protocol_info {
+    void *protocol_definition;
+    uint64_t handshake_milliseconds;
+    uint64_t handshake_rtt_milliseconds;
+} nw_shim_establishment_protocol_info;
+
+typedef struct nw_shim_resolution_step_info {
+    int source;
+    uint64_t milliseconds;
+    uint32_t endpoint_count;
+    void *successful_endpoint;
+    void *preferred_endpoint;
+} nw_shim_resolution_step_info;
+
 void *nw_shim_tcp_connect(const char *host, uint16_t port, int use_tls, int *out_status);
 int nw_shim_tcp_send(void *handle, const uint8_t *data, size_t len);
 ssize_t nw_shim_tcp_receive(void *handle, uint8_t *out_buf, size_t max_len);
@@ -395,6 +427,144 @@ uint16_t nw_shim_quic_get_max_udp_payload_size(void *options);
 void nw_shim_quic_set_max_udp_payload_size(void *options, uint16_t max_udp_payload_size);
 uint32_t nw_shim_quic_get_idle_timeout(void *options);
 void nw_shim_quic_set_idle_timeout(void *options, uint32_t idle_timeout);
+uint64_t nw_shim_quic_get_initial_max_streams_bidirectional(void *options);
+void nw_shim_quic_set_initial_max_streams_bidirectional(void *options, uint64_t initial_max_streams_bidirectional);
+uint64_t nw_shim_quic_get_initial_max_streams_unidirectional(void *options);
+void nw_shim_quic_set_initial_max_streams_unidirectional(void *options, uint64_t initial_max_streams_unidirectional);
+uint64_t nw_shim_quic_get_initial_max_stream_data_bidirectional_local(void *options);
+void nw_shim_quic_set_initial_max_stream_data_bidirectional_local(void *options, uint64_t initial_max_stream_data_bidirectional_local);
+uint64_t nw_shim_quic_get_initial_max_stream_data_bidirectional_remote(void *options);
+void nw_shim_quic_set_initial_max_stream_data_bidirectional_remote(void *options, uint64_t initial_max_stream_data_bidirectional_remote);
+uint64_t nw_shim_quic_get_initial_max_stream_data_unidirectional(void *options);
+void nw_shim_quic_set_initial_max_stream_data_unidirectional(void *options, uint64_t initial_max_stream_data_unidirectional);
+uint16_t nw_shim_quic_get_max_datagram_frame_size(void *options);
+void nw_shim_quic_set_max_datagram_frame_size(void *options, uint16_t max_datagram_frame_size);
+void *nw_shim_connection_copy_quic_metadata(void *handle);
+void *nw_shim_content_context_copy_quic_metadata(void *context);
+int nw_shim_protocol_metadata_is_quic(void *metadata);
+void *nw_shim_quic_copy_sec_protocol_options(void *options);
+void *nw_shim_quic_copy_sec_protocol_metadata(void *metadata);
+uint64_t nw_shim_quic_get_stream_id(void *metadata);
+int nw_shim_quic_get_stream_type(void *metadata);
+uint64_t nw_shim_quic_get_stream_application_error(void *metadata);
+void nw_shim_quic_set_stream_application_error(void *metadata, uint64_t application_error);
+uint64_t nw_shim_quic_get_local_max_streams_bidirectional(void *metadata);
+void nw_shim_quic_set_local_max_streams_bidirectional(void *metadata, uint64_t max_streams_bidirectional);
+uint64_t nw_shim_quic_get_local_max_streams_unidirectional(void *metadata);
+void nw_shim_quic_set_local_max_streams_unidirectional(void *metadata, uint64_t max_streams_unidirectional);
+uint64_t nw_shim_quic_get_remote_max_streams_bidirectional(void *metadata);
+uint64_t nw_shim_quic_get_remote_max_streams_unidirectional(void *metadata);
+uint16_t nw_shim_quic_get_stream_usable_datagram_frame_size(void *metadata);
+uint64_t nw_shim_quic_get_application_error(void *metadata);
+char *nw_shim_quic_copy_application_error_reason(void *metadata);
+void nw_shim_quic_set_application_error(void *metadata, uint64_t application_error, const char *reason);
+uint16_t nw_shim_quic_get_keepalive_interval(void *metadata);
+void nw_shim_quic_set_keepalive_interval(void *metadata, uint16_t keepalive_interval);
+uint64_t nw_shim_quic_get_remote_idle_timeout(void *metadata);
+
+void *nw_shim_sec_retain(void *object);
+void nw_shim_sec_release(void *object);
+
+char *nw_shim_interface_copy_name(void *interface);
+int nw_shim_interface_get_type(void *interface);
+uint32_t nw_shim_interface_get_index(void *interface);
+
+void nw_shim_parameters_require_interface(void *parameters, const char *name, int interface_type, uint32_t index);
+int nw_shim_parameters_copy_required_interface(void *parameters, char **out_name, int *out_type, uint32_t *out_index);
+void nw_shim_parameters_prohibit_interface(void *parameters, const char *name, int interface_type, uint32_t index);
+void nw_shim_parameters_clear_prohibited_interfaces(void *parameters);
+void **nw_shim_parameters_copy_prohibited_interfaces(void *parameters, size_t *out_count);
+void nw_shim_parameters_prohibit_interface_type(void *parameters, int interface_type);
+void nw_shim_parameters_clear_prohibited_interface_types(void *parameters);
+int *nw_shim_parameters_copy_prohibited_interface_types(void *parameters, size_t *out_count);
+void nw_shim_parameters_set_reuse_local_address(void *parameters, int reuse_local_address);
+int nw_shim_parameters_get_reuse_local_address(void *parameters);
+void nw_shim_parameters_set_local_endpoint(void *parameters, void *local_endpoint);
+void *nw_shim_parameters_copy_local_endpoint(void *parameters);
+void nw_shim_parameters_set_include_peer_to_peer(void *parameters, int include_peer_to_peer);
+int nw_shim_parameters_get_include_peer_to_peer(void *parameters);
+void nw_shim_parameters_set_fast_open_enabled(void *parameters, int fast_open_enabled);
+int nw_shim_parameters_get_fast_open_enabled(void *parameters);
+void nw_shim_parameters_set_service_class(void *parameters, int service_class);
+int nw_shim_parameters_get_service_class(void *parameters);
+void nw_shim_parameters_set_multipath_service(void *parameters, int multipath_service);
+int nw_shim_parameters_get_multipath_service(void *parameters);
+void *nw_shim_parameters_copy_default_protocol_stack(void *parameters);
+void nw_shim_protocol_stack_clear_application_protocols(void *stack);
+void **nw_shim_protocol_stack_copy_application_protocols(void *stack, size_t *out_count);
+void *nw_shim_protocol_stack_copy_transport_protocol(void *stack);
+void nw_shim_protocol_stack_set_transport_protocol(void *stack, void *protocol);
+void *nw_shim_protocol_stack_copy_internet_protocol(void *stack);
+void nw_shim_parameters_set_local_only(void *parameters, int local_only);
+int nw_shim_parameters_get_local_only(void *parameters);
+int nw_shim_parameters_get_prefer_no_proxy(void *parameters);
+void nw_shim_parameters_set_expired_dns_behavior(void *parameters, int expired_dns_behavior);
+int nw_shim_parameters_get_expired_dns_behavior(void *parameters);
+void nw_shim_parameters_set_requires_dnssec_validation(void *parameters, int requires_dnssec_validation);
+int nw_shim_parameters_requires_dnssec_validation(void *parameters);
+
+void *nw_shim_connection_copy_establishment_report(void *handle);
+uint64_t nw_shim_establishment_report_get_duration_milliseconds(void *report);
+uint64_t nw_shim_establishment_report_get_attempt_started_after_milliseconds(void *report);
+uint32_t nw_shim_establishment_report_get_previous_attempt_count(void *report);
+int nw_shim_establishment_report_get_used_proxy(void *report);
+int nw_shim_establishment_report_get_proxy_configured(void *report);
+void *nw_shim_establishment_report_copy_proxy_endpoint(void *report);
+nw_shim_establishment_protocol_info *nw_shim_establishment_report_copy_protocols(void *report, size_t *out_count);
+nw_shim_resolution_step_info *nw_shim_establishment_report_copy_resolutions(void *report, size_t *out_count);
+void **nw_shim_establishment_report_copy_resolution_reports(void *report, size_t *out_count);
+int nw_shim_resolution_report_get_source(void *report);
+uint64_t nw_shim_resolution_report_get_milliseconds(void *report);
+uint32_t nw_shim_resolution_report_get_endpoint_count(void *report);
+void *nw_shim_resolution_report_copy_successful_endpoint(void *report);
+void *nw_shim_resolution_report_copy_preferred_endpoint(void *report);
+int nw_shim_resolution_report_get_protocol(void *report);
+void *nw_shim_connection_create_data_transfer_report(void *handle);
+int nw_shim_data_transfer_report_collect(void *report);
+int nw_shim_data_transfer_report_get_state(void *report);
+uint32_t nw_shim_data_transfer_report_all_paths(void);
+uint64_t nw_shim_data_transfer_report_get_duration_milliseconds(void *report);
+uint32_t nw_shim_data_transfer_report_get_path_count(void *report);
+uint64_t nw_shim_data_transfer_report_get_received_ip_packet_count(void *report, uint32_t path_index);
+uint64_t nw_shim_data_transfer_report_get_sent_ip_packet_count(void *report, uint32_t path_index);
+uint64_t nw_shim_data_transfer_report_get_received_transport_byte_count(void *report, uint32_t path_index);
+uint64_t nw_shim_data_transfer_report_get_received_transport_duplicate_byte_count(void *report, uint32_t path_index);
+uint64_t nw_shim_data_transfer_report_get_received_transport_out_of_order_byte_count(void *report, uint32_t path_index);
+uint64_t nw_shim_data_transfer_report_get_sent_transport_byte_count(void *report, uint32_t path_index);
+uint64_t nw_shim_data_transfer_report_get_sent_transport_retransmitted_byte_count(void *report, uint32_t path_index);
+uint64_t nw_shim_data_transfer_report_get_transport_smoothed_rtt_milliseconds(void *report, uint32_t path_index);
+uint64_t nw_shim_data_transfer_report_get_transport_minimum_rtt_milliseconds(void *report, uint32_t path_index);
+uint64_t nw_shim_data_transfer_report_get_transport_rtt_variance(void *report, uint32_t path_index);
+uint64_t nw_shim_data_transfer_report_get_received_application_byte_count(void *report, uint32_t path_index);
+uint64_t nw_shim_data_transfer_report_get_sent_application_byte_count(void *report, uint32_t path_index);
+void *nw_shim_data_transfer_report_copy_path_interface(void *report, uint32_t path_index);
+int nw_shim_data_transfer_report_get_path_radio_type(void *report, uint32_t path_index);
+
+size_t nw_shim_endpoint_copy_address(void *endpoint, void *out_buffer, size_t out_buffer_length);
+void *nw_shim_endpoint_copy_txt_record(void *endpoint);
+
+void *nw_shim_txt_record_create_with_bytes(const uint8_t *txt_bytes, size_t txt_length);
+void *nw_shim_txt_record_create_dictionary(void);
+void *nw_shim_txt_record_copy(void *txt_record);
+int nw_shim_txt_record_find_key(void *txt_record, const char *key);
+uint8_t *nw_shim_txt_record_copy_value(void *txt_record, const char *key, size_t *out_value_length, int *out_found);
+int nw_shim_txt_record_set_key(void *txt_record, const char *key, const uint8_t *value, size_t value_length);
+int nw_shim_txt_record_remove_key(void *txt_record, const char *key);
+size_t nw_shim_txt_record_get_key_count(void *txt_record);
+uint8_t *nw_shim_txt_record_copy_bytes(void *txt_record, size_t *out_length);
+int nw_shim_txt_record_apply(void *txt_record, TxtRecordEntryCallback callback, void *user_info);
+int nw_shim_txt_record_is_dictionary(void *txt_record);
+int nw_shim_txt_record_is_equal(void *txt_record, void *other_txt_record);
+
+void *nw_shim_ethernet_channel_create(uint16_t ether_type, const char *name, int interface_type, uint32_t index);
+void *nw_shim_ethernet_channel_create_with_parameters(uint16_t ether_type, const char *name, int interface_type, uint32_t index, void *parameters);
+void nw_shim_ethernet_channel_set_state_changed_handler(void *handle, EthernetChannelStateCallback callback, void *user_info);
+void nw_shim_ethernet_channel_set_receive_handler(void *handle, EthernetChannelReceiveCallback callback, void *user_info);
+uint32_t nw_shim_ethernet_channel_get_maximum_payload_size(void *handle);
+void nw_shim_ethernet_channel_start(void *handle);
+void nw_shim_ethernet_channel_cancel(void *handle);
+int nw_shim_ethernet_channel_send(void *handle, const uint8_t *data, size_t len, uint16_t vlan_tag, const uint8_t *remote_address);
+void nw_shim_ethernet_channel_release(void *handle);
 
 #ifdef __cplusplus
 }

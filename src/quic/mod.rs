@@ -263,6 +263,11 @@ impl QuicConnection {
             is_complete: is_complete != 0,
         })
     }
+
+    #[must_use]
+    pub(crate) const fn as_ptr(&self) -> *mut c_void {
+        self.handle
+    }
 }
 
 impl Drop for QuicConnection {

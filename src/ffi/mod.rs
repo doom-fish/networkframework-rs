@@ -70,6 +70,10 @@ pub type ConnectionGroupReceiveCallback = unsafe extern "C" fn(
     user_info: *mut c_void,
 );
 
+mod advanced;
+
+pub use advanced::*;
+
 unsafe extern "C" {
     #[link_name = "nfw_tcp_connect"]
     pub fn nw_shim_tcp_connect(

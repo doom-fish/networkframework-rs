@@ -6,10 +6,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use networkframework::{
     advertise_with_descriptor, start_browser_with_descriptor, AdvertiseDescriptor,
     BrowseDescriptor, BrowserEvent, ConnectionGroup, ConnectionGroupDescriptor,
-    ConnectionParameters, ContentContext, Endpoint, EndpointType, Framer, FramerContext,
-    FramerDefinition, FramerMessageView, FramerStart, InterfaceType, ParametersAttribution,
+    ConnectionParameters, ContentContext, DataTransferReportState, Endpoint, EndpointType,
+    EthernetChannel, ExpiredDnsBehavior, Framer, FramerContext, FramerDefinition,
+    FramerMessageView, FramerStart, InterfaceType, MultipathService, ParametersAttribution,
     PathStatus, PrivacyContext, ProtocolDefinition, ProtocolOptions, ProxyConfig, QuicOptions,
-    RelayHop, ResolverConfig, TcpClient, TcpListener,
+    RelayHop, ResolverConfig, ServiceClass, TcpClient, TcpListener, TxtRecord,
+    TxtRecordFindResult,
 };
 
 fn unique_label(prefix: &str) -> String {
@@ -183,6 +185,76 @@ fn parameters_area_supports_policy_controls() -> Result<(), networkframework::Ne
     if let Ok(application_service) = ConnectionParameters::application_service() {
         let _ = application_service;
     }
+    Ok(())
+}
+
+#[test]
+fn parameters_area_supports_advanced_knobs() -> Result<(), networkframework::NetworkError> {
+    let mut parameters = ConnectionParameters::generic()?;
+    if let Some(loopback) = networkframework::list_interfaces()
+        .into_iter()
+        .find(|interface| interface.interface_type == InterfaceType::Loopback)
+    {
+        parameters.require_interface(Some(&loopback))?;
+        let required = parameters.required_interface().expect("required interface");
+        assert_eq!(required.index, loopback.index);
+        parameters.prohibit_interface(&loopback)?;
+        assert!(parameters
+            .prohibited_interfaces()
+            .iter()
+            .any(|interface| interface.index == loopback.index));
+        parameters.clear_prohibited_interfaces();
+        assert!(parameters.prohibited_interfaces().is_empty());
+        parameters.require_interface(None)?;
+        assert!(parameters.required_interface().is_none());
+    }
+
+    parameters
+        .set_reuse_local_address(true)
+        .set_include_peer_to_peer(true)
+        .set_fast_open_enabled(true)
+        .set_service_class(ServiceClass::ResponsiveData)
+        .set_multipath_service(MultipathService::Handover)
+        .set_local_only(true)
+        .set_expired_dns_behavior(ExpiredDnsBehavior::Allow)
+        .set_requires_dnssec_validation(true)
+        .set_prefer_no_proxy(true)
+        .prohibit_interface_type(InterfaceType::WiFi);
+
+    assert!(parameters.reuse_local_address());
+    assert!(parameters.include_peer_to_peer());
+    assert!(parameters.fast_open_enabled());
+    assert_eq!(parameters.service_class(), ServiceClass::ResponsiveData);
+    assert_eq!(parameters.multipath_service(), MultipathService::Handover);
+    assert!(parameters.local_only());
+    assert_eq!(parameters.expired_dns_behavior(), ExpiredDnsBehavior::Allow);
+    assert!(parameters.requires_dnssec_validation());
+    assert!(parameters.prefer_no_proxy());
+    assert!(parameters
+        .prohibited_interface_types()
+        .contains(&InterfaceType::WiFi));
+
+    let local_endpoint = Endpoint::address("127.0.0.1", 0)?;
+    parameters.set_local_endpoint(Some(&local_endpoint));
+    assert!(parameters.local_endpoint().is_some());
+    parameters.clear_prohibited_interface_types();
+    assert!(parameters.prohibited_interface_types().is_empty());
+
+    let websocket = ProtocolOptions::websocket()?;
+    parameters.prepend_application_protocol(&websocket)?;
+    let mut stack = parameters.default_protocol_stack().expect("protocol stack");
+    assert_eq!(stack.application_protocols().len(), 1);
+    let udp = ProtocolOptions::udp()?;
+    let udp_definition = udp.definition().expect("udp definition");
+    stack.set_transport_protocol(&udp);
+    assert_eq!(
+        stack.transport_protocol().and_then(|protocol| protocol.definition()),
+        Some(udp_definition)
+    );
+    let _ = stack.internet_protocol();
+    stack.clear_application_protocols();
+    assert!(stack.application_protocols().is_empty());
+
     Ok(())
 }
 
@@ -379,15 +451,31 @@ fn quic_area_exposes_transport_settings() -> Result<(), networkframework::Networ
         .set_stream_is_unidirectional(true)
         .set_stream_is_datagram(true)
         .set_initial_max_data(65_536)
+        .set_initial_max_streams_bidirectional(8)
+        .set_initial_max_streams_unidirectional(4)
+        .set_initial_max_stream_data_bidirectional_local(32_768)
+        .set_initial_max_stream_data_bidirectional_remote(16_384)
+        .set_initial_max_stream_data_unidirectional(8_192)
         .set_max_udp_payload_size(1350)
+        .set_max_datagram_frame_size(1200)
         .set_idle_timeout(15_000);
 
     assert!(options.stream_is_unidirectional());
     assert!(options.stream_is_datagram());
     assert_eq!(options.initial_max_data(), 65_536);
+    assert_eq!(options.initial_max_streams_bidirectional(), 8);
+    assert_eq!(options.initial_max_streams_unidirectional(), 4);
+    assert_eq!(options.initial_max_stream_data_bidirectional_local(), 32_768);
+    assert_eq!(options.initial_max_stream_data_bidirectional_remote(), 16_384);
+    assert_eq!(options.initial_max_stream_data_unidirectional(), 8_192);
     assert_eq!(options.max_udp_payload_size(), 1350);
+    assert_eq!(options.max_datagram_frame_size(), 1200);
     assert_eq!(options.idle_timeout(), 15_000);
+    assert!(options.security_options().is_some());
     assert!(options.protocol_options().is_quic());
+
+    let context = ContentContext::new("quic-empty")?;
+    assert!(context.copy_quic_metadata().is_none());
     Ok(())
 }
 
@@ -460,5 +548,118 @@ fn advertise_descriptor_area_builds_and_advertises() -> Result<(), networkframew
             Some("com.example.networkframework")
         );
     }
+    Ok(())
+}
+
+#[test]
+fn txt_record_area_supports_lookup_and_endpoint_helpers(
+) -> Result<(), networkframework::NetworkError> {
+    let mut txt = TxtRecord::dictionary()?;
+    txt.set_key("alpha", Some(b"beta"))?
+        .set_key("empty", Some(b""))?
+        .set_key("flag", None)?;
+
+    assert!(txt.is_dictionary());
+    assert_eq!(txt.key_count(), 3);
+    assert_eq!(txt.find_key("alpha")?, TxtRecordFindResult::NonEmptyValue);
+    assert_eq!(
+        txt.lookup("alpha")?.value.as_deref(),
+        Some(&b"beta"[..])
+    );
+    let empty = txt.lookup("empty")?;
+    assert_eq!(empty.status, TxtRecordFindResult::EmptyValue);
+    assert_eq!(empty.value, Some(Vec::new()));
+    let flag = txt.lookup("flag")?;
+    assert_eq!(flag.status, TxtRecordFindResult::NoValue);
+    assert_eq!(flag.value, None);
+    assert_eq!(txt.find_key("missing")?, TxtRecordFindResult::NotPresent);
+
+    let entries = txt.entries();
+    assert_eq!(entries.len(), 3);
+    let bytes = txt.bytes();
+    assert!(!bytes.is_empty());
+    let parsed = TxtRecord::from_bytes(&bytes)?;
+    assert_eq!(parsed.find_key("alpha")?, TxtRecordFindResult::NonEmptyValue);
+    let clone = txt.clone();
+    assert_eq!(clone, txt);
+    assert!(txt.remove_key("flag")?);
+    assert_eq!(txt.key_count(), 2);
+
+    let address = Endpoint::address("127.0.0.1", 8080)?;
+    assert!(address.raw_address().is_some());
+    let bonjour = Endpoint::bonjour_service(Some("demo"), "_http._tcp", Some("local"))?;
+    let _ = bonjour.txt_record();
+    Ok(())
+}
+
+#[test]
+fn connection_report_area_collects_metrics() -> Result<(), networkframework::NetworkError> {
+    let listener = TcpListener::bind(0)?;
+    let port = listener.local_port();
+    let server = std::thread::spawn(move || -> Result<(), networkframework::NetworkError> {
+        let connection = listener.accept()?;
+        assert_eq!(connection.receive(1024)?, b"report");
+        connection.send(b"ack")?;
+        Ok(())
+    });
+
+    let client = TcpClient::connect("127.0.0.1", port)?;
+    let establishment = client.establishment_report().expect("establishment report");
+    let _ = establishment.duration_milliseconds();
+    let _ = establishment.attempt_started_after_milliseconds();
+    let _ = establishment.previous_attempt_count();
+    let _ = establishment.used_proxy();
+    let _ = establishment.proxy_configured();
+    let _ = establishment.proxy_endpoint();
+    assert!(!establishment.protocols().is_empty());
+    let _ = establishment.resolutions();
+    for resolution_report in establishment.resolution_reports() {
+        let _ = resolution_report.source();
+        let _ = resolution_report.milliseconds();
+        let _ = resolution_report.endpoint_count();
+        let _ = resolution_report.successful_endpoint();
+        let _ = resolution_report.preferred_endpoint();
+        let _ = resolution_report.protocol();
+    }
+
+    let transfer = client.data_transfer_report().expect("data-transfer report");
+    client.send(b"report")?;
+    assert_eq!(client.receive(1024)?, b"ack");
+    transfer.collect()?;
+    assert_eq!(transfer.state(), DataTransferReportState::Collected);
+    let _ = networkframework::DataTransferReport::all_paths();
+    let paths = transfer.paths();
+    assert!(!paths.is_empty());
+    assert!(paths[0].sent_application_byte_count >= 6);
+
+    server.join().expect("server thread")?;
+    Ok(())
+}
+
+#[test]
+fn ethernet_channel_area_smoke() -> Result<(), networkframework::NetworkError> {
+    let interface = networkframework::list_interfaces()
+        .into_iter()
+        .find(|interface| interface.interface_type != InterfaceType::Other);
+    let Some(interface) = interface else {
+        return Ok(());
+    };
+
+    let parameters = ConnectionParameters::generic()?;
+    let _ = EthernetChannel::with_parameters(0x88B5, &interface, &parameters);
+    if let Ok(mut channel) = EthernetChannel::new(0x88B5, &interface) {
+        let states = Arc::new(Mutex::new(Vec::new()));
+        let states_for_callback = Arc::clone(&states);
+        channel.set_state_changed_handler(move |state| {
+            states_for_callback.lock().expect("states lock").push(state);
+        });
+        channel.set_receive_handler(|_frame| {});
+        let _ = channel.maximum_payload_size();
+        channel.start();
+        std::thread::sleep(Duration::from_millis(50));
+        channel.cancel();
+        drop(states.lock().expect("states lock"));
+    }
+
     Ok(())
 }

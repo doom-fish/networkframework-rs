@@ -135,6 +135,11 @@ impl TcpClient {
         (!handle.is_null()).then_some(unsafe { crate::path::Path::from_raw(handle) })
     }
 
+    #[must_use]
+    pub(crate) const fn as_ptr(&self) -> *mut c_void {
+        self.handle
+    }
+
     /// Send `data` over the connection. Blocks until the framework has
     /// acknowledged the buffer.
     ///

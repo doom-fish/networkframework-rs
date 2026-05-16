@@ -31,6 +31,7 @@ impl EndpointType {
     }
 }
 
+#[derive(Debug)]
 pub struct Endpoint {
     handle: *mut c_void,
 }

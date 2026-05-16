@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.9.1 - 2026-05-16
+
+- Added `ConnectionParameters` coverage for required/prohibited interfaces, local endpoints,
+  service/multipath policy, DNS controls, and `ProtocolStack` access.
+- Added `Endpoint::raw_address()`, `Endpoint::txt_record()`, and a new `TxtRecord` wrapper for
+  dictionary- and byte-backed TXT records.
+- Added `EstablishmentReport`, `DataTransferReport`, `ResolutionReport`, `QuicMetadata`, QUIC
+  security-handle wrappers, and `EthernetChannel`.
+- Expanded smoke coverage and refreshed `COVERAGE_AUDIT.md` to 73.20% verified coverage
+  (366 / 500 SDK symbols).
+
 ## 0.9.0 - 2026-05-16
 
 - Switched the native build from the legacy C-only shim to a SwiftPM bridge layout.
