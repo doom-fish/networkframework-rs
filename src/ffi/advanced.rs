@@ -1,4 +1,7 @@
-use super::{c_char, c_int, c_void, InterfaceEnumerationCallback, PathMonitorCallback, StringEnumerationCallback};
+use super::{
+    c_char, c_int, c_void, InterfaceEnumerationCallback, PathMonitorCallback,
+    StringEnumerationCallback,
+};
 
 pub type TxtRecordEntryCallback = unsafe extern "C" fn(
     key: *const c_char,
@@ -8,8 +11,7 @@ pub type TxtRecordEntryCallback = unsafe extern "C" fn(
     user_info: *mut c_void,
 ) -> c_int;
 
-pub type EthernetChannelStateCallback =
-    unsafe extern "C" fn(state: c_int, user_info: *mut c_void);
+pub type EthernetChannelStateCallback = unsafe extern "C" fn(state: c_int, user_info: *mut c_void);
 pub type EthernetChannelReceiveCallback = unsafe extern "C" fn(
     data: *const u8,
     len: usize,
@@ -19,12 +21,8 @@ pub type EthernetChannelReceiveCallback = unsafe extern "C" fn(
     user_info: *mut c_void,
 );
 
-
-pub type BrowserStateChangedCallback = unsafe extern "C" fn(
-    state: c_int,
-    error: *mut c_void,
-    user_info: *mut c_void,
-);
+pub type BrowserStateChangedCallback =
+    unsafe extern "C" fn(state: c_int, error: *mut c_void, user_info: *mut c_void);
 pub type BrowseResultChangedCallback = unsafe extern "C" fn(
     old_result: *mut c_void,
     new_result: *mut c_void,
@@ -32,6 +30,12 @@ pub type BrowseResultChangedCallback = unsafe extern "C" fn(
     batch_complete: c_int,
     user_info: *mut c_void,
 );
+pub type ConnectionStateCallback =
+    unsafe extern "C" fn(state: c_int, error: *mut c_void, user_info: *mut c_void);
+pub type ListenerStateCallback =
+    unsafe extern "C" fn(state: c_int, error: *mut c_void, user_info: *mut c_void);
+pub type ListenerNewConnectionCallback =
+    unsafe extern "C" fn(connection_handle: *mut c_void, user_info: *mut c_void);
 pub type ConnectionBooleanCallback = unsafe extern "C" fn(value: c_int, user_info: *mut c_void);
 pub type ConnectionPathCallback = unsafe extern "C" fn(path: *mut c_void, user_info: *mut c_void);
 pub type ConnectionBatchCallback = unsafe extern "C" fn(user_info: *mut c_void);
@@ -40,18 +44,16 @@ pub type ProtocolMetadataEnumerationCallback = unsafe extern "C" fn(
     metadata: *mut c_void,
     user_info: *mut c_void,
 ) -> c_int;
-pub type EndpointEnumerationCallback = unsafe extern "C" fn(endpoint: *mut c_void, user_info: *mut c_void) -> c_int;
+pub type EndpointEnumerationCallback =
+    unsafe extern "C" fn(endpoint: *mut c_void, user_info: *mut c_void) -> c_int;
 pub type HeaderEnumerationCallback = unsafe extern "C" fn(
     name: *const c_char,
     value: *const c_char,
     user_info: *mut c_void,
 ) -> c_int;
 pub type PathMonitorCancelCallback = unsafe extern "C" fn(user_info: *mut c_void);
-pub type ListenerAdvertisedEndpointChangedCallback = unsafe extern "C" fn(
-    endpoint: *mut c_void,
-    added: c_int,
-    user_info: *mut c_void,
-);
+pub type ListenerAdvertisedEndpointChangedCallback =
+    unsafe extern "C" fn(endpoint: *mut c_void, added: c_int, user_info: *mut c_void);
 pub type ListenerNewConnectionGroupCallback =
     unsafe extern "C" fn(group: *mut c_void, user_info: *mut c_void);
 pub type ConnectionGroupNewConnectionCallback =
@@ -118,7 +120,10 @@ unsafe extern "C" {
         out_count: *mut usize,
     ) -> *mut *mut c_void;
     #[link_name = "nw_shim_parameters_prohibit_interface_type"]
-    pub fn nw_shim_parameters_prohibit_interface_type(parameters: *mut c_void, interface_type: c_int);
+    pub fn nw_shim_parameters_prohibit_interface_type(
+        parameters: *mut c_void,
+        interface_type: c_int,
+    );
     #[link_name = "nw_shim_parameters_clear_prohibited_interface_types"]
     pub fn nw_shim_parameters_clear_prohibited_interface_types(parameters: *mut c_void);
     #[link_name = "nw_shim_parameters_copy_prohibited_interface_types"]
@@ -127,11 +132,17 @@ unsafe extern "C" {
         out_count: *mut usize,
     ) -> *mut c_int;
     #[link_name = "nw_shim_parameters_set_reuse_local_address"]
-    pub fn nw_shim_parameters_set_reuse_local_address(parameters: *mut c_void, reuse_local_address: c_int);
+    pub fn nw_shim_parameters_set_reuse_local_address(
+        parameters: *mut c_void,
+        reuse_local_address: c_int,
+    );
     #[link_name = "nw_shim_parameters_get_reuse_local_address"]
     pub fn nw_shim_parameters_get_reuse_local_address(parameters: *mut c_void) -> c_int;
     #[link_name = "nw_shim_parameters_set_local_endpoint"]
-    pub fn nw_shim_parameters_set_local_endpoint(parameters: *mut c_void, local_endpoint: *mut c_void);
+    pub fn nw_shim_parameters_set_local_endpoint(
+        parameters: *mut c_void,
+        local_endpoint: *mut c_void,
+    );
     #[link_name = "nw_shim_parameters_copy_local_endpoint"]
     pub fn nw_shim_parameters_copy_local_endpoint(parameters: *mut c_void) -> *mut c_void;
     #[link_name = "nw_shim_parameters_set_include_peer_to_peer"]
@@ -142,7 +153,10 @@ unsafe extern "C" {
     #[link_name = "nw_shim_parameters_get_include_peer_to_peer"]
     pub fn nw_shim_parameters_get_include_peer_to_peer(parameters: *mut c_void) -> c_int;
     #[link_name = "nw_shim_parameters_set_fast_open_enabled"]
-    pub fn nw_shim_parameters_set_fast_open_enabled(parameters: *mut c_void, fast_open_enabled: c_int);
+    pub fn nw_shim_parameters_set_fast_open_enabled(
+        parameters: *mut c_void,
+        fast_open_enabled: c_int,
+    );
     #[link_name = "nw_shim_parameters_get_fast_open_enabled"]
     pub fn nw_shim_parameters_get_fast_open_enabled(parameters: *mut c_void) -> c_int;
     #[link_name = "nw_shim_parameters_set_service_class"]
@@ -150,7 +164,10 @@ unsafe extern "C" {
     #[link_name = "nw_shim_parameters_get_service_class"]
     pub fn nw_shim_parameters_get_service_class(parameters: *mut c_void) -> c_int;
     #[link_name = "nw_shim_parameters_set_multipath_service"]
-    pub fn nw_shim_parameters_set_multipath_service(parameters: *mut c_void, multipath_service: c_int);
+    pub fn nw_shim_parameters_set_multipath_service(
+        parameters: *mut c_void,
+        multipath_service: c_int,
+    );
     #[link_name = "nw_shim_parameters_get_multipath_service"]
     pub fn nw_shim_parameters_get_multipath_service(parameters: *mut c_void) -> c_int;
     #[link_name = "nw_shim_parameters_copy_default_protocol_stack"]
@@ -194,7 +211,9 @@ unsafe extern "C" {
     #[link_name = "nw_shim_establishment_report_get_duration_milliseconds"]
     pub fn nw_shim_establishment_report_get_duration_milliseconds(report: *mut c_void) -> u64;
     #[link_name = "nw_shim_establishment_report_get_attempt_started_after_milliseconds"]
-    pub fn nw_shim_establishment_report_get_attempt_started_after_milliseconds(report: *mut c_void) -> u64;
+    pub fn nw_shim_establishment_report_get_attempt_started_after_milliseconds(
+        report: *mut c_void,
+    ) -> u64;
     #[link_name = "nw_shim_establishment_report_get_previous_attempt_count"]
     pub fn nw_shim_establishment_report_get_previous_attempt_count(report: *mut c_void) -> u32;
     #[link_name = "nw_shim_establishment_report_get_used_proxy"]
@@ -249,8 +268,10 @@ unsafe extern "C" {
         path_index: u32,
     ) -> u64;
     #[link_name = "nw_shim_data_transfer_report_get_sent_ip_packet_count"]
-    pub fn nw_shim_data_transfer_report_get_sent_ip_packet_count(report: *mut c_void, path_index: u32)
-        -> u64;
+    pub fn nw_shim_data_transfer_report_get_sent_ip_packet_count(
+        report: *mut c_void,
+        path_index: u32,
+    ) -> u64;
     #[link_name = "nw_shim_data_transfer_report_get_received_transport_byte_count"]
     pub fn nw_shim_data_transfer_report_get_received_transport_byte_count(
         report: *mut c_void,
@@ -267,8 +288,10 @@ unsafe extern "C" {
         path_index: u32,
     ) -> u64;
     #[link_name = "nw_shim_data_transfer_report_get_sent_transport_byte_count"]
-    pub fn nw_shim_data_transfer_report_get_sent_transport_byte_count(report: *mut c_void, path_index: u32)
-        -> u64;
+    pub fn nw_shim_data_transfer_report_get_sent_transport_byte_count(
+        report: *mut c_void,
+        path_index: u32,
+    ) -> u64;
     #[link_name = "nw_shim_data_transfer_report_get_sent_transport_retransmitted_byte_count"]
     pub fn nw_shim_data_transfer_report_get_sent_transport_retransmitted_byte_count(
         report: *mut c_void,
@@ -285,22 +308,30 @@ unsafe extern "C" {
         path_index: u32,
     ) -> u64;
     #[link_name = "nw_shim_data_transfer_report_get_transport_rtt_variance"]
-    pub fn nw_shim_data_transfer_report_get_transport_rtt_variance(report: *mut c_void, path_index: u32)
-        -> u64;
+    pub fn nw_shim_data_transfer_report_get_transport_rtt_variance(
+        report: *mut c_void,
+        path_index: u32,
+    ) -> u64;
     #[link_name = "nw_shim_data_transfer_report_get_received_application_byte_count"]
     pub fn nw_shim_data_transfer_report_get_received_application_byte_count(
         report: *mut c_void,
         path_index: u32,
     ) -> u64;
     #[link_name = "nw_shim_data_transfer_report_get_sent_application_byte_count"]
-    pub fn nw_shim_data_transfer_report_get_sent_application_byte_count(report: *mut c_void, path_index: u32)
-        -> u64;
+    pub fn nw_shim_data_transfer_report_get_sent_application_byte_count(
+        report: *mut c_void,
+        path_index: u32,
+    ) -> u64;
     #[link_name = "nw_shim_data_transfer_report_copy_path_interface"]
-    pub fn nw_shim_data_transfer_report_copy_path_interface(report: *mut c_void, path_index: u32)
-        -> *mut c_void;
+    pub fn nw_shim_data_transfer_report_copy_path_interface(
+        report: *mut c_void,
+        path_index: u32,
+    ) -> *mut c_void;
     #[link_name = "nw_shim_data_transfer_report_get_path_radio_type"]
-    pub fn nw_shim_data_transfer_report_get_path_radio_type(report: *mut c_void, path_index: u32)
-        -> c_int;
+    pub fn nw_shim_data_transfer_report_get_path_radio_type(
+        report: *mut c_void,
+        path_index: u32,
+    ) -> c_int;
 
     #[link_name = "nw_shim_endpoint_copy_address"]
     pub fn nw_shim_endpoint_copy_address(
@@ -312,7 +343,10 @@ unsafe extern "C" {
     pub fn nw_shim_endpoint_copy_txt_record(endpoint: *mut c_void) -> *mut c_void;
 
     #[link_name = "nw_shim_txt_record_create_with_bytes"]
-    pub fn nw_shim_txt_record_create_with_bytes(txt_bytes: *const u8, txt_length: usize) -> *mut c_void;
+    pub fn nw_shim_txt_record_create_with_bytes(
+        txt_bytes: *const u8,
+        txt_length: usize,
+    ) -> *mut c_void;
     #[link_name = "nw_shim_txt_record_create_dictionary"]
     pub fn nw_shim_txt_record_create_dictionary() -> *mut c_void;
     #[link_name = "nw_shim_txt_record_copy"]
@@ -338,7 +372,10 @@ unsafe extern "C" {
     #[link_name = "nw_shim_txt_record_get_key_count"]
     pub fn nw_shim_txt_record_get_key_count(txt_record: *mut c_void) -> usize;
     #[link_name = "nw_shim_txt_record_copy_bytes"]
-    pub fn nw_shim_txt_record_copy_bytes(txt_record: *mut c_void, out_length: *mut usize) -> *mut u8;
+    pub fn nw_shim_txt_record_copy_bytes(
+        txt_record: *mut c_void,
+        out_length: *mut usize,
+    ) -> *mut u8;
     #[link_name = "nw_shim_txt_record_apply"]
     pub fn nw_shim_txt_record_apply(
         txt_record: *mut c_void,
@@ -348,7 +385,10 @@ unsafe extern "C" {
     #[link_name = "nw_shim_txt_record_is_dictionary"]
     pub fn nw_shim_txt_record_is_dictionary(txt_record: *mut c_void) -> c_int;
     #[link_name = "nw_shim_txt_record_is_equal"]
-    pub fn nw_shim_txt_record_is_equal(txt_record: *mut c_void, other_txt_record: *mut c_void) -> c_int;
+    pub fn nw_shim_txt_record_is_equal(
+        txt_record: *mut c_void,
+        other_txt_record: *mut c_void,
+    ) -> c_int;
 
     #[link_name = "nw_shim_connection_copy_quic_metadata"]
     pub fn nw_shim_connection_copy_quic_metadata(handle: *mut c_void) -> *mut c_void;
@@ -375,14 +415,18 @@ unsafe extern "C" {
         initial_max_streams_unidirectional: u64,
     );
     #[link_name = "nw_shim_quic_get_initial_max_stream_data_bidirectional_local"]
-    pub fn nw_shim_quic_get_initial_max_stream_data_bidirectional_local(options: *mut c_void) -> u64;
+    pub fn nw_shim_quic_get_initial_max_stream_data_bidirectional_local(
+        options: *mut c_void,
+    ) -> u64;
     #[link_name = "nw_shim_quic_set_initial_max_stream_data_bidirectional_local"]
     pub fn nw_shim_quic_set_initial_max_stream_data_bidirectional_local(
         options: *mut c_void,
         initial_max_stream_data_bidirectional_local: u64,
     );
     #[link_name = "nw_shim_quic_get_initial_max_stream_data_bidirectional_remote"]
-    pub fn nw_shim_quic_get_initial_max_stream_data_bidirectional_remote(options: *mut c_void) -> u64;
+    pub fn nw_shim_quic_get_initial_max_stream_data_bidirectional_remote(
+        options: *mut c_void,
+    ) -> u64;
     #[link_name = "nw_shim_quic_set_initial_max_stream_data_bidirectional_remote"]
     pub fn nw_shim_quic_set_initial_max_stream_data_bidirectional_remote(
         options: *mut c_void,
@@ -398,7 +442,10 @@ unsafe extern "C" {
     #[link_name = "nw_shim_quic_get_max_datagram_frame_size"]
     pub fn nw_shim_quic_get_max_datagram_frame_size(options: *mut c_void) -> u16;
     #[link_name = "nw_shim_quic_set_max_datagram_frame_size"]
-    pub fn nw_shim_quic_set_max_datagram_frame_size(options: *mut c_void, max_datagram_frame_size: u16);
+    pub fn nw_shim_quic_set_max_datagram_frame_size(
+        options: *mut c_void,
+        max_datagram_frame_size: u16,
+    );
     #[link_name = "nw_shim_quic_get_stream_id"]
     pub fn nw_shim_quic_get_stream_id(metadata: *mut c_void) -> u64;
     #[link_name = "nw_shim_quic_get_stream_type"]
@@ -410,11 +457,17 @@ unsafe extern "C" {
     #[link_name = "nw_shim_quic_get_local_max_streams_bidirectional"]
     pub fn nw_shim_quic_get_local_max_streams_bidirectional(metadata: *mut c_void) -> u64;
     #[link_name = "nw_shim_quic_set_local_max_streams_bidirectional"]
-    pub fn nw_shim_quic_set_local_max_streams_bidirectional(metadata: *mut c_void, max_streams_bidirectional: u64);
+    pub fn nw_shim_quic_set_local_max_streams_bidirectional(
+        metadata: *mut c_void,
+        max_streams_bidirectional: u64,
+    );
     #[link_name = "nw_shim_quic_get_local_max_streams_unidirectional"]
     pub fn nw_shim_quic_get_local_max_streams_unidirectional(metadata: *mut c_void) -> u64;
     #[link_name = "nw_shim_quic_set_local_max_streams_unidirectional"]
-    pub fn nw_shim_quic_set_local_max_streams_unidirectional(metadata: *mut c_void, max_streams_unidirectional: u64);
+    pub fn nw_shim_quic_set_local_max_streams_unidirectional(
+        metadata: *mut c_void,
+        max_streams_unidirectional: u64,
+    );
     #[link_name = "nw_shim_quic_get_remote_max_streams_bidirectional"]
     pub fn nw_shim_quic_get_remote_max_streams_bidirectional(metadata: *mut c_void) -> u64;
     #[link_name = "nw_shim_quic_get_remote_max_streams_unidirectional"]
@@ -483,9 +536,14 @@ unsafe extern "C" {
     pub fn nw_shim_ethernet_channel_release(handle: *mut c_void);
 
     #[link_name = "nw_shim_advertise_descriptor_set_txt_record_object"]
-    pub fn nw_shim_advertise_descriptor_set_txt_record_object(descriptor: *mut c_void, txt_record: *mut c_void);
+    pub fn nw_shim_advertise_descriptor_set_txt_record_object(
+        descriptor: *mut c_void,
+        txt_record: *mut c_void,
+    );
     #[link_name = "nw_shim_advertise_descriptor_copy_txt_record_object"]
-    pub fn nw_shim_advertise_descriptor_copy_txt_record_object(descriptor: *mut c_void) -> *mut c_void;
+    pub fn nw_shim_advertise_descriptor_copy_txt_record_object(
+        descriptor: *mut c_void,
+    ) -> *mut c_void;
 
     #[link_name = "nw_shim_browser_start_results_with_descriptor"]
     pub fn nw_shim_browser_start_results_with_descriptor(
@@ -504,8 +562,19 @@ unsafe extern "C" {
         callback: Option<BrowserStateChangedCallback>,
         user_info: *mut c_void,
     );
+    #[link_name = "nw_shim_browser_set_browse_results_changed_handler"]
+    pub fn nw_shim_browser_set_browse_results_changed_handler(
+        handle: *mut c_void,
+        callback: Option<BrowseResultChangedCallback>,
+        user_info: *mut c_void,
+    );
+    #[link_name = "nw_shim_browser_drain_queue"]
+    pub fn nw_shim_browser_drain_queue(handle: *mut c_void);
     #[link_name = "nw_shim_browse_result_get_changes"]
-    pub fn nw_shim_browse_result_get_changes(old_result: *mut c_void, new_result: *mut c_void) -> u64;
+    pub fn nw_shim_browse_result_get_changes(
+        old_result: *mut c_void,
+        new_result: *mut c_void,
+    ) -> u64;
     #[link_name = "nw_shim_browse_result_copy_endpoint"]
     pub fn nw_shim_browse_result_copy_endpoint(result: *mut c_void) -> *mut c_void;
     #[link_name = "nw_shim_browse_result_get_interfaces_count"]
@@ -519,6 +588,14 @@ unsafe extern "C" {
         user_info: *mut c_void,
     ) -> c_int;
 
+    #[link_name = "nw_shim_connection_set_state_changed_handler"]
+    pub fn nw_shim_connection_set_state_changed_handler(
+        handle: *mut c_void,
+        callback: Option<ConnectionStateCallback>,
+        user_info: *mut c_void,
+    );
+    #[link_name = "nw_shim_connection_drain_queue"]
+    pub fn nw_shim_connection_drain_queue(handle: *mut c_void);
     #[link_name = "nw_shim_connection_set_viability_changed_handler"]
     pub fn nw_shim_connection_set_viability_changed_handler(
         handle: *mut c_void,
@@ -552,7 +629,10 @@ unsafe extern "C" {
     #[link_name = "nw_shim_connection_copy_description"]
     pub fn nw_shim_connection_copy_description(handle: *mut c_void) -> *mut c_char;
     #[link_name = "nw_shim_connection_copy_protocol_metadata"]
-    pub fn nw_shim_connection_copy_protocol_metadata(handle: *mut c_void, definition: *mut c_void) -> *mut c_void;
+    pub fn nw_shim_connection_copy_protocol_metadata(
+        handle: *mut c_void,
+        definition: *mut c_void,
+    ) -> *mut c_void;
     #[link_name = "nw_shim_connection_get_maximum_datagram_size"]
     pub fn nw_shim_connection_get_maximum_datagram_size(handle: *mut c_void) -> u32;
     #[link_name = "nw_shim_connection_release_without_cancel"]
@@ -581,22 +661,39 @@ unsafe extern "C" {
         user_info: *mut c_void,
     ) -> c_int;
     #[link_name = "nw_shim_multicast_group_descriptor_set_specific_source"]
-    pub fn nw_shim_multicast_group_descriptor_set_specific_source(descriptor: *mut c_void, endpoint: *mut c_void);
+    pub fn nw_shim_multicast_group_descriptor_set_specific_source(
+        descriptor: *mut c_void,
+        endpoint: *mut c_void,
+    );
     #[link_name = "nw_shim_multicast_group_descriptor_get_disable_unicast_traffic"]
-    pub fn nw_shim_multicast_group_descriptor_get_disable_unicast_traffic(descriptor: *mut c_void) -> c_int;
+    pub fn nw_shim_multicast_group_descriptor_get_disable_unicast_traffic(
+        descriptor: *mut c_void,
+    ) -> c_int;
     #[link_name = "nw_shim_multicast_group_descriptor_set_disable_unicast_traffic"]
-    pub fn nw_shim_multicast_group_descriptor_set_disable_unicast_traffic(descriptor: *mut c_void, disable_unicast_traffic: c_int);
+    pub fn nw_shim_multicast_group_descriptor_set_disable_unicast_traffic(
+        descriptor: *mut c_void,
+        disable_unicast_traffic: c_int,
+    );
 
     #[link_name = "nw_shim_connection_group_copy_descriptor"]
     pub fn nw_shim_connection_group_copy_descriptor(handle: *mut c_void) -> *mut c_void;
     #[link_name = "nw_shim_connection_group_copy_parameters"]
     pub fn nw_shim_connection_group_copy_parameters(handle: *mut c_void) -> *mut c_void;
     #[link_name = "nw_shim_connection_group_copy_remote_endpoint_for_message"]
-    pub fn nw_shim_connection_group_copy_remote_endpoint_for_message(handle: *mut c_void, context: *mut c_void) -> *mut c_void;
+    pub fn nw_shim_connection_group_copy_remote_endpoint_for_message(
+        handle: *mut c_void,
+        context: *mut c_void,
+    ) -> *mut c_void;
     #[link_name = "nw_shim_connection_group_copy_local_endpoint_for_message"]
-    pub fn nw_shim_connection_group_copy_local_endpoint_for_message(handle: *mut c_void, context: *mut c_void) -> *mut c_void;
+    pub fn nw_shim_connection_group_copy_local_endpoint_for_message(
+        handle: *mut c_void,
+        context: *mut c_void,
+    ) -> *mut c_void;
     #[link_name = "nw_shim_connection_group_copy_path_for_message"]
-    pub fn nw_shim_connection_group_copy_path_for_message(handle: *mut c_void, context: *mut c_void) -> *mut c_void;
+    pub fn nw_shim_connection_group_copy_path_for_message(
+        handle: *mut c_void,
+        context: *mut c_void,
+    ) -> *mut c_void;
     #[link_name = "nw_shim_connection_group_copy_protocol_metadata_for_message"]
     pub fn nw_shim_connection_group_copy_protocol_metadata_for_message(
         handle: *mut c_void,
@@ -604,7 +701,10 @@ unsafe extern "C" {
         definition: *mut c_void,
     ) -> *mut c_void;
     #[link_name = "nw_shim_connection_group_copy_protocol_metadata"]
-    pub fn nw_shim_connection_group_copy_protocol_metadata(handle: *mut c_void, definition: *mut c_void) -> *mut c_void;
+    pub fn nw_shim_connection_group_copy_protocol_metadata(
+        handle: *mut c_void,
+        definition: *mut c_void,
+    ) -> *mut c_void;
     #[link_name = "nw_shim_connection_group_extract_connection_for_message"]
     pub fn nw_shim_connection_group_extract_connection_for_message(
         handle: *mut c_void,
@@ -619,7 +719,10 @@ unsafe extern "C" {
         out_status: *mut c_int,
     ) -> *mut c_void;
     #[link_name = "nw_shim_connection_group_reinsert_extracted_connection"]
-    pub fn nw_shim_connection_group_reinsert_extracted_connection(handle: *mut c_void, connection_handle: *mut c_void) -> c_int;
+    pub fn nw_shim_connection_group_reinsert_extracted_connection(
+        handle: *mut c_void,
+        connection_handle: *mut c_void,
+    ) -> c_int;
     #[link_name = "nw_shim_connection_group_reply"]
     pub fn nw_shim_connection_group_reply(
         handle: *mut c_void,
@@ -658,7 +761,10 @@ unsafe extern "C" {
     pub fn nw_shim_parameters_create_custom_ip(protocol_number: u8) -> *mut c_void;
 
     #[link_name = "nw_shim_listener_create_direct"]
-    pub fn nw_shim_listener_create_direct(parameters: *mut c_void, out_status: *mut c_int) -> *mut c_void;
+    pub fn nw_shim_listener_create_direct(
+        parameters: *mut c_void,
+        out_status: *mut c_int,
+    ) -> *mut c_void;
     #[link_name = "nw_shim_listener_create_with_connection"]
     pub fn nw_shim_listener_create_with_connection(
         connection_handle: *mut c_void,
@@ -674,7 +780,10 @@ unsafe extern "C" {
     #[link_name = "nw_shim_listener_get_new_connection_limit"]
     pub fn nw_shim_listener_get_new_connection_limit(handle: *mut c_void) -> u32;
     #[link_name = "nw_shim_listener_set_new_connection_limit"]
-    pub fn nw_shim_listener_set_new_connection_limit(handle: *mut c_void, new_connection_limit: u32);
+    pub fn nw_shim_listener_set_new_connection_limit(
+        handle: *mut c_void,
+        new_connection_limit: u32,
+    );
     #[link_name = "nw_shim_listener_set_advertised_endpoint_changed_handler"]
     pub fn nw_shim_listener_set_advertised_endpoint_changed_handler(
         handle: *mut c_void,
@@ -687,6 +796,20 @@ unsafe extern "C" {
         callback: Option<ListenerNewConnectionGroupCallback>,
         user_info: *mut c_void,
     );
+    #[link_name = "nw_shim_listener_set_state_changed_handler"]
+    pub fn nw_shim_listener_set_state_changed_handler(
+        handle: *mut c_void,
+        callback: Option<ListenerStateCallback>,
+        user_info: *mut c_void,
+    );
+    #[link_name = "nw_shim_listener_set_new_connection_handler"]
+    pub fn nw_shim_listener_set_new_connection_handler(
+        handle: *mut c_void,
+        callback: Option<ListenerNewConnectionCallback>,
+        user_info: *mut c_void,
+    );
+    #[link_name = "nw_shim_listener_drain_queue"]
+    pub fn nw_shim_listener_drain_queue(handle: *mut c_void);
 
     #[link_name = "nw_shim_path_enumerate_gateways"]
     pub fn nw_shim_path_enumerate_gateways(
@@ -713,6 +836,14 @@ unsafe extern "C" {
         callback: Option<PathMonitorCancelCallback>,
         user_info: *mut c_void,
     );
+    #[link_name = "nw_shim_path_monitor_set_update_handler"]
+    pub fn nw_shim_path_monitor_set_update_handler(
+        handle: *mut c_void,
+        callback: Option<ConnectionPathCallback>,
+        user_info: *mut c_void,
+    );
+    #[link_name = "nw_shim_path_monitor_drain_queue"]
+    pub fn nw_shim_path_monitor_drain_queue(handle: *mut c_void);
 
     #[link_name = "nw_shim_protocol_create_ip_metadata"]
     pub fn nw_shim_protocol_create_ip_metadata() -> *mut c_void;
@@ -740,13 +871,22 @@ unsafe extern "C" {
     #[link_name = "nw_shim_ip_options_set_use_minimum_mtu"]
     pub fn nw_shim_ip_options_set_use_minimum_mtu(options: *mut c_void, use_minimum_mtu: c_int);
     #[link_name = "nw_shim_ip_options_set_disable_fragmentation"]
-    pub fn nw_shim_ip_options_set_disable_fragmentation(options: *mut c_void, disable_fragmentation: c_int);
+    pub fn nw_shim_ip_options_set_disable_fragmentation(
+        options: *mut c_void,
+        disable_fragmentation: c_int,
+    );
     #[link_name = "nw_shim_ip_options_set_calculate_receive_time"]
-    pub fn nw_shim_ip_options_set_calculate_receive_time(options: *mut c_void, calculate_receive_time: c_int);
+    pub fn nw_shim_ip_options_set_calculate_receive_time(
+        options: *mut c_void,
+        calculate_receive_time: c_int,
+    );
     #[link_name = "nw_shim_ip_options_set_local_address_preference"]
     pub fn nw_shim_ip_options_set_local_address_preference(options: *mut c_void, preference: c_int);
     #[link_name = "nw_shim_ip_options_set_disable_multicast_loopback"]
-    pub fn nw_shim_ip_options_set_disable_multicast_loopback(options: *mut c_void, disable_multicast_loopback: c_int);
+    pub fn nw_shim_ip_options_set_disable_multicast_loopback(
+        options: *mut c_void,
+        disable_multicast_loopback: c_int,
+    );
     #[link_name = "nw_shim_ip_metadata_set_ecn_flag"]
     pub fn nw_shim_ip_metadata_set_ecn_flag(metadata: *mut c_void, ecn_flag: c_int);
     #[link_name = "nw_shim_ip_metadata_get_ecn_flag"]
@@ -769,27 +909,51 @@ unsafe extern "C" {
     #[link_name = "nw_shim_tcp_options_set_keepalive_count"]
     pub fn nw_shim_tcp_options_set_keepalive_count(options: *mut c_void, keepalive_count: u32);
     #[link_name = "nw_shim_tcp_options_set_keepalive_idle_time"]
-    pub fn nw_shim_tcp_options_set_keepalive_idle_time(options: *mut c_void, keepalive_idle_time: u32);
+    pub fn nw_shim_tcp_options_set_keepalive_idle_time(
+        options: *mut c_void,
+        keepalive_idle_time: u32,
+    );
     #[link_name = "nw_shim_tcp_options_set_keepalive_interval"]
-    pub fn nw_shim_tcp_options_set_keepalive_interval(options: *mut c_void, keepalive_interval: u32);
+    pub fn nw_shim_tcp_options_set_keepalive_interval(
+        options: *mut c_void,
+        keepalive_interval: u32,
+    );
     #[link_name = "nw_shim_tcp_options_set_maximum_segment_size"]
-    pub fn nw_shim_tcp_options_set_maximum_segment_size(options: *mut c_void, maximum_segment_size: u32);
+    pub fn nw_shim_tcp_options_set_maximum_segment_size(
+        options: *mut c_void,
+        maximum_segment_size: u32,
+    );
     #[link_name = "nw_shim_tcp_options_set_connection_timeout"]
-    pub fn nw_shim_tcp_options_set_connection_timeout(options: *mut c_void, connection_timeout: u32);
+    pub fn nw_shim_tcp_options_set_connection_timeout(
+        options: *mut c_void,
+        connection_timeout: u32,
+    );
     #[link_name = "nw_shim_tcp_options_set_persist_timeout"]
     pub fn nw_shim_tcp_options_set_persist_timeout(options: *mut c_void, persist_timeout: u32);
     #[link_name = "nw_shim_tcp_options_set_retransmit_connection_drop_time"]
-    pub fn nw_shim_tcp_options_set_retransmit_connection_drop_time(options: *mut c_void, value: u32);
+    pub fn nw_shim_tcp_options_set_retransmit_connection_drop_time(
+        options: *mut c_void,
+        value: u32,
+    );
     #[link_name = "nw_shim_tcp_options_set_retransmit_fin_drop"]
-    pub fn nw_shim_tcp_options_set_retransmit_fin_drop(options: *mut c_void, retransmit_fin_drop: c_int);
+    pub fn nw_shim_tcp_options_set_retransmit_fin_drop(
+        options: *mut c_void,
+        retransmit_fin_drop: c_int,
+    );
     #[link_name = "nw_shim_tcp_options_set_disable_ack_stretching"]
-    pub fn nw_shim_tcp_options_set_disable_ack_stretching(options: *mut c_void, disable_ack_stretching: c_int);
+    pub fn nw_shim_tcp_options_set_disable_ack_stretching(
+        options: *mut c_void,
+        disable_ack_stretching: c_int,
+    );
     #[link_name = "nw_shim_tcp_options_set_enable_fast_open"]
     pub fn nw_shim_tcp_options_set_enable_fast_open(options: *mut c_void, enable_fast_open: c_int);
     #[link_name = "nw_shim_tcp_options_set_disable_ecn"]
     pub fn nw_shim_tcp_options_set_disable_ecn(options: *mut c_void, disable_ecn: c_int);
     #[link_name = "nw_shim_tcp_options_set_multipath_force_version"]
-    pub fn nw_shim_tcp_options_set_multipath_force_version(options: *mut c_void, multipath_force_version: c_int);
+    pub fn nw_shim_tcp_options_set_multipath_force_version(
+        options: *mut c_void,
+        multipath_force_version: c_int,
+    );
     #[link_name = "nw_shim_tcp_get_available_receive_buffer"]
     pub fn nw_shim_tcp_get_available_receive_buffer(metadata: *mut c_void) -> u32;
     #[link_name = "nw_shim_tcp_get_available_send_buffer"]
@@ -801,10 +965,17 @@ unsafe extern "C" {
     pub fn nw_shim_tls_copy_sec_protocol_metadata(metadata: *mut c_void) -> *mut c_void;
 
     #[link_name = "nw_shim_udp_options_set_prefer_no_checksum"]
-    pub fn nw_shim_udp_options_set_prefer_no_checksum(options: *mut c_void, prefer_no_checksum: c_int);
+    pub fn nw_shim_udp_options_set_prefer_no_checksum(
+        options: *mut c_void,
+        prefer_no_checksum: c_int,
+    );
 
     #[link_name = "nw_shim_ws_options_add_additional_header"]
-    pub fn nw_shim_ws_options_add_additional_header(options: *mut c_void, name: *const c_char, value: *const c_char);
+    pub fn nw_shim_ws_options_add_additional_header(
+        options: *mut c_void,
+        name: *const c_char,
+        value: *const c_char,
+    );
     #[link_name = "nw_shim_ws_options_add_subprotocol"]
     pub fn nw_shim_ws_options_add_subprotocol(options: *mut c_void, subprotocol: *const c_char);
     #[link_name = "nw_shim_ws_options_set_auto_reply_ping"]
@@ -812,7 +983,10 @@ unsafe extern "C" {
     #[link_name = "nw_shim_ws_options_set_skip_handshake"]
     pub fn nw_shim_ws_options_set_skip_handshake(options: *mut c_void, skip_handshake: c_int);
     #[link_name = "nw_shim_ws_options_set_maximum_message_size"]
-    pub fn nw_shim_ws_options_set_maximum_message_size(options: *mut c_void, maximum_message_size: usize);
+    pub fn nw_shim_ws_options_set_maximum_message_size(
+        options: *mut c_void,
+        maximum_message_size: usize,
+    );
     #[link_name = "nw_shim_ws_metadata_set_close_code"]
     pub fn nw_shim_ws_metadata_set_close_code(metadata: *mut c_void, close_code: c_int);
     #[link_name = "nw_shim_ws_metadata_get_close_code"]
@@ -838,13 +1012,20 @@ unsafe extern "C" {
         user_info: *mut c_void,
     ) -> c_int;
     #[link_name = "nw_shim_ws_response_create"]
-    pub fn nw_shim_ws_response_create(status: c_int, selected_subprotocol: *const c_char) -> *mut c_void;
+    pub fn nw_shim_ws_response_create(
+        status: c_int,
+        selected_subprotocol: *const c_char,
+    ) -> *mut c_void;
     #[link_name = "nw_shim_ws_response_get_status"]
     pub fn nw_shim_ws_response_get_status(response: *mut c_void) -> c_int;
     #[link_name = "nw_shim_ws_response_get_selected_subprotocol"]
     pub fn nw_shim_ws_response_get_selected_subprotocol(response: *mut c_void) -> *mut c_char;
     #[link_name = "nw_shim_ws_response_add_additional_header"]
-    pub fn nw_shim_ws_response_add_additional_header(response: *mut c_void, name: *const c_char, value: *const c_char);
+    pub fn nw_shim_ws_response_add_additional_header(
+        response: *mut c_void,
+        name: *const c_char,
+        value: *const c_char,
+    );
     #[link_name = "nw_shim_ws_response_enumerate_additional_headers"]
     pub fn nw_shim_ws_response_enumerate_additional_headers(
         response: *mut c_void,
@@ -859,7 +1040,10 @@ unsafe extern "C" {
         value: *mut c_void,
     );
     #[link_name = "nw_shim_framer_message_copy_object_value"]
-    pub fn nw_shim_framer_message_copy_object_value(message: *mut c_void, key: *const c_char) -> *mut c_void;
+    pub fn nw_shim_framer_message_copy_object_value(
+        message: *mut c_void,
+        key: *const c_char,
+    ) -> *mut c_void;
     #[link_name = "nw_shim_framer_options_set_object_value"]
     pub fn nw_shim_framer_options_set_object_value(
         options: *mut c_void,
@@ -867,7 +1051,10 @@ unsafe extern "C" {
         value: *mut c_void,
     );
     #[link_name = "nw_shim_framer_options_copy_object_value"]
-    pub fn nw_shim_framer_options_copy_object_value(options: *mut c_void, key: *const c_char) -> *mut c_void;
+    pub fn nw_shim_framer_options_copy_object_value(
+        options: *mut c_void,
+        key: *const c_char,
+    ) -> *mut c_void;
     #[link_name = "nw_shim_ws_options_set_client_request_handler"]
     pub fn nw_shim_ws_options_set_client_request_handler(
         options: *mut c_void,

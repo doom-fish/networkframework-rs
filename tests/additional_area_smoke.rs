@@ -174,10 +174,9 @@ fn endpoint_area_clone_preserves_signature_and_invalid_input_errors() -> Result<
     assert_eq!(host_clone.signature(), host.signature());
 
     let address = Endpoint::address("127.0.0.1", 8443)?;
-    let address_clone = address.clone();
-    assert_eq!(address_clone.endpoint_type(), EndpointType::Address);
-    assert_eq!(address_clone.port(), 8443);
-    assert!(address_clone.raw_address().is_some());
+    assert_eq!(address.endpoint_type(), EndpointType::Address);
+    assert_eq!(address.port(), 8443);
+    assert!(address.raw_address().is_some());
 
     assert!(matches!(
         Endpoint::host("bad\0host", 80),

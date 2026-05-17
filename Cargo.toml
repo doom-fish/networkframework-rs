@@ -1,6 +1,6 @@
 [package]
 name = "networkframework"
-version = "0.10.0"
+version = "0.11.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/doom-fish/networkframework-rs"
@@ -26,6 +26,7 @@ include = [
 
 [features]
 default = []
+async = []
 raw-ffi = []
 
 [lints.rust]
@@ -43,8 +44,10 @@ crate-type = ["lib"]
 
 [dependencies]
 apple-cf = { path = "../apple-cf-rs", version = "0.7" }
+doom-fish-utils = { path = "../doom-fish-utils", version = "0.1" }
 
 [dev-dependencies]
+pollster = "0.3"
 
 [package.metadata.docs.rs]
 all-features = true
@@ -97,3 +100,7 @@ name = "privacy_context_overview"
 
 [[example]]
 name = "quic_options"
+
+[[example]]
+name = "07_async_streams"
+required-features = ["async"]

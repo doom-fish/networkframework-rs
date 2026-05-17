@@ -5393,3 +5393,150 @@ int nw_shim_ws_response_enumerate_additional_headers(void *response, HeaderEnume
     });
     return completed ? count : -count;
 }
+
+// --- Async-stream helper shims ---
+
+void nw_shim_connection_set_state_changed_handler(void *handle, ConnectionStateCallback callback, void *user_info) {
+    nw_conn_handle *h = (nw_conn_handle *)handle;
+    if (!h) {
+        return;
+    }
+    if (!callback) {
+        nw_connection_set_state_changed_handler(h->conn, NULL);
+        return;
+    }
+    nw_connection_set_state_changed_handler(h->conn, ^(nw_connection_state_t state, nw_error_t error) {
+        if (state == nw_connection_state_ready) {
+            atomic_store(&h->state_code, 1);
+            dispatch_semaphore_signal(h->ready);
+        } else if (state == nw_connection_state_cancelled) {
+            atomic_store(&h->state_code, 2);
+            dispatch_semaphore_signal(h->ready);
+        } else if (state == nw_connection_state_failed) {
+            atomic_store(&h->state_code, 3);
+            dispatch_semaphore_signal(h->ready);
+        }
+        void *retained_error = error ? nw_retain(error) : NULL;
+        callback((int)state, retained_error, user_info);
+    });
+}
+
+void nw_shim_connection_drain_queue(void *handle) {
+    nw_conn_handle *h = (nw_conn_handle *)handle;
+    if (!h || !h->queue) {
+        return;
+    }
+    dispatch_sync(h->queue, ^{});
+}
+
+void nw_shim_listener_set_state_changed_handler(void *handle, ListenerStateCallback callback, void *user_info) {
+    nw_listener_handle *h = (nw_listener_handle *)handle;
+    if (!h) {
+        return;
+    }
+    if (!callback) {
+        nw_listener_set_state_changed_handler(h->listener, NULL);
+        return;
+    }
+    nw_listener_set_state_changed_handler(h->listener, ^(nw_listener_state_t state, nw_error_t error) {
+        if (state == nw_listener_state_ready) {
+            atomic_store(&h->bound_port, nw_listener_get_port(h->listener));
+            atomic_store(&h->state_code, 1);
+            dispatch_semaphore_signal(h->ready);
+        } else if (state == nw_listener_state_cancelled) {
+            atomic_store(&h->state_code, 2);
+            dispatch_semaphore_signal(h->ready);
+        } else if (state == nw_listener_state_failed) {
+            atomic_store(&h->state_code, 3);
+            dispatch_semaphore_signal(h->ready);
+        }
+        void *retained_error = error ? nw_retain(error) : NULL;
+        callback((int)state, retained_error, user_info);
+    });
+}
+
+void nw_shim_listener_set_new_connection_handler(void *handle, ListenerNewConnectionCallback callback, void *user_info) {
+    nw_listener_handle *h = (nw_listener_handle *)handle;
+    if (!h) {
+        return;
+    }
+    if (!callback) {
+        nw_listener_set_new_connection_handler(h->listener, NULL);
+        return;
+    }
+    nw_listener_set_new_connection_handler(h->listener, ^(nw_connection_t conn) {
+        if (!conn) {
+            return;
+        }
+        int status = NW_OK;
+        nw_connection_t retained = nw_retain(conn);
+        nw_conn_handle *wrapped = nw_shim_wrap_started_connection(retained, "networkframework-rs.async-accepted", &status);
+        if (wrapped) {
+            callback(wrapped, user_info);
+        }
+    });
+}
+
+void nw_shim_listener_drain_queue(void *handle) {
+    nw_listener_handle *h = (nw_listener_handle *)handle;
+    if (!h || !h->queue) {
+        return;
+    }
+    dispatch_sync(h->queue, ^{});
+}
+
+void nw_shim_browser_set_browse_results_changed_handler(void *handle, BrowseResultChangedCallback callback, void *user_info) {
+    nw_browser_handle *h = (nw_browser_handle *)handle;
+    if (!h) {
+        return;
+    }
+    if (!callback) {
+        nw_browser_set_browse_results_changed_handler(h->browser, NULL);
+        return;
+    }
+    nw_browser_set_browse_results_changed_handler(h->browser, ^(nw_browse_result_t old_result, nw_browse_result_t new_result, bool batch_complete) {
+        uint64_t changes = nw_browse_result_get_changes(old_result, new_result);
+        void *old_handle = old_result ? nw_retain(old_result) : NULL;
+        void *new_handle = new_result ? nw_retain(new_result) : NULL;
+        callback(old_handle, new_handle, changes, batch_complete ? 1 : 0, user_info);
+    });
+}
+
+void nw_shim_browser_drain_queue(void *handle) {
+    nw_browser_handle *h = (nw_browser_handle *)handle;
+    if (!h || !h->queue) {
+        return;
+    }
+    dispatch_sync(h->queue, ^{});
+}
+
+void nw_shim_path_monitor_set_update_handler(void *handle, ConnectionPathCallback callback, void *user_info) {
+    nw_path_handle *h = (nw_path_handle *)handle;
+    if (!h) {
+        return;
+    }
+    if (!callback) {
+        nw_path_monitor_set_update_handler(h->monitor, NULL);
+        return;
+    }
+    nw_path_monitor_set_update_handler(h->monitor, ^(nw_path_t path) {
+        if (h->latest_path) {
+            nw_release(h->latest_path);
+            h->latest_path = NULL;
+        }
+        if (path) {
+            h->latest_path = nw_retain(path);
+        }
+        void *retained_path = path ? nw_retain(path) : NULL;
+        callback(retained_path, user_info);
+    });
+}
+
+void nw_shim_path_monitor_drain_queue(void *handle) {
+    nw_path_handle *h = (nw_path_handle *)handle;
+    if (!h || !h->queue) {
+        return;
+    }
+    dispatch_sync(h->queue, ^{});
+}
+

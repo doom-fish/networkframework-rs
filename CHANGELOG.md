@@ -1,5 +1,13 @@
 # Changelog
 
+
+## [0.11.0] - 2026-05-17
+
+- Added a new `async_api` Tier-2 module backed by `doom_fish_utils::stream::BoundedAsyncStream`.
+- Exposed seven async stream surfaces for connections, listeners, path monitors, and browsers.
+- Added new C-shim/FFI subscription helpers, an async example, and smoke tests for stream subscription/drop flows.
+- Bumped the crate version to 0.11.0.
+
 ## 0.10.0 - 2025-MM-DD
 
 - Closed all 2 remaining coverage gaps: added `FrameworkError::copy_cf_error()` for safe Core Foundation error conversion via `apple_cf::cf::CFError`, and added `WebSocket::set_pong_handler()` / `set_pong_handler_with_context()` for WebSocket pong-frame callback registration.

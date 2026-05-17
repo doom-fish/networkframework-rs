@@ -575,6 +575,9 @@ typedef void (*BrowseResultChangedCallback)(
     int batch_complete,
     void *user_info
 );
+typedef void (*ConnectionStateCallback)(int state, void *error, void *user_info);
+typedef void (*ListenerStateCallback)(int state, void *error, void *user_info);
+typedef void (*ListenerNewConnectionCallback)(void *connection_handle, void *user_info);
 typedef void (*ConnectionBooleanCallback)(int value, void *user_info);
 typedef void (*ConnectionPathCallback)(void *path, void *user_info);
 typedef void (*ConnectionBatchCallback)(void *user_info);
@@ -626,6 +629,12 @@ void nw_shim_browser_set_state_changed_handler(
     BrowserStateChangedCallback callback,
     void *user_info
 );
+void nw_shim_browser_set_browse_results_changed_handler(
+    void *handle,
+    BrowseResultChangedCallback callback,
+    void *user_info
+);
+void nw_shim_browser_drain_queue(void *handle);
 uint64_t nw_shim_browse_result_get_changes(void *old_result, void *new_result);
 void *nw_shim_browse_result_copy_endpoint(void *result);
 size_t nw_shim_browse_result_get_interfaces_count(void *result);
@@ -636,6 +645,12 @@ int nw_shim_browse_result_enumerate_interfaces(
     void *user_info
 );
 
+void nw_shim_connection_set_state_changed_handler(
+    void *handle,
+    ConnectionStateCallback callback,
+    void *user_info
+);
+void nw_shim_connection_drain_queue(void *handle);
 void nw_shim_connection_set_viability_changed_handler(
     void *handle,
     ConnectionBooleanCallback callback,
@@ -743,6 +758,17 @@ void nw_shim_listener_set_new_connection_group_handler(
     ListenerNewConnectionGroupCallback callback,
     void *user_info
 );
+void nw_shim_listener_set_state_changed_handler(
+    void *handle,
+    ListenerStateCallback callback,
+    void *user_info
+);
+void nw_shim_listener_set_new_connection_handler(
+    void *handle,
+    ListenerNewConnectionCallback callback,
+    void *user_info
+);
+void nw_shim_listener_drain_queue(void *handle);
 
 int nw_shim_path_enumerate_gateways(void *path, EndpointEnumerationCallback callback, void *user_info);
 void *nw_shim_path_monitor_start_with_type(
@@ -760,6 +786,12 @@ void nw_shim_path_monitor_set_cancel_handler(
     PathMonitorCancelCallback callback,
     void *user_info
 );
+void nw_shim_path_monitor_set_update_handler(
+    void *handle,
+    ConnectionPathCallback callback,
+    void *user_info
+);
+void nw_shim_path_monitor_drain_queue(void *handle);
 
 void *nw_shim_protocol_create_ip_metadata(void);
 void *nw_shim_protocol_create_udp_metadata(void);

@@ -393,14 +393,20 @@ impl ProtocolMetadata {
     /// Create IP metadata.
     pub fn ip() -> Result<Self, NetworkError> {
         Ok(Self {
-            handle: handle_result(unsafe { ffi::nw_shim_protocol_create_ip_metadata() }, "IP metadata")?,
+            handle: handle_result(
+                unsafe { ffi::nw_shim_protocol_create_ip_metadata() },
+                "IP metadata",
+            )?,
         })
     }
 
     /// Create UDP metadata.
     pub fn udp() -> Result<Self, NetworkError> {
         Ok(Self {
-            handle: handle_result(unsafe { ffi::nw_shim_protocol_create_udp_metadata() }, "UDP metadata")?,
+            handle: handle_result(
+                unsafe { ffi::nw_shim_protocol_create_udp_metadata() },
+                "UDP metadata",
+            )?,
         })
     }
 
@@ -558,7 +564,9 @@ impl ProtocolOptions {
     }
 
     pub fn set_ip_use_minimum_mtu(&mut self, use_minimum_mtu: bool) -> &mut Self {
-        unsafe { ffi::nw_shim_ip_options_set_use_minimum_mtu(self.handle, i32::from(use_minimum_mtu)) };
+        unsafe {
+            ffi::nw_shim_ip_options_set_use_minimum_mtu(self.handle, i32::from(use_minimum_mtu));
+        };
         self
     }
 
@@ -586,11 +594,16 @@ impl ProtocolOptions {
         &mut self,
         preference: IpLocalAddressPreference,
     ) -> &mut Self {
-        unsafe { ffi::nw_shim_ip_options_set_local_address_preference(self.handle, preference.as_raw()) };
+        unsafe {
+            ffi::nw_shim_ip_options_set_local_address_preference(self.handle, preference.as_raw());
+        };
         self
     }
 
-    pub fn set_ip_disable_multicast_loopback(&mut self, disable_multicast_loopback: bool) -> &mut Self {
+    pub fn set_ip_disable_multicast_loopback(
+        &mut self,
+        disable_multicast_loopback: bool,
+    ) -> &mut Self {
         unsafe {
             ffi::nw_shim_ip_options_set_disable_multicast_loopback(
                 self.handle,
@@ -616,7 +629,9 @@ impl ProtocolOptions {
     }
 
     pub fn set_tcp_enable_keepalive(&mut self, enable_keepalive: bool) -> &mut Self {
-        unsafe { ffi::nw_shim_tcp_options_set_enable_keepalive(self.handle, i32::from(enable_keepalive)) };
+        unsafe {
+            ffi::nw_shim_tcp_options_set_enable_keepalive(self.handle, i32::from(enable_keepalive));
+        };
         self
     }
 
@@ -626,7 +641,9 @@ impl ProtocolOptions {
     }
 
     pub fn set_tcp_keepalive_idle_time(&mut self, keepalive_idle_time: u32) -> &mut Self {
-        unsafe { ffi::nw_shim_tcp_options_set_keepalive_idle_time(self.handle, keepalive_idle_time) };
+        unsafe {
+            ffi::nw_shim_tcp_options_set_keepalive_idle_time(self.handle, keepalive_idle_time);
+        };
         self
     }
 
@@ -636,7 +653,9 @@ impl ProtocolOptions {
     }
 
     pub fn set_tcp_maximum_segment_size(&mut self, maximum_segment_size: u32) -> &mut Self {
-        unsafe { ffi::nw_shim_tcp_options_set_maximum_segment_size(self.handle, maximum_segment_size) };
+        unsafe {
+            ffi::nw_shim_tcp_options_set_maximum_segment_size(self.handle, maximum_segment_size);
+        };
         self
     }
 
@@ -656,7 +675,12 @@ impl ProtocolOptions {
     }
 
     pub fn set_tcp_retransmit_fin_drop(&mut self, retransmit_fin_drop: bool) -> &mut Self {
-        unsafe { ffi::nw_shim_tcp_options_set_retransmit_fin_drop(self.handle, i32::from(retransmit_fin_drop)) };
+        unsafe {
+            ffi::nw_shim_tcp_options_set_retransmit_fin_drop(
+                self.handle,
+                i32::from(retransmit_fin_drop),
+            );
+        };
         self
     }
 
@@ -671,7 +695,9 @@ impl ProtocolOptions {
     }
 
     pub fn set_tcp_enable_fast_open(&mut self, enable_fast_open: bool) -> &mut Self {
-        unsafe { ffi::nw_shim_tcp_options_set_enable_fast_open(self.handle, i32::from(enable_fast_open)) };
+        unsafe {
+            ffi::nw_shim_tcp_options_set_enable_fast_open(self.handle, i32::from(enable_fast_open));
+        };
         self
     }
 
@@ -694,16 +720,31 @@ impl ProtocolOptions {
     }
 
     pub fn set_udp_prefer_no_checksum(&mut self, prefer_no_checksum: bool) -> &mut Self {
-        unsafe { ffi::nw_shim_udp_options_set_prefer_no_checksum(self.handle, i32::from(prefer_no_checksum)) };
+        unsafe {
+            ffi::nw_shim_udp_options_set_prefer_no_checksum(
+                self.handle,
+                i32::from(prefer_no_checksum),
+            );
+        };
         self
     }
 
-    pub fn add_ws_additional_header(&mut self, name: &str, value: &str) -> Result<&mut Self, NetworkError> {
+    pub fn add_ws_additional_header(
+        &mut self,
+        name: &str,
+        value: &str,
+    ) -> Result<&mut Self, NetworkError> {
         let name = CString::new(name)
             .map_err(|e| NetworkError::InvalidArgument(format!("name NUL byte: {e}")))?;
         let value = CString::new(value)
             .map_err(|e| NetworkError::InvalidArgument(format!("value NUL byte: {e}")))?;
-        unsafe { ffi::nw_shim_ws_options_add_additional_header(self.handle, name.as_ptr(), value.as_ptr()) };
+        unsafe {
+            ffi::nw_shim_ws_options_add_additional_header(
+                self.handle,
+                name.as_ptr(),
+                value.as_ptr(),
+            );
+        };
         Ok(self)
     }
 
@@ -715,17 +756,23 @@ impl ProtocolOptions {
     }
 
     pub fn set_ws_auto_reply_ping(&mut self, auto_reply_ping: bool) -> &mut Self {
-        unsafe { ffi::nw_shim_ws_options_set_auto_reply_ping(self.handle, i32::from(auto_reply_ping)) };
+        unsafe {
+            ffi::nw_shim_ws_options_set_auto_reply_ping(self.handle, i32::from(auto_reply_ping));
+        };
         self
     }
 
     pub fn set_ws_skip_handshake(&mut self, skip_handshake: bool) -> &mut Self {
-        unsafe { ffi::nw_shim_ws_options_set_skip_handshake(self.handle, i32::from(skip_handshake)) };
+        unsafe {
+            ffi::nw_shim_ws_options_set_skip_handshake(self.handle, i32::from(skip_handshake));
+        };
         self
     }
 
     pub fn set_ws_maximum_message_size(&mut self, maximum_message_size: usize) -> &mut Self {
-        unsafe { ffi::nw_shim_ws_options_set_maximum_message_size(self.handle, maximum_message_size) };
+        unsafe {
+            ffi::nw_shim_ws_options_set_maximum_message_size(self.handle, maximum_message_size);
+        };
         self
     }
 }

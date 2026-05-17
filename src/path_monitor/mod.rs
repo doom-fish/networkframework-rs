@@ -47,9 +47,16 @@ impl PathMonitor {
         (!handle.is_null()).then_some(unsafe { crate::path::Path::from_raw(handle) })
     }
 
+    #[must_use]
+    pub(crate) const fn as_ptr(&self) -> *mut c_void {
+        self.handle
+    }
+
     /// Prevent the monitor from considering paths that use an interface type.
     pub fn prohibit_interface_type(&mut self, interface_type: InterfaceType) -> &mut Self {
-        unsafe { ffi::nw_shim_path_monitor_prohibit_interface_type(self.handle, interface_type.as_raw()) };
+        unsafe {
+            ffi::nw_shim_path_monitor_prohibit_interface_type(self.handle, interface_type.as_raw());
+        };
         self
     }
 
@@ -62,11 +69,7 @@ impl PathMonitor {
         let arc = Arc::new(Mutex::new(callback));
         let raw = Arc::into_raw(arc.clone()).cast::<c_void>().cast_mut();
         unsafe {
-            ffi::nw_shim_path_monitor_set_cancel_handler(
-                self.handle,
-                Some(cancel_trampoline),
-                raw,
-            );
+            ffi::nw_shim_path_monitor_set_cancel_handler(self.handle, Some(cancel_trampoline), raw);
         };
         self.cancel_callback = Some(arc);
     }

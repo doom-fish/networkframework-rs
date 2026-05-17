@@ -7,6 +7,9 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 pub mod advertise_descriptor;
+#[cfg(feature = "async")]
+#[cfg_attr(docsrs, doc(cfg(feature = "async")))]
+pub mod async_api;
 pub mod browser;
 pub mod client;
 pub mod connection;
@@ -86,8 +89,7 @@ pub use quic_support::{
 pub use txt_record::{TxtRecord, TxtRecordEntry, TxtRecordFindResult, TxtRecordLookup};
 pub use udp::UdpClient;
 pub use websocket::{
-    Opcode, WebSocket, WsCloseCode, WsMessage, WsRequest, WsResponse, WsResponseStatus,
-    WsVersion,
+    Opcode, WebSocket, WsCloseCode, WsMessage, WsRequest, WsResponse, WsResponseStatus, WsVersion,
 };
 
 /// Common imports.
@@ -107,9 +109,9 @@ pub mod prelude {
         ConnectionGroup, ConnectionGroupDescriptor, ConnectionGroupMessage, ConnectionGroupState,
     };
     pub use crate::connection_report::{
-        DataTransferPathReport, DataTransferReport, DataTransferReportState,
-        EstablishmentProtocol, EstablishmentReport, ResolutionProtocol, ResolutionReport,
-        ResolutionSource, ResolutionStep,
+        DataTransferPathReport, DataTransferReport, DataTransferReportState, EstablishmentProtocol,
+        EstablishmentReport, ResolutionProtocol, ResolutionReport, ResolutionSource,
+        ResolutionStep,
     };
     pub use crate::endpoint::{Endpoint, EndpointType};
     pub use crate::error::{ErrorDomain, FrameworkError, NetworkError};

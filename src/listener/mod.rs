@@ -82,7 +82,8 @@ impl TcpListener {
     /// Create a listener directly from parameters without binding a specific port first.
     pub fn bind_direct(parameters: &ConnectionParameters) -> Result<Self, NetworkError> {
         let mut status: c_int = 0;
-        let handle = unsafe { ffi::nw_shim_listener_create_direct(parameters.as_ptr(), &mut status) };
+        let handle =
+            unsafe { ffi::nw_shim_listener_create_direct(parameters.as_ptr(), &mut status) };
         if status != ffi::NW_OK || handle.is_null() {
             return Err(from_status(status));
         }
@@ -173,7 +174,9 @@ impl TcpListener {
 
     /// Update the cap on simultaneously delivered new connections.
     pub fn set_new_connection_limit(&mut self, new_connection_limit: u32) -> &mut Self {
-        unsafe { ffi::nw_shim_listener_set_new_connection_limit(self.handle, new_connection_limit) };
+        unsafe {
+            ffi::nw_shim_listener_set_new_connection_limit(self.handle, new_connection_limit);
+        };
         self
     }
 
@@ -215,6 +218,16 @@ impl TcpListener {
         self.new_connection_group_callback = Some(handler);
     }
 
+    #[must_use]
+    pub(crate) const fn as_ptr(&self) -> *mut c_void {
+        self.handle
+    }
+
+    #[must_use]
+    pub(crate) fn keepalives(&self) -> KeepAlives {
+        self.keepalives.clone()
+    }
+
     /// Block until a new connection arrives, then return it as a
     /// ready-to-use [`TcpClient`].
     ///
@@ -251,10 +264,7 @@ unsafe extern "C" fn advertised_endpoint_trampoline(
     guard(endpoint, is_added != 0);
 }
 
-unsafe extern "C" fn new_connection_group_trampoline(
-    group: *mut c_void,
-    user_info: *mut c_void,
-) {
+unsafe extern "C" fn new_connection_group_trampoline(group: *mut c_void, user_info: *mut c_void) {
     if user_info.is_null() || group.is_null() {
         return;
     }

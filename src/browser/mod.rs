@@ -44,7 +44,7 @@ pub enum BrowserState {
 }
 
 impl BrowserState {
-    const fn from_raw(raw: i32) -> Self {
+    pub(crate) const fn from_raw(raw: i32) -> Self {
         match raw {
             0 => Self::Invalid,
             1 => Self::Ready,
@@ -81,6 +81,11 @@ impl BrowseResultChange {
 
     #[must_use]
     pub const fn from_bits(bits: u64) -> Self {
+        Self(bits)
+    }
+
+    #[must_use]
+    pub(crate) const fn from_raw(bits: u64) -> Self {
         Self(bits)
     }
 }
@@ -132,7 +137,9 @@ impl BrowseResult {
             let name = if name.is_null() {
                 String::new()
             } else {
-                unsafe { CStr::from_ptr(name) }.to_string_lossy().into_owned()
+                unsafe { CStr::from_ptr(name) }
+                    .to_string_lossy()
+                    .into_owned()
             };
             interfaces.push(NetworkInterface {
                 name,
@@ -301,8 +308,13 @@ impl Drop for BrowseDescriptor {
 }
 
 type Cb = Mutex<Box<dyn FnMut(BrowserEvent) + Send + 'static>>;
-type ResultsCb =
-    Mutex<Box<dyn FnMut(Option<BrowseResult>, Option<BrowseResult>, BrowseResultChange, bool) + Send + 'static>>;
+type ResultsCb = Mutex<
+    Box<
+        dyn FnMut(Option<BrowseResult>, Option<BrowseResult>, BrowseResultChange, bool)
+            + Send
+            + 'static,
+    >,
+>;
 type StateCb = Mutex<Box<dyn FnMut(BrowserState, Option<FrameworkError>) + Send + 'static>>;
 
 /// RAII guard for a running `nw_browser`. Drop to stop receiving
@@ -330,6 +342,11 @@ impl Browser {
     pub fn parameters(&self) -> Option<ConnectionParameters> {
         let handle = unsafe { ffi::nw_shim_browser_copy_parameters(self.handle) };
         (!handle.is_null()).then_some(unsafe { ConnectionParameters::from_raw(handle) })
+    }
+
+    #[must_use]
+    pub(crate) const fn as_ptr(&self) -> *mut c_void {
+        self.handle
     }
 
     /// Receive browser state updates.
@@ -460,8 +477,10 @@ unsafe extern "C" fn result_trampoline(
     let Ok(mut guard) = callback.lock() else {
         return;
     };
-    let old_result = (!old_result.is_null()).then_some(unsafe { BrowseResult::from_raw(old_result) });
-    let new_result = (!new_result.is_null()).then_some(unsafe { BrowseResult::from_raw(new_result) });
+    let old_result =
+        (!old_result.is_null()).then_some(unsafe { BrowseResult::from_raw(old_result) });
+    let new_result =
+        (!new_result.is_null()).then_some(unsafe { BrowseResult::from_raw(new_result) });
     guard(
         old_result,
         new_result,

@@ -276,7 +276,11 @@ impl WsResponse {
         selected_subprotocol: Option<&str>,
     ) -> Result<Self, NetworkError> {
         let selected_subprotocol = selected_subprotocol
-            .map(|value| CString::new(value).map_err(|e| NetworkError::InvalidArgument(format!("selected_subprotocol NUL byte: {e}"))))
+            .map(|value| {
+                CString::new(value).map_err(|e| {
+                    NetworkError::InvalidArgument(format!("selected_subprotocol NUL byte: {e}"))
+                })
+            })
             .transpose()?;
         let handle = unsafe {
             ffi::nw_shim_ws_response_create(
@@ -319,12 +323,22 @@ impl WsResponse {
     ///
     /// Returns [`NetworkError::InvalidArgument`] if either header string
     /// contains an interior NUL byte.
-    pub fn add_additional_header(&mut self, name: &str, value: &str) -> Result<&mut Self, NetworkError> {
+    pub fn add_additional_header(
+        &mut self,
+        name: &str,
+        value: &str,
+    ) -> Result<&mut Self, NetworkError> {
         let name = CString::new(name)
             .map_err(|e| NetworkError::InvalidArgument(format!("name NUL byte: {e}")))?;
         let value = CString::new(value)
             .map_err(|e| NetworkError::InvalidArgument(format!("value NUL byte: {e}")))?;
-        unsafe { ffi::nw_shim_ws_response_add_additional_header(self.handle, name.as_ptr(), value.as_ptr()) };
+        unsafe {
+            ffi::nw_shim_ws_response_add_additional_header(
+                self.handle,
+                name.as_ptr(),
+                value.as_ptr(),
+            );
+        };
         Ok(self)
     }
 
@@ -496,10 +510,16 @@ impl WebSocket {
         callback: ffi::WsPongCallback,
     ) -> Result<(), NetworkError> {
         if metadata.is_null() {
-            return Err(NetworkError::InvalidArgument("metadata is null".to_string()));
+            return Err(NetworkError::InvalidArgument(
+                "metadata is null".to_string(),
+            ));
         }
         unsafe {
-            ffi::nw_shim_ws_metadata_set_pong_handler(metadata, Some(callback), core::ptr::null_mut());
+            ffi::nw_shim_ws_metadata_set_pong_handler(
+                metadata,
+                Some(callback),
+                core::ptr::null_mut(),
+            );
         }
         Ok(())
     }
@@ -525,7 +545,9 @@ impl WebSocket {
         user_info: *mut c_void,
     ) -> Result<(), NetworkError> {
         if metadata.is_null() {
-            return Err(NetworkError::InvalidArgument("metadata is null".to_string()));
+            return Err(NetworkError::InvalidArgument(
+                "metadata is null".to_string(),
+            ));
         }
         unsafe {
             ffi::nw_shim_ws_metadata_set_pong_handler(metadata, Some(callback), user_info);
