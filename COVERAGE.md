@@ -1,4 +1,4 @@
-# Network.framework coverage (v0.9.2)
+# Network.framework coverage (v0.9.3)
 
 Audited against the macOS 26.2 SDK headers under `Network.framework/Headers`.
 Current audit status: **498 / 500 SDK symbols verified (99.60%)**. See `COVERAGE_AUDIT.md` for the full symbol-by-symbol table.

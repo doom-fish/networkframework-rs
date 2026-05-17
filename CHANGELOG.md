@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.9.3 - 2026-05-17
+
+- Added seven new integration tests covering Connection, Listener, Browser, Parameters,
+  Endpoint, Path, and Framer areas under `tests/additional_area_smoke.rs`.
+- Bumped the crate version to 0.9.3.
+
 ## 0.9.2 - 2026-05-17
 
 - Added rich browse-result coverage via `BrowseResult`, `BrowseResultChange`, and `BrowseResultsBrowser`.
