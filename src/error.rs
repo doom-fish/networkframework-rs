@@ -118,6 +118,17 @@ impl FrameworkError {
     pub fn cf_error_description(&self) -> Option<String> {
         copied_string(unsafe { ffi::nw_shim_error_copy_cf_error_description(self.handle) })
     }
+
+    /// Get the underlying Core Foundation [`CFError`](apple_cf::cf::CFError) from this framework error.
+    ///
+    /// Returns `Some(CFError)` if a valid `CFError` is available, `None` otherwise.
+    /// The returned `CFError` is owned and will be automatically released when dropped.
+    #[must_use]
+    pub fn copy_cf_error(&self) -> Option<apple_cf::cf::CFError> {
+        let cf_error_ptr = unsafe { ffi::nw_shim_error_copy_cf_error(self.handle) };
+        // nw_error_copy_cf_error returns a retained CFErrorRef, so we use from_raw_retained
+        unsafe { apple_cf::cf::CFError::from_raw_retained(cf_error_ptr) }
+    }
 }
 
 impl Clone for FrameworkError {

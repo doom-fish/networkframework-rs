@@ -718,6 +718,7 @@ void nw_shim_connection_group_set_new_connection_handler(
 
 int nw_shim_error_get_domain(void *error);
 int nw_shim_error_get_code(void *error);
+void *nw_shim_error_copy_cf_error(void *error);
 char *nw_shim_error_copy_cf_error_domain(void *error);
 char *nw_shim_error_copy_cf_error_description(void *error);
 char *nw_shim_error_copy_posix_domain(void);

@@ -474,6 +474,64 @@ impl WebSocket {
             data: buf,
         })
     }
+
+    /// Register a pong handler callback for WebSocket messages.
+    ///
+    /// This registers a callback that will be invoked whenever a pong frame is received.
+    /// The callback will receive a [`FrameworkError`] if there was an error processing the pong,
+    /// or `None` if the pong was handled successfully.
+    ///
+    /// # Safety
+    ///
+    /// - The callback must be safe to call from the networking dispatch queue.
+    /// - The provided metadata must be valid WebSocket protocol metadata.
+    /// - The metadata pointer must remain valid while the callback is in use.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetworkError::InvalidArgument`] if metadata is null.
+    pub unsafe fn set_pong_handler(
+        &self,
+        metadata: *mut c_void,
+        callback: ffi::WsPongCallback,
+    ) -> Result<(), NetworkError> {
+        if metadata.is_null() {
+            return Err(NetworkError::InvalidArgument("metadata is null".to_string()));
+        }
+        unsafe {
+            ffi::nw_shim_ws_metadata_set_pong_handler(metadata, Some(callback), core::ptr::null_mut());
+        }
+        Ok(())
+    }
+
+    /// Register a pong handler with user context.
+    ///
+    /// Similar to [`Self::set_pong_handler`] but allows passing user context that
+    /// will be forwarded to the callback.
+    ///
+    /// # Safety
+    ///
+    /// - The callback must be safe to call from the networking dispatch queue.
+    /// - The provided metadata must be valid WebSocket protocol metadata.
+    /// - The metadata and `user_info` pointers must remain valid while the callback is in use.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetworkError::InvalidArgument`] if metadata is null.
+    pub unsafe fn set_pong_handler_with_context(
+        &self,
+        metadata: *mut c_void,
+        callback: ffi::WsPongCallback,
+        user_info: *mut c_void,
+    ) -> Result<(), NetworkError> {
+        if metadata.is_null() {
+            return Err(NetworkError::InvalidArgument("metadata is null".to_string()));
+        }
+        unsafe {
+            ffi::nw_shim_ws_metadata_set_pong_handler(metadata, Some(callback), user_info);
+        }
+        Ok(())
+    }
 }
 
 impl Drop for WebSocket {

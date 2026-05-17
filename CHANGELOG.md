@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.10.0 - 2025-MM-DD
+
+- Closed all 2 remaining coverage gaps: added `FrameworkError::copy_cf_error()` for safe Core Foundation error conversion via `apple_cf::cf::CFError`, and added `WebSocket::set_pong_handler()` / `set_pong_handler_with_context()` for WebSocket pong-frame callback registration.
+- Dependency: Added `apple-cf` v0.7.0 for safe Core Foundation type wrappers.
+- Coverage audit v2: 100.0% verified (500 / 500 SDK symbols).
+
 ## 0.9.3 - 2026-05-17
 
 - Added seven new integration tests covering Connection, Listener, Browser, Parameters,

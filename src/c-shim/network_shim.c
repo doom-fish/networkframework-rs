@@ -4880,6 +4880,13 @@ int nw_shim_error_get_code(void *error) {
     return nw_error_get_error_code((nw_error_t)error);
 }
 
+void *nw_shim_error_copy_cf_error(void *error) {
+    if (!error) {
+        return NULL;
+    }
+    return (void *)nw_error_copy_cf_error((nw_error_t)error);
+}
+
 char *nw_shim_error_copy_cf_error_domain(void *error) {
     if (!error) {
         return NULL;

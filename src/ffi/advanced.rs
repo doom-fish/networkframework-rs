@@ -639,6 +639,8 @@ unsafe extern "C" {
     pub fn nw_shim_error_get_domain(error: *mut c_void) -> c_int;
     #[link_name = "nw_shim_error_get_code"]
     pub fn nw_shim_error_get_code(error: *mut c_void) -> c_int;
+    #[link_name = "nw_shim_error_copy_cf_error"]
+    pub fn nw_shim_error_copy_cf_error(error: *mut c_void) -> *mut c_void;
     #[link_name = "nw_shim_error_copy_cf_error_domain"]
     pub fn nw_shim_error_copy_cf_error_domain(error: *mut c_void) -> *mut c_char;
     #[link_name = "nw_shim_error_copy_cf_error_description"]
