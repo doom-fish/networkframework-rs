@@ -6,10 +6,13 @@ use core::ffi::{c_int, c_void};
 use std::ffi::CString;
 use std::sync::{Arc, Mutex};
 
-use crate::client::ContentContext;
+use crate::client::{ContentContext, TcpClient};
+use crate::endpoint::Endpoint;
 use crate::error::{from_status, NetworkError};
 use crate::ffi;
-use crate::parameters::KeepAlives;
+use crate::parameters::{ConnectionParameters, KeepAlives};
+use crate::path::Path;
+use crate::protocol::{ProtocolDefinition, ProtocolMetadata, ProtocolOptions};
 
 fn to_cstring(value: &str, field: &str) -> Result<CString, NetworkError> {
     CString::new(value).map_err(|e| NetworkError::InvalidArgument(format!("{field} NUL byte: {e}")))
@@ -60,6 +63,52 @@ impl ConnectionGroupDescriptor {
             ));
         }
         Ok(self)
+    }
+
+    /// Enumerate the endpoints described by this connection group.
+    #[must_use]
+    pub fn endpoints(&self) -> Vec<Endpoint> {
+        unsafe extern "C" fn collect(endpoint: *mut c_void, user_info: *mut c_void) -> c_int {
+            if user_info.is_null() || endpoint.is_null() {
+                return 0;
+            }
+            let endpoints = unsafe { &mut *user_info.cast::<Vec<Endpoint>>() };
+            endpoints.push(unsafe { Endpoint::from_raw(endpoint) });
+            1
+        }
+
+        let mut endpoints = Vec::new();
+        unsafe {
+            ffi::nw_shim_group_descriptor_enumerate_endpoints(
+                self.handle,
+                Some(collect),
+                std::ptr::addr_of_mut!(endpoints).cast(),
+            )
+        };
+        endpoints
+    }
+
+    /// Restrict multicast traffic to a specific source endpoint.
+    pub fn set_specific_source(&mut self, endpoint: &Endpoint) -> &mut Self {
+        unsafe { ffi::nw_shim_multicast_group_descriptor_set_specific_source(self.handle, endpoint.as_ptr()) };
+        self
+    }
+
+    /// Whether unicast traffic is disabled for multicast descriptors.
+    #[must_use]
+    pub fn disable_unicast_traffic(&self) -> bool {
+        unsafe { ffi::nw_shim_multicast_group_descriptor_get_disable_unicast_traffic(self.handle) != 0 }
+    }
+
+    /// Enable or disable unicast traffic for multicast descriptors.
+    pub fn set_disable_unicast_traffic(&mut self, disable_unicast_traffic: bool) -> &mut Self {
+        unsafe {
+            ffi::nw_shim_multicast_group_descriptor_set_disable_unicast_traffic(
+                self.handle,
+                c_int::from(disable_unicast_traffic),
+            )
+        };
+        self
     }
 
     #[must_use]
@@ -117,13 +166,19 @@ pub struct ConnectionGroupMessage {
 type StateCallback = Mutex<Box<dyn FnMut(ConnectionGroupState) + Send + 'static>>;
 type ReceiveCallback = Mutex<Box<dyn FnMut(ConnectionGroupMessage) + Send + 'static>>;
 
+struct NewConnectionCallback {
+    keepalives: KeepAlives,
+    callback: Mutex<Box<dyn FnMut(TcpClient) + Send + 'static>>,
+}
+
 /// A running connection group.
 #[allow(clippy::type_complexity)]
 pub struct ConnectionGroup {
     handle: *mut c_void,
     state_callback: Option<Arc<StateCallback>>,
     receive_callback: Option<Arc<ReceiveCallback>>,
-    _keepalives: KeepAlives,
+    new_connection_callback: Option<Arc<NewConnectionCallback>>,
+    keepalives: KeepAlives,
 }
 
 unsafe impl Send for ConnectionGroup {}
@@ -147,7 +202,8 @@ impl ConnectionGroup {
             handle,
             state_callback: None,
             receive_callback: None,
-            _keepalives: parameters.keepalives(),
+            new_connection_callback: None,
+            keepalives: parameters.keepalives(),
         })
     }
 
@@ -191,6 +247,21 @@ impl ConnectionGroup {
             )
         };
         self.receive_callback = Some(arc);
+    }
+
+    /// # Safety
+    ///
+    /// `handle` must be a valid retained connection-group handle owned by the
+    /// caller and remain alive for the returned wrapper.
+    #[must_use]
+    pub(crate) const unsafe fn from_raw(handle: *mut c_void, keepalives: KeepAlives) -> Self {
+        Self {
+            handle,
+            state_callback: None,
+            receive_callback: None,
+            new_connection_callback: None,
+            keepalives,
+        }
     }
 
     /// Start the connection group and wait for the initial state update.
@@ -245,6 +316,173 @@ impl ConnectionGroup {
         Ok(())
     }
 
+    /// Copy the underlying group descriptor.
+    #[must_use]
+    pub fn descriptor(&self) -> Option<ConnectionGroupDescriptor> {
+        let handle = unsafe { ffi::nw_shim_connection_group_copy_descriptor(self.handle) };
+        (!handle.is_null()).then_some(ConnectionGroupDescriptor { handle })
+    }
+
+    /// Copy the group's parameters snapshot.
+    #[must_use]
+    pub fn parameters(&self) -> Option<ConnectionParameters> {
+        let handle = unsafe { ffi::nw_shim_connection_group_copy_parameters(self.handle) };
+        (!handle.is_null()).then_some(unsafe { ConnectionParameters::from_raw(handle) })
+    }
+
+    /// Copy the remote endpoint associated with a received message.
+    #[must_use]
+    pub fn remote_endpoint_for_message(&self, context: &ContentContext) -> Option<Endpoint> {
+        let handle = unsafe {
+            ffi::nw_shim_connection_group_copy_remote_endpoint_for_message(
+                self.handle,
+                context.as_ptr(),
+            )
+        };
+        (!handle.is_null()).then_some(unsafe { Endpoint::from_raw(handle) })
+    }
+
+    /// Copy the local endpoint associated with a received message.
+    #[must_use]
+    pub fn local_endpoint_for_message(&self, context: &ContentContext) -> Option<Endpoint> {
+        let handle = unsafe {
+            ffi::nw_shim_connection_group_copy_local_endpoint_for_message(
+                self.handle,
+                context.as_ptr(),
+            )
+        };
+        (!handle.is_null()).then_some(unsafe { Endpoint::from_raw(handle) })
+    }
+
+    /// Copy the path associated with a received message.
+    #[must_use]
+    pub fn path_for_message(&self, context: &ContentContext) -> Option<Path> {
+        let handle = unsafe {
+            ffi::nw_shim_connection_group_copy_path_for_message(self.handle, context.as_ptr())
+        };
+        (!handle.is_null()).then_some(unsafe { Path::from_raw(handle) })
+    }
+
+    /// Copy group-wide protocol metadata for a specific protocol definition.
+    #[must_use]
+    pub fn protocol_metadata(&self, definition: &ProtocolDefinition) -> Option<ProtocolMetadata> {
+        let handle = unsafe {
+            ffi::nw_shim_connection_group_copy_protocol_metadata(self.handle, definition.as_ptr())
+        };
+        (!handle.is_null()).then_some(unsafe { ProtocolMetadata::from_raw(handle) })
+    }
+
+    /// Copy per-message protocol metadata for a specific protocol definition.
+    #[must_use]
+    pub fn protocol_metadata_for_message(
+        &self,
+        context: &ContentContext,
+        definition: &ProtocolDefinition,
+    ) -> Option<ProtocolMetadata> {
+        let handle = unsafe {
+            ffi::nw_shim_connection_group_copy_protocol_metadata_for_message(
+                self.handle,
+                context.as_ptr(),
+                definition.as_ptr(),
+            )
+        };
+        (!handle.is_null()).then_some(unsafe { ProtocolMetadata::from_raw(handle) })
+    }
+
+    /// Extract a new connection corresponding to a received message.
+    pub fn extract_connection_for_message(
+        &self,
+        context: &ContentContext,
+    ) -> Result<TcpClient, NetworkError> {
+        let mut status = ffi::NW_OK;
+        let handle = unsafe {
+            ffi::nw_shim_connection_group_extract_connection_for_message(
+                self.handle,
+                context.as_ptr(),
+                &mut status,
+            )
+        };
+        if status != ffi::NW_OK || handle.is_null() {
+            return Err(from_status(status));
+        }
+        Ok(unsafe { TcpClient::from_raw_with_keepalives(handle, self.keepalives.clone()) })
+    }
+
+    /// Extract a connection for a specific remote endpoint and protocol options.
+    pub fn extract_connection(
+        &self,
+        endpoint: &Endpoint,
+        protocol_options: &ProtocolOptions,
+    ) -> Result<TcpClient, NetworkError> {
+        let mut status = ffi::NW_OK;
+        let handle = unsafe {
+            ffi::nw_shim_connection_group_extract_connection(
+                self.handle,
+                endpoint.as_ptr(),
+                protocol_options.as_ptr(),
+                &mut status,
+            )
+        };
+        if status != ffi::NW_OK || handle.is_null() {
+            return Err(from_status(status));
+        }
+        Ok(unsafe { TcpClient::from_raw_with_keepalives(handle, self.keepalives.clone()) })
+    }
+
+    /// Receive callbacks for new connections accepted by the group.
+    pub fn set_new_connection_handler<F>(&mut self, callback: F)
+    where
+        F: FnMut(TcpClient) + Send + 'static,
+    {
+        let handler = Arc::new(NewConnectionCallback {
+            keepalives: self.keepalives.clone(),
+            callback: Mutex::new(Box::new(callback)),
+        });
+        let raw = Arc::into_raw(handler.clone()).cast::<c_void>().cast_mut();
+        unsafe {
+            ffi::nw_shim_connection_group_set_new_connection_handler(
+                self.handle,
+                Some(new_connection_trampoline),
+                raw,
+            );
+        };
+        self.new_connection_callback = Some(handler);
+    }
+
+    /// Reinsert an extracted connection back into the group.
+    pub fn reinsert_extracted_connection(&self, connection: TcpClient) -> Result<(), NetworkError> {
+        let status = unsafe {
+            ffi::nw_shim_connection_group_reinsert_extracted_connection(self.handle, connection.as_ptr())
+        };
+        if status != ffi::NW_OK {
+            return Err(from_status(status));
+        }
+        std::mem::forget(connection);
+        Ok(())
+    }
+
+    /// Reply to an inbound message using the group's reply path.
+    pub fn reply(
+        &self,
+        inbound_message: &ContentContext,
+        outbound_message: Option<&ContentContext>,
+        data: &[u8],
+    ) -> Result<(), NetworkError> {
+        let status = unsafe {
+            ffi::nw_shim_connection_group_reply(
+                self.handle,
+                inbound_message.as_ptr(),
+                outbound_message.map_or(core::ptr::null_mut(), ContentContext::as_ptr),
+                data.as_ptr(),
+                data.len(),
+            )
+        };
+        if status != ffi::NW_OK {
+            return Err(from_status(status));
+        }
+        Ok(())
+    }
+
     /// Cancel the connection group.
     pub fn cancel(&self) {
         unsafe { ffi::nw_shim_connection_group_cancel(self.handle) };
@@ -269,6 +507,17 @@ unsafe extern "C" fn state_trampoline(state: c_int, user_info: *mut c_void) {
         return;
     };
     guard(ConnectionGroupState::from_raw(state));
+}
+
+unsafe extern "C" fn new_connection_trampoline(connection: *mut c_void, user_info: *mut c_void) {
+    if user_info.is_null() || connection.is_null() {
+        return;
+    }
+    let callback = unsafe { &*user_info.cast::<NewConnectionCallback>() };
+    let Ok(mut guard) = callback.callback.lock() else {
+        return;
+    };
+    guard(unsafe { TcpClient::from_raw_with_keepalives(connection, callback.keepalives.clone()) });
 }
 
 unsafe extern "C" fn receive_trampoline(

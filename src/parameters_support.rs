@@ -41,7 +41,7 @@ pub enum ServiceClass {
 }
 
 impl ServiceClass {
-    const fn from_raw(raw: i32) -> Self {
+    pub(crate) const fn from_raw(raw: i32) -> Self {
         match raw {
             0 => Self::BestEffort,
             1 => Self::Background,
@@ -53,7 +53,7 @@ impl ServiceClass {
         }
     }
 
-    const fn as_raw(self) -> i32 {
+    pub(crate) const fn as_raw(self) -> i32 {
         match self {
             Self::BestEffort => 0,
             Self::Background => 1,

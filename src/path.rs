@@ -189,6 +189,29 @@ impl Path {
         interfaces
     }
 
+    /// Enumerate the gateways attached to this path snapshot.
+    #[must_use]
+    pub fn gateways(&self) -> Vec<Endpoint> {
+        unsafe extern "C" fn collect_gateway(endpoint: *mut c_void, user_info: *mut c_void) -> c_int {
+            if user_info.is_null() || endpoint.is_null() {
+                return 0;
+            }
+            let endpoints = unsafe { &mut *user_info.cast::<Vec<Endpoint>>() };
+            endpoints.push(unsafe { Endpoint::from_raw(endpoint) });
+            1
+        }
+
+        let mut endpoints = Vec::new();
+        unsafe {
+            ffi::nw_shim_path_enumerate_gateways(
+                self.handle,
+                Some(collect_gateway),
+                std::ptr::addr_of_mut!(endpoints).cast(),
+            )
+        };
+        endpoints
+    }
+
     #[must_use]
     pub(crate) const unsafe fn from_raw(handle: *mut c_void) -> Self {
         Self { handle }

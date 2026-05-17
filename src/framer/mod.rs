@@ -13,8 +13,11 @@ use std::slice;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::endpoint::Endpoint;
 use crate::error::NetworkError;
 use crate::ffi;
+use crate::parameters::ConnectionParameters;
+use crate::protocol::ProtocolOptions;
 
 /// Result of [`Framer::on_start`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,6 +167,26 @@ impl FramerOptions {
         Ok(FramerMessage { handle })
     }
 
+    /// Store an opaque object handle on the framer options.
+    ///
+    /// # Safety
+    ///
+    /// `value` must be either null or a valid Objective-C/Network.framework
+    /// object handle that remains valid for the duration expected by the framer.
+    pub unsafe fn set_object_value_handle(&mut self, key: &str, value: *mut c_void) -> Result<&mut Self, NetworkError> {
+        let key = CString::new(key)
+            .map_err(|e| NetworkError::InvalidArgument(format!("key NUL byte: {e}")))?;
+        unsafe { ffi::nw_shim_framer_options_set_object_value(self.handle, key.as_ptr(), value) };
+        Ok(self)
+    }
+
+    /// Copy an opaque object handle from the framer options.
+    pub fn copy_object_value_handle(&self, key: &str) -> Result<*mut c_void, NetworkError> {
+        let key = CString::new(key)
+            .map_err(|e| NetworkError::InvalidArgument(format!("key NUL byte: {e}")))?;
+        Ok(unsafe { ffi::nw_shim_framer_options_copy_object_value(self.handle, key.as_ptr()) })
+    }
+
     #[must_use]
     pub(crate) const fn as_ptr(&self) -> *mut c_void {
         self.handle
@@ -205,6 +228,26 @@ impl FramerMessage {
             _marker: PhantomData,
         }
         .get_u64(key)
+    }
+
+    /// Store an opaque object handle on the message metadata.
+    ///
+    /// # Safety
+    ///
+    /// `value` must be either null or a valid Objective-C/Network.framework
+    /// object handle that remains valid for the duration expected by the framer.
+    pub unsafe fn set_object_value_handle(&mut self, key: &str, value: *mut c_void) -> Result<&mut Self, NetworkError> {
+        let key = CString::new(key)
+            .map_err(|e| NetworkError::InvalidArgument(format!("key NUL byte: {e}")))?;
+        unsafe { ffi::nw_shim_framer_message_set_object_value(self.handle, key.as_ptr(), value) };
+        Ok(self)
+    }
+
+    /// Copy an opaque object handle from the message metadata.
+    pub fn copy_object_value_handle(&self, key: &str) -> Result<*mut c_void, NetworkError> {
+        let key = CString::new(key)
+            .map_err(|e| NetworkError::InvalidArgument(format!("key NUL byte: {e}")))?;
+        Ok(unsafe { ffi::nw_shim_framer_message_copy_object_value(self.handle, key.as_ptr()) })
     }
 
     #[must_use]
@@ -270,6 +313,34 @@ impl FramerContext {
             ));
         }
         Ok(FramerMessage { handle })
+    }
+
+    /// Copy the current remote endpoint for the framer.
+    #[must_use]
+    pub fn remote_endpoint(&self) -> Option<Endpoint> {
+        let handle = unsafe { ffi::nw_shim_framer_copy_remote_endpoint(self.handle) };
+        (!handle.is_null()).then_some(unsafe { Endpoint::from_raw(handle) })
+    }
+
+    /// Copy the current local endpoint for the framer.
+    #[must_use]
+    pub fn local_endpoint(&self) -> Option<Endpoint> {
+        let handle = unsafe { ffi::nw_shim_framer_copy_local_endpoint(self.handle) };
+        (!handle.is_null()).then_some(unsafe { Endpoint::from_raw(handle) })
+    }
+
+    /// Copy the current connection parameters for the framer.
+    #[must_use]
+    pub fn parameters(&self) -> Option<ConnectionParameters> {
+        let handle = unsafe { ffi::nw_shim_framer_copy_parameters(self.handle) };
+        (!handle.is_null()).then_some(unsafe { ConnectionParameters::from_raw(handle) })
+    }
+
+    /// Copy the protocol options associated with the framer.
+    #[must_use]
+    pub fn options(&self) -> Option<ProtocolOptions> {
+        let handle = unsafe { ffi::nw_shim_framer_copy_options(self.handle) };
+        (!handle.is_null()).then_some(unsafe { ProtocolOptions::from_raw(handle) })
     }
 
     /// Parse available input bytes.

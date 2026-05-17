@@ -7,6 +7,7 @@ use std::ffi::{CStr, CString};
 
 use crate::error::{from_status, NetworkError};
 use crate::ffi;
+use crate::txt_record::TxtRecord;
 
 pub struct AdvertiseDescriptor {
     handle: *mut c_void,
@@ -138,6 +139,21 @@ impl AdvertiseDescriptor {
             );
         };
         self
+    }
+
+    /// Attach a structured TXT-record object.
+    pub fn set_txt_record_object(&mut self, txt_record: &TxtRecord) -> &mut Self {
+        unsafe {
+            ffi::nw_shim_advertise_descriptor_set_txt_record_object(self.handle, txt_record.as_ptr());
+        };
+        self
+    }
+
+    /// Copy the current structured TXT-record object.
+    #[must_use]
+    pub fn txt_record_object(&self) -> Option<TxtRecord> {
+        let handle = unsafe { ffi::nw_shim_advertise_descriptor_copy_txt_record_object(self.handle) };
+        (!handle.is_null()).then_some(unsafe { TxtRecord::from_raw(handle) })
     }
 
     pub fn set_no_auto_rename(&mut self, no_auto_rename: bool) -> &mut Self {

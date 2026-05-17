@@ -42,8 +42,10 @@ pub mod websocket;
 
 pub use advertise_descriptor::{advertise_with_descriptor, AdvertiseDescriptor, Advertiser};
 pub use browser::{
-    advertise_bonjour_service, start_browser, start_browser_with_descriptor, BonjourAdvertiser,
-    BrowseDescriptor, Browser, BrowserEvent, DiscoveredService,
+    advertise_bonjour_service, start_browser, start_browser_results_with_descriptor,
+    start_browser_with_descriptor, BonjourAdvertiser, BrowseDescriptor, BrowseResult,
+    BrowseResultChange, BrowseResultsBrowser, Browser, BrowserEvent, BrowserState,
+    DiscoveredService,
 };
 pub use client::{ContentContext, ReceivedContent, TcpClient};
 pub use connection::Connection;
@@ -55,7 +57,7 @@ pub use connection_report::{
     EstablishmentReport, ResolutionProtocol, ResolutionReport, ResolutionSource, ResolutionStep,
 };
 pub use endpoint::{Endpoint, EndpointType};
-pub use error::NetworkError;
+pub use error::{ErrorDomain, FrameworkError, NetworkError};
 pub use ethernet_channel::{EthernetChannel, EthernetChannelState, EthernetFrame};
 pub use framer::{
     Framer, FramerContext, FramerDefinition, FramerMessage, FramerMessageView, FramerOptions,
@@ -68,16 +70,25 @@ pub use listener::TcpListener;
 pub use parameters::{ConnectionParameters, ParametersAttribution};
 pub use parameters_support::{ExpiredDnsBehavior, MultipathService, ProtocolStack, ServiceClass};
 pub use path::{LinkQuality, Path, PathStatus, PathUnsatisfiedReason};
-pub use path_monitor::{start_path_monitor, PathMonitor, PathUpdate};
-pub use privacy::{PrivacyContext, ProxyConfig, RelayHop, ResolverConfig};
-pub use protocol::{ProtocolDefinition, ProtocolOptions};
+pub use path_monitor::{
+    start_path_monitor, start_path_monitor_for_ethernet_channel, start_path_monitor_with_type,
+    PathMonitor, PathUpdate,
+};
+pub use privacy::{PrivacyContext, ProxyConfig, RelayHop, ResolverConfig, UrlSessionConfiguration};
+pub use protocol::{
+    IpEcnFlag, IpLocalAddressPreference, IpVersion, ProtocolDefinition, ProtocolMetadata,
+    ProtocolOptions, TcpMultipathVersion,
+};
 pub use quic::{QuicConnection, QuicOptions};
 pub use quic_support::{
     QuicMetadata, QuicStreamType, SecurityProtocolMetadata, SecurityProtocolOptions,
 };
 pub use txt_record::{TxtRecord, TxtRecordEntry, TxtRecordFindResult, TxtRecordLookup};
 pub use udp::UdpClient;
-pub use websocket::{Opcode, WebSocket, WsMessage};
+pub use websocket::{
+    Opcode, WebSocket, WsCloseCode, WsMessage, WsRequest, WsResponse, WsResponseStatus,
+    WsVersion,
+};
 
 /// Common imports.
 pub mod prelude {
@@ -85,8 +96,10 @@ pub mod prelude {
         advertise_with_descriptor, AdvertiseDescriptor, Advertiser,
     };
     pub use crate::browser::{
-        advertise_bonjour_service, start_browser, start_browser_with_descriptor, BonjourAdvertiser,
-        BrowseDescriptor, Browser, BrowserEvent, DiscoveredService,
+        advertise_bonjour_service, start_browser, start_browser_results_with_descriptor,
+        start_browser_with_descriptor, BonjourAdvertiser, BrowseDescriptor, BrowseResult,
+        BrowseResultChange, BrowseResultsBrowser, Browser, BrowserEvent, BrowserState,
+        DiscoveredService,
     };
     pub use crate::client::{ContentContext, ReceivedContent, TcpClient};
     pub use crate::connection::Connection;
@@ -99,7 +112,7 @@ pub mod prelude {
         ResolutionSource, ResolutionStep,
     };
     pub use crate::endpoint::{Endpoint, EndpointType};
-    pub use crate::error::NetworkError;
+    pub use crate::error::{ErrorDomain, FrameworkError, NetworkError};
     pub use crate::ethernet_channel::{EthernetChannel, EthernetChannelState, EthernetFrame};
     pub use crate::framer::{
         Framer, FramerContext, FramerDefinition, FramerMessage, FramerMessageView, FramerOptions,
@@ -114,14 +127,25 @@ pub mod prelude {
         ExpiredDnsBehavior, MultipathService, ProtocolStack, ServiceClass,
     };
     pub use crate::path::{LinkQuality, Path, PathStatus, PathUnsatisfiedReason};
-    pub use crate::path_monitor::{start_path_monitor, PathMonitor, PathUpdate};
-    pub use crate::privacy::{PrivacyContext, ProxyConfig, RelayHop, ResolverConfig};
-    pub use crate::protocol::{ProtocolDefinition, ProtocolOptions};
+    pub use crate::path_monitor::{
+        start_path_monitor, start_path_monitor_for_ethernet_channel, start_path_monitor_with_type,
+        PathMonitor, PathUpdate,
+    };
+    pub use crate::privacy::{
+        PrivacyContext, ProxyConfig, RelayHop, ResolverConfig, UrlSessionConfiguration,
+    };
+    pub use crate::protocol::{
+        IpEcnFlag, IpLocalAddressPreference, IpVersion, ProtocolDefinition, ProtocolMetadata,
+        ProtocolOptions, TcpMultipathVersion,
+    };
     pub use crate::quic::{QuicConnection, QuicOptions};
     pub use crate::quic_support::{
         QuicMetadata, QuicStreamType, SecurityProtocolMetadata, SecurityProtocolOptions,
     };
     pub use crate::txt_record::{TxtRecord, TxtRecordEntry, TxtRecordFindResult, TxtRecordLookup};
     pub use crate::udp::UdpClient;
-    pub use crate::websocket::{Opcode, WebSocket, WsMessage};
+    pub use crate::websocket::{
+        Opcode, WebSocket, WsCloseCode, WsMessage, WsRequest, WsResponse, WsResponseStatus,
+        WsVersion,
+    };
 }

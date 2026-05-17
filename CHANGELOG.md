@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.2 - 2026-05-17
+
+- Added rich browse-result coverage via `BrowseResult`, `BrowseResultChange`, and `BrowseResultsBrowser`.
+- Added advanced connection, listener, connection-group, path-monitor, and WebSocket callback hooks to the safe API.
+- Added URL-session proxy-configuration coverage, launchd-listener support, custom-IP parameters, and remaining framer/browser/listener/group helpers.
+- Refreshed `COVERAGE_AUDIT.md` to 99.60% verified coverage (498 / 500 SDK symbols).
+
 ## 0.9.1 - 2026-05-16
 
 - Added `ConnectionParameters` coverage for required/prohibited interfaces, local endpoints,

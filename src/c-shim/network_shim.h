@@ -566,6 +566,280 @@ void nw_shim_ethernet_channel_cancel(void *handle);
 int nw_shim_ethernet_channel_send(void *handle, const uint8_t *data, size_t len, uint16_t vlan_tag, const uint8_t *remote_address);
 void nw_shim_ethernet_channel_release(void *handle);
 
+
+typedef void (*BrowserStateChangedCallback)(int state, void *error, void *user_info);
+typedef void (*BrowseResultChangedCallback)(
+    void *old_result,
+    void *new_result,
+    uint64_t changes,
+    int batch_complete,
+    void *user_info
+);
+typedef void (*ConnectionBooleanCallback)(int value, void *user_info);
+typedef void (*ConnectionPathCallback)(void *path, void *user_info);
+typedef void (*ConnectionBatchCallback)(void *user_info);
+typedef int (*ProtocolMetadataEnumerationCallback)(void *definition, void *metadata, void *user_info);
+typedef int (*EndpointEnumerationCallback)(void *endpoint, void *user_info);
+typedef int (*HeaderEnumerationCallback)(const char *name, const char *value, void *user_info);
+typedef void (*PathMonitorCancelCallback)(void *user_info);
+typedef void (*ListenerAdvertisedEndpointChangedCallback)(void *endpoint, int added, void *user_info);
+typedef void (*ListenerNewConnectionGroupCallback)(void *group, void *user_info);
+typedef void (*ConnectionGroupNewConnectionCallback)(void *connection, void *user_info);
+typedef void (*WsPongCallback)(void *error, void *user_info);
+typedef void *(*WsClientRequestCallback)(void *request, void *user_info);
+
+void nw_shim_framer_message_set_object_value(void *message, const char *key, void *value);
+void *nw_shim_framer_message_copy_object_value(void *message, const char *key);
+void nw_shim_framer_options_set_object_value(void *options, const char *key, void *value);
+void *nw_shim_framer_options_copy_object_value(void *options, const char *key);
+void nw_shim_ws_options_set_client_request_handler(
+    void *options,
+    WsClientRequestCallback callback,
+    void *user_info
+);
+void *nw_shim_url_session_configuration_default(void);
+void *nw_shim_url_session_configuration_ephemeral(void);
+void nw_shim_url_session_configuration_release(void *configuration);
+void nw_shim_url_session_configuration_set_proxy_configurations(
+    void *configuration,
+    void *const *items,
+    size_t count
+);
+void **nw_shim_url_session_configuration_copy_proxy_configurations(
+    void *configuration,
+    size_t *out_count
+);
+
+void nw_shim_advertise_descriptor_set_txt_record_object(void *descriptor, void *txt_record);
+void *nw_shim_advertise_descriptor_copy_txt_record_object(void *descriptor);
+
+void *nw_shim_browser_start_results_with_descriptor(
+    void *descriptor,
+    void *parameters,
+    BrowseResultChangedCallback callback,
+    void *user_info
+);
+void *nw_shim_browser_copy_browse_descriptor(void *handle);
+void *nw_shim_browser_copy_parameters(void *handle);
+void nw_shim_browser_set_state_changed_handler(
+    void *handle,
+    BrowserStateChangedCallback callback,
+    void *user_info
+);
+uint64_t nw_shim_browse_result_get_changes(void *old_result, void *new_result);
+void *nw_shim_browse_result_copy_endpoint(void *result);
+size_t nw_shim_browse_result_get_interfaces_count(void *result);
+void *nw_shim_browse_result_copy_txt_record_object(void *result);
+int nw_shim_browse_result_enumerate_interfaces(
+    void *result,
+    InterfaceEnumerationCallback callback,
+    void *user_info
+);
+
+void nw_shim_connection_set_viability_changed_handler(
+    void *handle,
+    ConnectionBooleanCallback callback,
+    void *user_info
+);
+void nw_shim_connection_set_better_path_available_handler(
+    void *handle,
+    ConnectionBooleanCallback callback,
+    void *user_info
+);
+void nw_shim_connection_set_path_changed_handler(
+    void *handle,
+    ConnectionPathCallback callback,
+    void *user_info
+);
+void nw_shim_connection_restart(void *handle);
+void nw_shim_connection_force_cancel(void *handle);
+void nw_shim_connection_cancel_current_endpoint(void *handle);
+void nw_shim_connection_batch(void *handle, ConnectionBatchCallback callback, void *user_info);
+char *nw_shim_connection_copy_description(void *handle);
+void *nw_shim_connection_copy_protocol_metadata(void *handle, void *definition);
+uint32_t nw_shim_connection_get_maximum_datagram_size(void *handle);
+void nw_shim_connection_release_without_cancel(void *handle);
+
+void nw_shim_content_context_foreach_protocol_metadata(
+    void *context,
+    ProtocolMetadataEnumerationCallback callback,
+    void *user_info
+);
+
+void *nw_shim_framer_copy_remote_endpoint(void *framer);
+void *nw_shim_framer_copy_local_endpoint(void *framer);
+void *nw_shim_framer_copy_parameters(void *framer);
+void *nw_shim_framer_copy_options(void *framer);
+
+int nw_shim_group_descriptor_enumerate_endpoints(
+    void *descriptor,
+    EndpointEnumerationCallback callback,
+    void *user_info
+);
+void nw_shim_multicast_group_descriptor_set_specific_source(void *descriptor, void *endpoint);
+int nw_shim_multicast_group_descriptor_get_disable_unicast_traffic(void *descriptor);
+void nw_shim_multicast_group_descriptor_set_disable_unicast_traffic(void *descriptor, int disable_unicast_traffic);
+
+void *nw_shim_connection_group_copy_descriptor(void *handle);
+void *nw_shim_connection_group_copy_parameters(void *handle);
+void *nw_shim_connection_group_copy_remote_endpoint_for_message(void *handle, void *context);
+void *nw_shim_connection_group_copy_local_endpoint_for_message(void *handle, void *context);
+void *nw_shim_connection_group_copy_path_for_message(void *handle, void *context);
+void *nw_shim_connection_group_copy_protocol_metadata_for_message(
+    void *handle,
+    void *context,
+    void *definition
+);
+void *nw_shim_connection_group_copy_protocol_metadata(void *handle, void *definition);
+void *nw_shim_connection_group_extract_connection_for_message(
+    void *handle,
+    void *context,
+    int *out_status
+);
+void *nw_shim_connection_group_extract_connection(
+    void *handle,
+    void *endpoint,
+    void *protocol_options,
+    int *out_status
+);
+int nw_shim_connection_group_reinsert_extracted_connection(void *handle, void *connection_handle);
+int nw_shim_connection_group_reply(
+    void *handle,
+    void *inbound_message,
+    void *outbound_message,
+    const uint8_t *data,
+    size_t len
+);
+void nw_shim_connection_group_set_new_connection_handler(
+    void *handle,
+    ConnectionGroupNewConnectionCallback callback,
+    void *user_info
+);
+
+int nw_shim_error_get_domain(void *error);
+int nw_shim_error_get_code(void *error);
+char *nw_shim_error_copy_cf_error_domain(void *error);
+char *nw_shim_error_copy_cf_error_description(void *error);
+char *nw_shim_error_copy_posix_domain(void);
+char *nw_shim_error_copy_dns_domain(void);
+char *nw_shim_error_copy_tls_domain(void);
+char *nw_shim_error_copy_wifi_aware_domain(void);
+
+void *nw_shim_parameters_create_custom_ip(uint8_t protocol_number);
+
+void *nw_shim_listener_create_direct(void *parameters, int *out_status);
+void *nw_shim_listener_create_with_connection(void *connection_handle, void *parameters, int *out_status);
+void *nw_shim_listener_create_with_launchd_key(void *parameters, const char *launchd_key, int *out_status);
+uint32_t nw_shim_listener_get_new_connection_limit(void *handle);
+void nw_shim_listener_set_new_connection_limit(void *handle, uint32_t new_connection_limit);
+void nw_shim_listener_set_advertised_endpoint_changed_handler(
+    void *handle,
+    ListenerAdvertisedEndpointChangedCallback callback,
+    void *user_info
+);
+void nw_shim_listener_set_new_connection_group_handler(
+    void *handle,
+    ListenerNewConnectionGroupCallback callback,
+    void *user_info
+);
+
+int nw_shim_path_enumerate_gateways(void *path, EndpointEnumerationCallback callback, void *user_info);
+void *nw_shim_path_monitor_start_with_type(
+    int interface_type,
+    PathMonitorCallback callback,
+    void *user_info
+);
+void *nw_shim_path_monitor_start_for_ethernet_channel(
+    PathMonitorCallback callback,
+    void *user_info
+);
+void nw_shim_path_monitor_prohibit_interface_type(void *handle, int interface_type);
+void nw_shim_path_monitor_set_cancel_handler(
+    void *handle,
+    PathMonitorCancelCallback callback,
+    void *user_info
+);
+
+void *nw_shim_protocol_create_ip_metadata(void);
+void *nw_shim_protocol_create_udp_metadata(void);
+void *nw_shim_protocol_create_ws_options_with_version(int version);
+void *nw_shim_protocol_create_ws_metadata(int opcode);
+int nw_shim_protocol_metadata_is_ip(void *metadata);
+int nw_shim_protocol_metadata_is_tcp(void *metadata);
+int nw_shim_protocol_metadata_is_tls(void *metadata);
+int nw_shim_protocol_metadata_is_udp(void *metadata);
+int nw_shim_protocol_metadata_is_ws(void *metadata);
+
+void nw_shim_ip_options_set_version(void *options, int version);
+void nw_shim_ip_options_set_hop_limit(void *options, uint8_t hop_limit);
+void nw_shim_ip_options_set_use_minimum_mtu(void *options, int use_minimum_mtu);
+void nw_shim_ip_options_set_disable_fragmentation(void *options, int disable_fragmentation);
+void nw_shim_ip_options_set_calculate_receive_time(void *options, int calculate_receive_time);
+void nw_shim_ip_options_set_local_address_preference(void *options, int preference);
+void nw_shim_ip_options_set_disable_multicast_loopback(void *options, int disable_multicast_loopback);
+void nw_shim_ip_metadata_set_ecn_flag(void *metadata, int ecn_flag);
+int nw_shim_ip_metadata_get_ecn_flag(void *metadata);
+void nw_shim_ip_metadata_set_service_class(void *metadata, int service_class);
+int nw_shim_ip_metadata_get_service_class(void *metadata);
+uint64_t nw_shim_ip_metadata_get_receive_time(void *metadata);
+
+void nw_shim_tcp_options_set_no_delay(void *options, int no_delay);
+void nw_shim_tcp_options_set_no_push(void *options, int no_push);
+void nw_shim_tcp_options_set_no_options(void *options, int no_options);
+void nw_shim_tcp_options_set_enable_keepalive(void *options, int enable_keepalive);
+void nw_shim_tcp_options_set_keepalive_count(void *options, uint32_t keepalive_count);
+void nw_shim_tcp_options_set_keepalive_idle_time(void *options, uint32_t keepalive_idle_time);
+void nw_shim_tcp_options_set_keepalive_interval(void *options, uint32_t keepalive_interval);
+void nw_shim_tcp_options_set_maximum_segment_size(void *options, uint32_t maximum_segment_size);
+void nw_shim_tcp_options_set_connection_timeout(void *options, uint32_t connection_timeout);
+void nw_shim_tcp_options_set_persist_timeout(void *options, uint32_t persist_timeout);
+void nw_shim_tcp_options_set_retransmit_connection_drop_time(void *options, uint32_t value);
+void nw_shim_tcp_options_set_retransmit_fin_drop(void *options, int retransmit_fin_drop);
+void nw_shim_tcp_options_set_disable_ack_stretching(void *options, int disable_ack_stretching);
+void nw_shim_tcp_options_set_enable_fast_open(void *options, int enable_fast_open);
+void nw_shim_tcp_options_set_disable_ecn(void *options, int disable_ecn);
+void nw_shim_tcp_options_set_multipath_force_version(void *options, int multipath_force_version);
+uint32_t nw_shim_tcp_get_available_receive_buffer(void *metadata);
+uint32_t nw_shim_tcp_get_available_send_buffer(void *metadata);
+
+void *nw_shim_tls_copy_sec_protocol_options(void *options);
+void *nw_shim_tls_copy_sec_protocol_metadata(void *metadata);
+
+void nw_shim_udp_options_set_prefer_no_checksum(void *options, int prefer_no_checksum);
+
+void nw_shim_ws_options_add_additional_header(void *options, const char *name, const char *value);
+void nw_shim_ws_options_add_subprotocol(void *options, const char *subprotocol);
+void nw_shim_ws_options_set_auto_reply_ping(void *options, int auto_reply_ping);
+void nw_shim_ws_options_set_skip_handshake(void *options, int skip_handshake);
+void nw_shim_ws_options_set_maximum_message_size(void *options, size_t maximum_message_size);
+void nw_shim_ws_metadata_set_close_code(void *metadata, int close_code);
+int nw_shim_ws_metadata_get_close_code(void *metadata);
+void *nw_shim_ws_metadata_copy_server_response(void *metadata);
+void nw_shim_ws_metadata_set_pong_handler(
+    void *metadata,
+    WsPongCallback callback,
+    void *user_info
+);
+int nw_shim_ws_request_enumerate_subprotocols(
+    void *request,
+    StringEnumerationCallback callback,
+    void *user_info
+);
+int nw_shim_ws_request_enumerate_additional_headers(
+    void *request,
+    HeaderEnumerationCallback callback,
+    void *user_info
+);
+void *nw_shim_ws_response_create(int status, const char *selected_subprotocol);
+int nw_shim_ws_response_get_status(void *response);
+char *nw_shim_ws_response_get_selected_subprotocol(void *response);
+void nw_shim_ws_response_add_additional_header(void *response, const char *name, const char *value);
+int nw_shim_ws_response_enumerate_additional_headers(
+    void *response,
+    HeaderEnumerationCallback callback,
+    void *user_info
+);
+
 #ifdef __cplusplus
 }
 #endif

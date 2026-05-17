@@ -4,22 +4,31 @@
 
 mod content_context;
 
-use core::ffi::{c_int, c_void};
-use std::ffi::CString;
+use core::ffi::{c_char, c_int, c_void};
+use std::ffi::{CStr, CString};
+use std::sync::{Arc, Mutex};
 
 pub use content_context::{ContentContext, ReceivedContent};
 
 use crate::error::{from_status, NetworkError};
 use crate::ffi;
 use crate::parameters::{ConnectionParameters, KeepAlives};
+use crate::path::Path;
+use crate::protocol::{ProtocolDefinition, ProtocolMetadata};
 
 /// Blocking client wrapper around `nw_connection`.
 ///
 /// The connection is fully established (`nw_connection_state_ready`)
 /// before [`connect`] returns.
+type BooleanCallback = Mutex<Box<dyn FnMut(bool) + Send + 'static>>;
+type PathChangedCallback = Mutex<Box<dyn FnMut(Option<Path>) + Send + 'static>>;
+
 pub struct TcpClient {
     handle: *mut c_void,
     _keepalives: KeepAlives,
+    viability_callback: Option<Arc<BooleanCallback>>,
+    better_path_callback: Option<Arc<BooleanCallback>>,
+    path_callback: Option<Arc<PathChangedCallback>>,
 }
 
 // Network.framework manages its own thread-safety; the shim wraps
@@ -27,6 +36,17 @@ pub struct TcpClient {
 // Rust except as a pointer.
 unsafe impl Send for TcpClient {}
 unsafe impl Sync for TcpClient {}
+
+fn copied_string(ptr: *mut c_char) -> Option<String> {
+    if ptr.is_null() {
+        return None;
+    }
+    let value = unsafe { CStr::from_ptr(ptr) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { ffi::nw_shim_free_buffer(ptr.cast()) };
+    Some(value)
+}
 
 impl TcpClient {
     /// Open a plain TCP connection to `host:port`. Blocks up to 30 s
@@ -78,6 +98,9 @@ impl TcpClient {
         Ok(Self {
             handle,
             _keepalives: parameters.keepalives(),
+            viability_callback: None,
+            better_path_callback: None,
+            path_callback: None,
         })
     }
 
@@ -94,6 +117,9 @@ impl TcpClient {
         Ok(Self {
             handle,
             _keepalives: KeepAlives::empty(),
+            viability_callback: None,
+            better_path_callback: None,
+            path_callback: None,
         })
     }
 
@@ -111,6 +137,9 @@ impl TcpClient {
         Self {
             handle,
             _keepalives: keepalives,
+            viability_callback: None,
+            better_path_callback: None,
+            path_callback: None,
         }
     }
 
@@ -138,6 +167,117 @@ impl TcpClient {
     #[must_use]
     pub(crate) const fn as_ptr(&self) -> *mut c_void {
         self.handle
+    }
+
+    /// Restart the connection's path and protocol selection.
+    pub fn restart(&self) {
+        unsafe { ffi::nw_shim_connection_restart(self.handle) };
+    }
+
+    /// Force immediate cancellation without graceful teardown.
+    pub fn force_cancel(&self) {
+        unsafe { ffi::nw_shim_connection_force_cancel(self.handle) };
+    }
+
+    /// Cancel the current endpoint and force path fallback when possible.
+    pub fn cancel_current_endpoint(&self) {
+        unsafe { ffi::nw_shim_connection_cancel_current_endpoint(self.handle) };
+    }
+
+    /// Execute several operations in a single Network.framework batch.
+    pub fn batch<F>(&self, mut callback: F)
+    where
+        F: FnMut(),
+    {
+        unsafe extern "C" fn invoke(user_info: *mut c_void) {
+            if user_info.is_null() {
+                return;
+            }
+            let callback = unsafe { &mut *user_info.cast::<&mut dyn FnMut()>() };
+            callback();
+        }
+
+        let mut callback_ref: &mut dyn FnMut() = &mut callback;
+        unsafe {
+            ffi::nw_shim_connection_batch(
+                self.handle,
+                Some(invoke),
+                std::ptr::addr_of_mut!(callback_ref).cast(),
+            );
+        };
+    }
+
+    /// Human-readable description from Network.framework.
+    #[must_use]
+    pub fn description(&self) -> Option<String> {
+        copied_string(unsafe { ffi::nw_shim_connection_copy_description(self.handle) })
+    }
+
+    /// Maximum datagram size currently allowed by the transport.
+    #[must_use]
+    pub fn maximum_datagram_size(&self) -> u32 {
+        unsafe { ffi::nw_shim_connection_get_maximum_datagram_size(self.handle) }
+    }
+
+    /// Copy protocol metadata associated with the connection for a specific protocol definition.
+    #[must_use]
+    pub fn protocol_metadata(&self, definition: &ProtocolDefinition) -> Option<ProtocolMetadata> {
+        let handle = unsafe { ffi::nw_shim_connection_copy_protocol_metadata(self.handle, definition.as_ptr()) };
+        (!handle.is_null()).then_some(unsafe { ProtocolMetadata::from_raw(handle) })
+    }
+
+    /// Receive viability updates for the connection.
+    pub fn set_viability_changed_handler<F>(&mut self, callback: F)
+    where
+        F: FnMut(bool) + Send + 'static,
+    {
+        let callback: Box<dyn FnMut(bool) + Send + 'static> = Box::new(callback);
+        let arc = Arc::new(Mutex::new(callback));
+        let raw = Arc::into_raw(arc.clone()).cast::<c_void>().cast_mut();
+        unsafe {
+            ffi::nw_shim_connection_set_viability_changed_handler(
+                self.handle,
+                Some(boolean_trampoline),
+                raw,
+            );
+        };
+        self.viability_callback = Some(arc);
+    }
+
+    /// Receive updates when a better network path becomes available.
+    pub fn set_better_path_available_handler<F>(&mut self, callback: F)
+    where
+        F: FnMut(bool) + Send + 'static,
+    {
+        let callback: Box<dyn FnMut(bool) + Send + 'static> = Box::new(callback);
+        let arc = Arc::new(Mutex::new(callback));
+        let raw = Arc::into_raw(arc.clone()).cast::<c_void>().cast_mut();
+        unsafe {
+            ffi::nw_shim_connection_set_better_path_available_handler(
+                self.handle,
+                Some(boolean_trampoline),
+                raw,
+            );
+        };
+        self.better_path_callback = Some(arc);
+    }
+
+    /// Receive path snapshots whenever Network.framework changes the active path.
+    pub fn set_path_changed_handler<F>(&mut self, callback: F)
+    where
+        F: FnMut(Option<Path>) + Send + 'static,
+    {
+        let callback: Box<dyn FnMut(Option<Path>) + Send + 'static> = Box::new(callback);
+        let arc = Arc::new(Mutex::new(callback));
+        let raw = Arc::into_raw(arc.clone()).cast::<c_void>().cast_mut();
+        unsafe {
+            ffi::nw_shim_connection_set_path_changed_handler(
+                self.handle,
+                Some(path_trampoline),
+                raw,
+            );
+        };
+        self.path_callback = Some(arc);
     }
 
     /// Send `data` over the connection. Blocks until the framework has
@@ -216,6 +356,29 @@ impl TcpClient {
             is_complete: is_complete != 0,
         })
     }
+}
+
+unsafe extern "C" fn boolean_trampoline(value: c_int, user_info: *mut c_void) {
+    if user_info.is_null() {
+        return;
+    }
+    let callback = unsafe { &*user_info.cast::<BooleanCallback>() };
+    let Ok(mut guard) = callback.lock() else {
+        return;
+    };
+    guard(value != 0);
+}
+
+unsafe extern "C" fn path_trampoline(path: *mut c_void, user_info: *mut c_void) {
+    if user_info.is_null() {
+        return;
+    }
+    let callback = unsafe { &*user_info.cast::<PathChangedCallback>() };
+    let Ok(mut guard) = callback.lock() else {
+        return;
+    };
+    let path = (!path.is_null()).then_some(unsafe { Path::from_raw(path) });
+    guard(path);
 }
 
 impl Drop for TcpClient {

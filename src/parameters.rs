@@ -133,6 +133,20 @@ impl ConnectionParameters {
         })
     }
 
+    /// Create custom-IP parameters for entitlement-gated transports.
+    pub fn custom_ip(protocol_number: u8) -> Result<Self, NetworkError> {
+        let handle = unsafe { ffi::nw_shim_parameters_create_custom_ip(protocol_number) };
+        if handle.is_null() {
+            return Err(NetworkError::InvalidArgument(
+                "failed to create custom-IP parameters".into(),
+            ));
+        }
+        Ok(Self {
+            handle,
+            keepalives: KeepAlives::empty(),
+        })
+    }
+
     /// Create QUIC parameters with the supplied ALPN string.
     pub fn quic(alpn: &str) -> Result<Self, NetworkError> {
         let alpn = CString::new(alpn)

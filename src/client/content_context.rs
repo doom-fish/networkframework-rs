@@ -7,6 +7,7 @@ use std::ffi::{CStr, CString};
 
 use crate::error::NetworkError;
 use crate::ffi;
+use crate::protocol::{ProtocolDefinition, ProtocolMetadata};
 
 /// One received payload and its associated content context.
 #[derive(Clone)]
@@ -138,6 +139,36 @@ impl ContentContext {
             return None;
         }
         Some(unsafe { crate::framer::FramerMessage::from_raw(handle) })
+    }
+
+    /// Enumerate every protocol metadata object currently attached to this context.
+    #[must_use]
+    pub fn protocol_metadata_entries(&self) -> Vec<(ProtocolDefinition, ProtocolMetadata)> {
+        unsafe extern "C" fn collect(
+            definition: *mut c_void,
+            metadata: *mut c_void,
+            user_info: *mut c_void,
+        ) -> i32 {
+            if user_info.is_null() || definition.is_null() || metadata.is_null() {
+                return 0;
+            }
+            let entries = unsafe { &mut *user_info.cast::<Vec<(ProtocolDefinition, ProtocolMetadata)>>() };
+            entries.push((
+                unsafe { ProtocolDefinition::from_raw(definition) },
+                unsafe { ProtocolMetadata::from_raw(metadata) },
+            ));
+            1
+        }
+
+        let mut entries = Vec::new();
+        unsafe {
+            ffi::nw_shim_content_context_foreach_protocol_metadata(
+                self.handle,
+                Some(collect),
+                std::ptr::addr_of_mut!(entries).cast(),
+            )
+        };
+        entries
     }
 
     #[must_use]

@@ -2,13 +2,16 @@
 
 #![allow(clippy::missing_errors_doc)]
 
-use core::ffi::{c_char, c_void};
+use core::ffi::{c_char, c_int, c_void};
 use std::ffi::{CStr, CString};
 use std::sync::{Arc, Mutex};
 
-use crate::error::NetworkError;
+use crate::endpoint::Endpoint;
+use crate::error::{FrameworkError, NetworkError};
 use crate::ffi;
+use crate::interface::{InterfaceType, NetworkInterface};
 use crate::parameters::ConnectionParameters;
+use crate::txt_record::TxtRecord;
 
 /// One Bonjour service that the browser has observed appearing or
 /// disappearing on the network.
@@ -27,6 +30,151 @@ pub struct DiscoveredService {
 pub enum BrowserEvent {
     Found(DiscoveredService),
     Lost(DiscoveredService),
+}
+
+/// Browser lifecycle states reported by `nw_browser_set_state_changed_handler`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrowserState {
+    Invalid,
+    Ready,
+    Failed,
+    Cancelled,
+    Waiting,
+    Unknown(i32),
+}
+
+impl BrowserState {
+    const fn from_raw(raw: i32) -> Self {
+        match raw {
+            0 => Self::Invalid,
+            1 => Self::Ready,
+            2 => Self::Failed,
+            3 => Self::Cancelled,
+            4 => Self::Waiting,
+            other => Self::Unknown(other),
+        }
+    }
+}
+
+/// Bitflags describing how a browse result changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BrowseResultChange(u64);
+
+impl BrowseResultChange {
+    pub const INVALID: Self = Self(0x00);
+    pub const IDENTICAL: Self = Self(0x01);
+    pub const RESULT_ADDED: Self = Self(0x02);
+    pub const RESULT_REMOVED: Self = Self(0x04);
+    pub const INTERFACE_ADDED: Self = Self(0x08);
+    pub const INTERFACE_REMOVED: Self = Self(0x10);
+    pub const TXT_RECORD_CHANGED: Self = Self(0x20);
+
+    #[must_use]
+    pub const fn bits(self) -> u64 {
+        self.0
+    }
+
+    #[must_use]
+    pub const fn contains(self, flag: Self) -> bool {
+        (self.0 & flag.0) == flag.0
+    }
+
+    #[must_use]
+    pub const fn from_bits(bits: u64) -> Self {
+        Self(bits)
+    }
+}
+
+/// Rich browse result metadata delivered by `nw_browser`.
+pub struct BrowseResult {
+    handle: *mut c_void,
+}
+
+unsafe impl Send for BrowseResult {}
+unsafe impl Sync for BrowseResult {}
+
+impl BrowseResult {
+    /// # Safety
+    ///
+    /// `handle` must be a valid retained `nw_browse_result_t` that remains
+    /// alive for the lifetime of the returned wrapper.
+    #[must_use]
+    pub const unsafe fn from_raw(handle: *mut c_void) -> Self {
+        Self { handle }
+    }
+
+    /// Copy the endpoint associated with this browse result.
+    #[must_use]
+    pub fn endpoint(&self) -> Option<Endpoint> {
+        let handle = unsafe { ffi::nw_shim_browse_result_copy_endpoint(self.handle) };
+        (!handle.is_null()).then_some(unsafe { Endpoint::from_raw(handle) })
+    }
+
+    /// The number of interfaces that currently advertise this result.
+    #[must_use]
+    pub fn interface_count(&self) -> usize {
+        unsafe { ffi::nw_shim_browse_result_get_interfaces_count(self.handle) }
+    }
+
+    /// Enumerate the interfaces that currently advertise this result.
+    #[must_use]
+    pub fn interfaces(&self) -> Vec<NetworkInterface> {
+        unsafe extern "C" fn collect(
+            name: *const c_char,
+            interface_type: c_int,
+            index: u32,
+            user_info: *mut c_void,
+        ) -> c_int {
+            if user_info.is_null() {
+                return 0;
+            }
+            let interfaces = unsafe { &mut *user_info.cast::<Vec<NetworkInterface>>() };
+            let name = if name.is_null() {
+                String::new()
+            } else {
+                unsafe { CStr::from_ptr(name) }.to_string_lossy().into_owned()
+            };
+            interfaces.push(NetworkInterface {
+                name,
+                interface_type: InterfaceType::from_raw(interface_type),
+                index,
+            });
+            1
+        }
+
+        let mut interfaces = Vec::new();
+        unsafe {
+            ffi::nw_shim_browse_result_enumerate_interfaces(
+                self.handle,
+                Some(collect),
+                std::ptr::addr_of_mut!(interfaces).cast(),
+            )
+        };
+        interfaces
+    }
+
+    /// Copy the structured TXT-record object for this result.
+    #[must_use]
+    pub fn txt_record_object(&self) -> Option<TxtRecord> {
+        let handle = unsafe { ffi::nw_shim_browse_result_copy_txt_record_object(self.handle) };
+        (!handle.is_null()).then_some(unsafe { TxtRecord::from_raw(handle) })
+    }
+}
+
+impl Clone for BrowseResult {
+    fn clone(&self) -> Self {
+        let handle = unsafe { ffi::nw_shim_retain_object(self.handle) };
+        Self { handle }
+    }
+}
+
+impl Drop for BrowseResult {
+    fn drop(&mut self) {
+        if !self.handle.is_null() {
+            unsafe { ffi::nw_shim_release_object(self.handle) };
+            self.handle = core::ptr::null_mut();
+        }
+    }
 }
 
 /// A descriptor describing what a browser should look for.
@@ -153,6 +301,9 @@ impl Drop for BrowseDescriptor {
 }
 
 type Cb = Mutex<Box<dyn FnMut(BrowserEvent) + Send + 'static>>;
+type ResultsCb =
+    Mutex<Box<dyn FnMut(Option<BrowseResult>, Option<BrowseResult>, BrowseResultChange, bool) + Send + 'static>>;
+type StateCb = Mutex<Box<dyn FnMut(BrowserState, Option<FrameworkError>) + Send + 'static>>;
 
 /// RAII guard for a running `nw_browser`. Drop to stop receiving
 /// discovery callbacks.
@@ -160,12 +311,103 @@ type Cb = Mutex<Box<dyn FnMut(BrowserEvent) + Send + 'static>>;
 pub struct Browser {
     handle: *mut c_void,
     _callback: Arc<Cb>,
+    state_callback: Option<Arc<StateCb>>,
 }
 
 unsafe impl Send for Browser {}
 unsafe impl Sync for Browser {}
 
+impl Browser {
+    /// Copy the active browse descriptor.
+    #[must_use]
+    pub fn browse_descriptor(&self) -> Option<BrowseDescriptor> {
+        let handle = unsafe { ffi::nw_shim_browser_copy_browse_descriptor(self.handle) };
+        (!handle.is_null()).then_some(BrowseDescriptor { handle })
+    }
+
+    /// Copy the browser's current parameters snapshot.
+    #[must_use]
+    pub fn parameters(&self) -> Option<ConnectionParameters> {
+        let handle = unsafe { ffi::nw_shim_browser_copy_parameters(self.handle) };
+        (!handle.is_null()).then_some(unsafe { ConnectionParameters::from_raw(handle) })
+    }
+
+    /// Receive browser state updates.
+    pub fn set_state_changed_handler<F>(&mut self, callback: F)
+    where
+        F: FnMut(BrowserState, Option<FrameworkError>) + Send + 'static,
+    {
+        let callback: Box<dyn FnMut(BrowserState, Option<FrameworkError>) + Send + 'static> =
+            Box::new(callback);
+        let arc = Arc::new(Mutex::new(callback));
+        let raw = Arc::into_raw(arc.clone()).cast::<c_void>().cast_mut();
+        unsafe {
+            ffi::nw_shim_browser_set_state_changed_handler(
+                self.handle,
+                Some(state_trampoline),
+                raw,
+            );
+        };
+        self.state_callback = Some(arc);
+    }
+}
+
 impl Drop for Browser {
+    fn drop(&mut self) {
+        if !self.handle.is_null() {
+            unsafe { ffi::nw_shim_browser_stop(self.handle) };
+            self.handle = core::ptr::null_mut();
+        }
+    }
+}
+
+/// RAII guard for a running `nw_browser` that delivers rich browse-result objects.
+#[allow(clippy::type_complexity)]
+pub struct BrowseResultsBrowser {
+    handle: *mut c_void,
+    _callback: Arc<ResultsCb>,
+    state_callback: Option<Arc<StateCb>>,
+}
+
+unsafe impl Send for BrowseResultsBrowser {}
+unsafe impl Sync for BrowseResultsBrowser {}
+
+impl BrowseResultsBrowser {
+    /// Copy the active browse descriptor.
+    #[must_use]
+    pub fn browse_descriptor(&self) -> Option<BrowseDescriptor> {
+        let handle = unsafe { ffi::nw_shim_browser_copy_browse_descriptor(self.handle) };
+        (!handle.is_null()).then_some(BrowseDescriptor { handle })
+    }
+
+    /// Copy the browser's current parameters snapshot.
+    #[must_use]
+    pub fn parameters(&self) -> Option<ConnectionParameters> {
+        let handle = unsafe { ffi::nw_shim_browser_copy_parameters(self.handle) };
+        (!handle.is_null()).then_some(unsafe { ConnectionParameters::from_raw(handle) })
+    }
+
+    /// Receive browser state updates.
+    pub fn set_state_changed_handler<F>(&mut self, callback: F)
+    where
+        F: FnMut(BrowserState, Option<FrameworkError>) + Send + 'static,
+    {
+        let callback: Box<dyn FnMut(BrowserState, Option<FrameworkError>) + Send + 'static> =
+            Box::new(callback);
+        let arc = Arc::new(Mutex::new(callback));
+        let raw = Arc::into_raw(arc.clone()).cast::<c_void>().cast_mut();
+        unsafe {
+            ffi::nw_shim_browser_set_state_changed_handler(
+                self.handle,
+                Some(state_trampoline),
+                raw,
+            );
+        };
+        self.state_callback = Some(arc);
+    }
+}
+
+impl Drop for BrowseResultsBrowser {
     fn drop(&mut self) {
         if !self.handle.is_null() {
             unsafe { ffi::nw_shim_browser_stop(self.handle) };
@@ -190,6 +432,42 @@ unsafe extern "C" fn lost_trampoline(
     user_info: *mut c_void,
 ) {
     invoke(user_info, name, service_type, domain, false);
+}
+
+unsafe extern "C" fn state_trampoline(state: c_int, error: *mut c_void, user_info: *mut c_void) {
+    if user_info.is_null() {
+        return;
+    }
+    let callback = unsafe { &*user_info.cast::<StateCb>() };
+    let Ok(mut guard) = callback.lock() else {
+        return;
+    };
+    let error = (!error.is_null()).then_some(unsafe { FrameworkError::from_raw(error) });
+    guard(BrowserState::from_raw(state), error);
+}
+
+unsafe extern "C" fn result_trampoline(
+    old_result: *mut c_void,
+    new_result: *mut c_void,
+    changes: u64,
+    batch_complete: c_int,
+    user_info: *mut c_void,
+) {
+    if user_info.is_null() {
+        return;
+    }
+    let callback = unsafe { &*user_info.cast::<ResultsCb>() };
+    let Ok(mut guard) = callback.lock() else {
+        return;
+    };
+    let old_result = (!old_result.is_null()).then_some(unsafe { BrowseResult::from_raw(old_result) });
+    let new_result = (!new_result.is_null()).then_some(unsafe { BrowseResult::from_raw(new_result) });
+    guard(
+        old_result,
+        new_result,
+        BrowseResultChange::from_bits(changes),
+        batch_complete != 0,
+    );
 }
 
 unsafe fn invoke(
@@ -254,6 +532,37 @@ where
     Ok(Browser {
         handle,
         _callback: arc,
+        state_callback: None,
+    })
+}
+
+/// Start browsing with rich browse-result objects and change metadata.
+pub fn start_browser_results_with_descriptor<F>(
+    descriptor: &BrowseDescriptor,
+    parameters: Option<&ConnectionParameters>,
+    callback: F,
+) -> Result<BrowseResultsBrowser, NetworkError>
+where
+    F: FnMut(Option<BrowseResult>, Option<BrowseResult>, BrowseResultChange, bool) + Send + 'static,
+{
+    let arc: Arc<ResultsCb> = Arc::new(Mutex::new(Box::new(callback)));
+    let raw = Arc::into_raw(arc.clone()).cast::<c_void>().cast_mut();
+    let handle = unsafe {
+        ffi::nw_shim_browser_start_results_with_descriptor(
+            descriptor.as_ptr(),
+            parameters.map_or(core::ptr::null_mut(), ConnectionParameters::as_ptr),
+            Some(result_trampoline),
+            raw,
+        )
+    };
+    if handle.is_null() {
+        unsafe { Arc::from_raw(raw.cast::<ResultsCb>()) };
+        return Err(NetworkError::ListenFailed);
+    }
+    Ok(BrowseResultsBrowser {
+        handle,
+        _callback: arc,
+        state_callback: None,
     })
 }
 

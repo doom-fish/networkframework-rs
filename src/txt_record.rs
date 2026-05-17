@@ -99,9 +99,18 @@ impl TxtRecord {
         Ok(Self { handle })
     }
 
+    /// # Safety
+    ///
+    /// `handle` must be a valid retained TXT-record object handle that remains
+    /// alive for the returned wrapper.
     #[must_use]
-    pub(crate) const unsafe fn from_raw(handle: *mut c_void) -> Self {
+    pub const unsafe fn from_raw(handle: *mut c_void) -> Self {
         Self { handle }
+    }
+
+    #[must_use]
+    pub(crate) const fn as_ptr(&self) -> *mut c_void {
+        self.handle
     }
 
     /// Look up a key in the TXT record.

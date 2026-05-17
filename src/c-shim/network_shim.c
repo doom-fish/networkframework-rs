@@ -4,6 +4,7 @@
 
 #include <Network/Network.h>
 #include <dispatch/dispatch.h>
+#include <CoreFoundation/CoreFoundation.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <stdatomic.h>
@@ -206,13 +207,13 @@ static void destroy_listener_handle(nw_listener_handle *h) {
 static void cancel_and_destroy_listener_handle(nw_listener_handle *h) {
     if (!h) return;
     if (h->listener) {
+        nw_listener_set_state_changed_handler(h->listener, NULL);
+        nw_listener_set_new_connection_handler(h->listener, NULL);
         nw_listener_cancel(h->listener);
-        dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, 5LL * NSEC_PER_SEC);
-        while (atomic_load(&h->state_code) != 2 && atomic_load(&h->state_code) != 3) {
-            if (dispatch_semaphore_wait(h->ready, deadline) != 0) {
-                break;
-            }
+        if (h->queue) {
+            dispatch_sync(h->queue, ^{});
         }
+        atomic_store(&h->state_code, 2);
     }
     destroy_listener_handle(h);
 }
@@ -452,6 +453,7 @@ void nw_shim_path_monitor_stop(void *handle) {
     nw_path_handle *h = (nw_path_handle *)handle;
     if (!h) return;
     nw_path_monitor_cancel(h->monitor);
+    dispatch_sync(h->queue, ^{});
     if (h->latest_path) {
         nw_release(h->latest_path);
     }
@@ -540,6 +542,7 @@ void nw_shim_browser_stop(void *handle) {
     nw_browser_handle *h = (nw_browser_handle *)handle;
     if (!h) return;
     nw_browser_cancel(h->browser);
+    dispatch_sync(h->queue, ^{});
     nw_release(h->browser);
     dispatch_release(h->queue);
     free(h);
@@ -4213,4 +4216,1173 @@ void nw_shim_ethernet_channel_release(void *handle) {
         return;
     }
     nw_shim_destroy_ethernet_channel_handle(h);
+}
+
+
+// ---------------------------------------------------------------------
+// Coverage gap support additions
+// ---------------------------------------------------------------------
+
+static char *nw_shim_copy_cfstring_value(CFStringRef value) {
+    if (!value) {
+        return NULL;
+    }
+    CFIndex length = CFStringGetLength(value);
+    CFIndex maximum = CFStringGetMaximumSizeForEncoding(length, kCFStringEncodingUTF8) + 1;
+    char *buffer = (char *)malloc((size_t)maximum);
+    if (!buffer) {
+        return NULL;
+    }
+    if (!CFStringGetCString(value, buffer, maximum, kCFStringEncodingUTF8)) {
+        free(buffer);
+        return NULL;
+    }
+    return buffer;
+}
+
+static int nw_shim_invoke_interface_callback(nw_interface_t interface, InterfaceEnumerationCallback callback, void *user_info) {
+    if (!interface || !callback) {
+        return 0;
+    }
+    const char *name = nw_interface_get_name(interface);
+    return callback(name ? name : "", (int)nw_interface_get_type(interface), nw_interface_get_index(interface), user_info);
+}
+
+static int nw_shim_invoke_endpoint_callback(nw_endpoint_t endpoint, EndpointEnumerationCallback callback, void *user_info) {
+    if (!endpoint || !callback) {
+        return 0;
+    }
+    void *retained = nw_retain(endpoint);
+    return callback(retained, user_info);
+}
+
+static nw_conn_handle *nw_shim_wrap_started_connection(nw_connection_t conn, const char *label, int *out_status) {
+    if (!conn) {
+        if (out_status) *out_status = NW_INVALID_ARG;
+        return NULL;
+    }
+
+    nw_conn_handle *h = (nw_conn_handle *)calloc(1, sizeof(nw_conn_handle));
+    if (!h) {
+        if (out_status) *out_status = NW_CONNECT_FAILED;
+        return NULL;
+    }
+    h->conn = conn;
+    h->queue = dispatch_queue_create(label ? label : "networkframework-rs.conn.wrap", DISPATCH_QUEUE_SERIAL);
+    h->ready = dispatch_semaphore_create(0);
+    atomic_store(&h->state_code, 0);
+
+    nw_connection_set_queue(conn, h->queue);
+    nw_connection_set_state_changed_handler(conn, ^(nw_connection_state_t state, nw_error_t error) {
+        (void)error;
+        if (state == nw_connection_state_ready) {
+            atomic_store(&h->state_code, 1);
+            dispatch_semaphore_signal(h->ready);
+        } else if (state == nw_connection_state_cancelled) {
+            atomic_store(&h->state_code, 2);
+            dispatch_semaphore_signal(h->ready);
+        } else if (state == nw_connection_state_failed) {
+            atomic_store(&h->state_code, 3);
+            dispatch_semaphore_signal(h->ready);
+        }
+    });
+    nw_connection_start(conn);
+
+    dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, 30LL * NSEC_PER_SEC);
+    if (dispatch_semaphore_wait(h->ready, deadline) != 0) {
+        cancel_and_destroy_handle(h);
+        if (out_status) *out_status = NW_TIMEOUT;
+        return NULL;
+    }
+
+    if (atomic_load(&h->state_code) != 1) {
+        cancel_and_destroy_handle(h);
+        if (out_status) *out_status = NW_CONNECT_FAILED;
+        return NULL;
+    }
+
+    if (out_status) *out_status = NW_OK;
+    return h;
+}
+
+static void *nw_shim_wrap_listener_common(nw_listener_t listener, const char *label, int *out_status) {
+    if (!listener) {
+        if (out_status) *out_status = NW_LISTEN_FAILED;
+        return NULL;
+    }
+
+    nw_listener_handle *h = (nw_listener_handle *)calloc(1, sizeof(nw_listener_handle));
+    if (!h) {
+        if (out_status) *out_status = NW_LISTEN_FAILED;
+        return NULL;
+    }
+    h->listener = listener;
+    h->queue = dispatch_queue_create(label ? label : "networkframework-rs.listener.wrap", DISPATCH_QUEUE_SERIAL);
+    h->ready = dispatch_semaphore_create(0);
+    h->accept_sem = dispatch_semaphore_create(0);
+    atomic_store(&h->state_code, 0);
+
+    nw_listener_set_queue(listener, h->queue);
+    nw_listener_set_state_changed_handler(listener, ^(nw_listener_state_t state, nw_error_t error) {
+        (void)error;
+        if (state == nw_listener_state_ready) {
+            atomic_store(&h->bound_port, nw_listener_get_port(listener));
+            atomic_store(&h->state_code, 1);
+            dispatch_semaphore_signal(h->ready);
+        } else if (state == nw_listener_state_cancelled) {
+            atomic_store(&h->state_code, 2);
+            dispatch_semaphore_signal(h->ready);
+        } else if (state == nw_listener_state_failed) {
+            atomic_store(&h->state_code, 3);
+            dispatch_semaphore_signal(h->ready);
+        }
+    });
+    nw_listener_set_new_connection_handler(listener, ^(nw_connection_t conn) {
+        nw_retain(conn);
+        if (h->pending) {
+            nw_connection_cancel(h->pending);
+            nw_release(h->pending);
+        }
+        h->pending = conn;
+        dispatch_semaphore_signal(h->accept_sem);
+    });
+    nw_listener_start(listener);
+
+    dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, 10LL * NSEC_PER_SEC);
+    if (dispatch_semaphore_wait(h->ready, deadline) != 0 || atomic_load(&h->state_code) != 1) {
+        cancel_and_destroy_listener_handle(h);
+        if (out_status) *out_status = NW_LISTEN_FAILED;
+        return NULL;
+    }
+
+    if (out_status) *out_status = NW_OK;
+    return h;
+}
+
+static nw_connection_group_handle *nw_shim_wrap_connection_group(nw_connection_group_t group, const char *label) {
+    if (!group) {
+        return NULL;
+    }
+    nw_connection_group_handle *h = (nw_connection_group_handle *)calloc(1, sizeof(nw_connection_group_handle));
+    if (!h) {
+        return NULL;
+    }
+    h->group = nw_retain(group);
+    h->queue = dispatch_queue_create(label ? label : "networkframework-rs.connection-group.wrap", DISPATCH_QUEUE_SERIAL);
+    h->state_sem = dispatch_semaphore_create(0);
+    atomic_store(&h->state_code, (int)nw_connection_group_state_invalid);
+    nw_connection_group_set_queue(h->group, h->queue);
+    nw_connection_group_set_state_changed_handler(h->group, ^(nw_connection_group_state_t state, nw_error_t error) {
+        (void)error;
+        atomic_store(&h->state_code, (int)state);
+        dispatch_semaphore_signal(h->state_sem);
+        if (h->state_callback) {
+            h->state_callback((int)state, h->state_user_info);
+        }
+    });
+    return h;
+}
+
+void nw_shim_connection_release_without_cancel(void *handle) {
+    nw_conn_handle *h = (nw_conn_handle *)handle;
+    if (!h) {
+        return;
+    }
+    destroy_handle(h);
+}
+
+void nw_shim_advertise_descriptor_set_txt_record_object(void *descriptor, void *txt_record) {
+    if (!descriptor) {
+        return;
+    }
+    nw_advertise_descriptor_set_txt_record_object((nw_advertise_descriptor_t)descriptor, (nw_txt_record_t)txt_record);
+}
+
+void *nw_shim_advertise_descriptor_copy_txt_record_object(void *descriptor) {
+    if (!descriptor) {
+        return NULL;
+    }
+    return nw_advertise_descriptor_copy_txt_record_object((nw_advertise_descriptor_t)descriptor);
+}
+
+void *nw_shim_browser_start_results_with_descriptor(
+    void *descriptor,
+    void *parameters,
+    BrowseResultChangedCallback callback,
+    void *user_info
+) {
+    if (!descriptor || !callback) {
+        return NULL;
+    }
+
+    nw_browse_descriptor_t desc = nw_retain((nw_browse_descriptor_t)descriptor);
+    nw_parameters_t params = parameters ? nw_parameters_copy((nw_parameters_t)parameters) : nw_parameters_create();
+    if (!params) {
+        nw_release(desc);
+        return NULL;
+    }
+
+    nw_browser_t browser = nw_browser_create(desc, params);
+    nw_release(desc);
+    nw_release(params);
+    if (!browser) {
+        return NULL;
+    }
+
+    nw_browser_handle *h = (nw_browser_handle *)calloc(1, sizeof(nw_browser_handle));
+    h->browser = browser;
+    h->queue = dispatch_queue_create("networkframework-rs.browser.results", DISPATCH_QUEUE_SERIAL);
+    h->user_info = user_info;
+
+    nw_browser_set_queue(browser, h->queue);
+    nw_browser_set_browse_results_changed_handler(browser, ^(nw_browse_result_t old_result, nw_browse_result_t new_result, bool batch_complete) {
+        uint64_t changes = nw_browse_result_get_changes(old_result, new_result);
+        void *old_handle = old_result ? nw_retain(old_result) : NULL;
+        void *new_handle = new_result ? nw_retain(new_result) : NULL;
+        callback(old_handle, new_handle, changes, batch_complete ? 1 : 0, user_info);
+    });
+    nw_browser_start(browser);
+    return h;
+}
+
+void *nw_shim_browser_copy_browse_descriptor(void *handle) {
+    nw_browser_handle *h = (nw_browser_handle *)handle;
+    if (!h) {
+        return NULL;
+    }
+    return nw_browser_copy_browse_descriptor(h->browser);
+}
+
+void *nw_shim_browser_copy_parameters(void *handle) {
+    nw_browser_handle *h = (nw_browser_handle *)handle;
+    if (!h) {
+        return NULL;
+    }
+    return nw_browser_copy_parameters(h->browser);
+}
+
+void nw_shim_browser_set_state_changed_handler(void *handle, BrowserStateChangedCallback callback, void *user_info) {
+    nw_browser_handle *h = (nw_browser_handle *)handle;
+    if (!h) {
+        return;
+    }
+    if (!callback) {
+        nw_browser_set_state_changed_handler(h->browser, NULL);
+        return;
+    }
+    nw_browser_set_state_changed_handler(h->browser, ^(nw_browser_state_t state, nw_error_t error) {
+        void *retained_error = error ? nw_retain(error) : NULL;
+        callback((int)state, retained_error, user_info);
+    });
+}
+
+uint64_t nw_shim_browse_result_get_changes(void *old_result, void *new_result) {
+    return nw_browse_result_get_changes((nw_browse_result_t)old_result, (nw_browse_result_t)new_result);
+}
+
+void *nw_shim_browse_result_copy_endpoint(void *result) {
+    if (!result) {
+        return NULL;
+    }
+    return nw_browse_result_copy_endpoint((nw_browse_result_t)result);
+}
+
+size_t nw_shim_browse_result_get_interfaces_count(void *result) {
+    if (!result) {
+        return 0;
+    }
+    return nw_browse_result_get_interfaces_count((nw_browse_result_t)result);
+}
+
+void *nw_shim_browse_result_copy_txt_record_object(void *result) {
+    if (!result) {
+        return NULL;
+    }
+    return nw_browse_result_copy_txt_record_object((nw_browse_result_t)result);
+}
+
+int nw_shim_browse_result_enumerate_interfaces(void *result, InterfaceEnumerationCallback callback, void *user_info) {
+    if (!result || !callback) {
+        return 0;
+    }
+    __block int count = 0;
+    nw_browse_result_enumerate_interfaces((nw_browse_result_t)result, ^bool(nw_interface_t interface) {
+        int keep_going = nw_shim_invoke_interface_callback(interface, callback, user_info);
+        count += 1;
+        return keep_going != 0;
+    });
+    return count;
+}
+
+void nw_shim_connection_set_viability_changed_handler(void *handle, ConnectionBooleanCallback callback, void *user_info) {
+    nw_conn_handle *h = (nw_conn_handle *)handle;
+    if (!h) {
+        return;
+    }
+    if (!callback) {
+        nw_connection_set_viability_changed_handler(h->conn, NULL);
+        return;
+    }
+    nw_connection_set_viability_changed_handler(h->conn, ^(bool value) {
+        callback(value ? 1 : 0, user_info);
+    });
+}
+
+void nw_shim_connection_set_better_path_available_handler(void *handle, ConnectionBooleanCallback callback, void *user_info) {
+    nw_conn_handle *h = (nw_conn_handle *)handle;
+    if (!h) {
+        return;
+    }
+    if (!callback) {
+        nw_connection_set_better_path_available_handler(h->conn, NULL);
+        return;
+    }
+    nw_connection_set_better_path_available_handler(h->conn, ^(bool value) {
+        callback(value ? 1 : 0, user_info);
+    });
+}
+
+void nw_shim_connection_set_path_changed_handler(void *handle, ConnectionPathCallback callback, void *user_info) {
+    nw_conn_handle *h = (nw_conn_handle *)handle;
+    if (!h) {
+        return;
+    }
+    if (!callback) {
+        nw_connection_set_path_changed_handler(h->conn, NULL);
+        return;
+    }
+    nw_connection_set_path_changed_handler(h->conn, ^(nw_path_t path) {
+        void *retained_path = path ? nw_retain(path) : NULL;
+        callback(retained_path, user_info);
+    });
+}
+
+void nw_shim_connection_restart(void *handle) {
+    nw_conn_handle *h = (nw_conn_handle *)handle;
+    if (h) {
+        nw_connection_restart(h->conn);
+    }
+}
+
+void nw_shim_connection_force_cancel(void *handle) {
+    nw_conn_handle *h = (nw_conn_handle *)handle;
+    if (h) {
+        nw_connection_force_cancel(h->conn);
+    }
+}
+
+void nw_shim_connection_cancel_current_endpoint(void *handle) {
+    nw_conn_handle *h = (nw_conn_handle *)handle;
+    if (h) {
+        nw_connection_cancel_current_endpoint(h->conn);
+    }
+}
+
+void nw_shim_connection_batch(void *handle, ConnectionBatchCallback callback, void *user_info) {
+    nw_conn_handle *h = (nw_conn_handle *)handle;
+    if (!h) {
+        return;
+    }
+    if (!callback) {
+        nw_connection_batch(h->conn, ^{});
+        return;
+    }
+    nw_connection_batch(h->conn, ^{
+        callback(user_info);
+    });
+}
+
+char *nw_shim_connection_copy_description(void *handle) {
+    nw_conn_handle *h = (nw_conn_handle *)handle;
+    if (!h) {
+        return NULL;
+    }
+    return nw_connection_copy_description(h->conn);
+}
+
+void *nw_shim_connection_copy_protocol_metadata(void *handle, void *definition) {
+    nw_conn_handle *h = (nw_conn_handle *)handle;
+    if (!h || !definition) {
+        return NULL;
+    }
+    return nw_connection_copy_protocol_metadata(h->conn, (nw_protocol_definition_t)definition);
+}
+
+uint32_t nw_shim_connection_get_maximum_datagram_size(void *handle) {
+    nw_conn_handle *h = (nw_conn_handle *)handle;
+    if (!h) {
+        return 0;
+    }
+    return nw_connection_get_maximum_datagram_size(h->conn);
+}
+
+void nw_shim_content_context_foreach_protocol_metadata(
+    void *context,
+    ProtocolMetadataEnumerationCallback callback,
+    void *user_info
+) {
+    if (!context || !callback) {
+        return;
+    }
+    nw_content_context_foreach_protocol_metadata((nw_content_context_t)context, ^(nw_protocol_definition_t definition, nw_protocol_metadata_t metadata) {
+        void *retained_definition = definition ? nw_retain(definition) : NULL;
+        void *retained_metadata = metadata ? nw_retain(metadata) : NULL;
+        (void)callback(retained_definition, retained_metadata, user_info);
+    });
+}
+
+void *nw_shim_framer_copy_remote_endpoint(void *framer) {
+    if (!framer) {
+        return NULL;
+    }
+    if (__builtin_available(macOS 10.15, *)) {
+        return nw_framer_copy_remote_endpoint((nw_framer_t)framer);
+    }
+    return NULL;
+}
+
+void *nw_shim_framer_copy_local_endpoint(void *framer) {
+    if (!framer) {
+        return NULL;
+    }
+    if (__builtin_available(macOS 10.15, *)) {
+        return nw_framer_copy_local_endpoint((nw_framer_t)framer);
+    }
+    return NULL;
+}
+
+void *nw_shim_framer_copy_parameters(void *framer) {
+    if (!framer) {
+        return NULL;
+    }
+    if (__builtin_available(macOS 10.15, *)) {
+        return nw_framer_copy_parameters((nw_framer_t)framer);
+    }
+    return NULL;
+}
+
+void *nw_shim_framer_copy_options(void *framer) {
+    if (!framer) {
+        return NULL;
+    }
+    if (__builtin_available(macOS 12.3, *)) {
+        return nw_framer_copy_options((nw_framer_t)framer);
+    }
+    return NULL;
+}
+
+int nw_shim_group_descriptor_enumerate_endpoints(void *descriptor, EndpointEnumerationCallback callback, void *user_info) {
+    if (!descriptor || !callback) {
+        return 0;
+    }
+    __block int count = 0;
+    nw_group_descriptor_enumerate_endpoints((nw_group_descriptor_t)descriptor, ^bool(nw_endpoint_t endpoint) {
+        int keep_going = nw_shim_invoke_endpoint_callback(endpoint, callback, user_info);
+        count += 1;
+        return keep_going != 0;
+    });
+    return count;
+}
+
+void nw_shim_multicast_group_descriptor_set_specific_source(void *descriptor, void *endpoint) {
+    if (!descriptor || !endpoint) {
+        return;
+    }
+    nw_multicast_group_descriptor_set_specific_source((nw_group_descriptor_t)descriptor, (nw_endpoint_t)endpoint);
+}
+
+int nw_shim_multicast_group_descriptor_get_disable_unicast_traffic(void *descriptor) {
+    if (!descriptor) {
+        return 0;
+    }
+    return nw_multicast_group_descriptor_get_disable_unicast_traffic((nw_group_descriptor_t)descriptor) ? 1 : 0;
+}
+
+void nw_shim_multicast_group_descriptor_set_disable_unicast_traffic(void *descriptor, int disable_unicast_traffic) {
+    if (!descriptor) {
+        return;
+    }
+    nw_multicast_group_descriptor_set_disable_unicast_traffic((nw_group_descriptor_t)descriptor, disable_unicast_traffic != 0);
+}
+
+void *nw_shim_connection_group_copy_descriptor(void *handle) {
+    nw_connection_group_handle *h = (nw_connection_group_handle *)handle;
+    if (!h) {
+        return NULL;
+    }
+    return nw_connection_group_copy_descriptor(h->group);
+}
+
+void *nw_shim_connection_group_copy_parameters(void *handle) {
+    nw_connection_group_handle *h = (nw_connection_group_handle *)handle;
+    if (!h) {
+        return NULL;
+    }
+    return nw_connection_group_copy_parameters(h->group);
+}
+
+void *nw_shim_connection_group_copy_remote_endpoint_for_message(void *handle, void *context) {
+    nw_connection_group_handle *h = (nw_connection_group_handle *)handle;
+    if (!h || !context) {
+        return NULL;
+    }
+    return nw_connection_group_copy_remote_endpoint_for_message(h->group, (nw_content_context_t)context);
+}
+
+void *nw_shim_connection_group_copy_local_endpoint_for_message(void *handle, void *context) {
+    nw_connection_group_handle *h = (nw_connection_group_handle *)handle;
+    if (!h || !context) {
+        return NULL;
+    }
+    return nw_connection_group_copy_local_endpoint_for_message(h->group, (nw_content_context_t)context);
+}
+
+void *nw_shim_connection_group_copy_path_for_message(void *handle, void *context) {
+    nw_connection_group_handle *h = (nw_connection_group_handle *)handle;
+    if (!h || !context) {
+        return NULL;
+    }
+    return nw_connection_group_copy_path_for_message(h->group, (nw_content_context_t)context);
+}
+
+void *nw_shim_connection_group_copy_protocol_metadata_for_message(void *handle, void *context, void *definition) {
+    nw_connection_group_handle *h = (nw_connection_group_handle *)handle;
+    if (!h || !context || !definition) {
+        return NULL;
+    }
+    if (__builtin_available(macOS 12.0, *)) {
+        return nw_connection_group_copy_protocol_metadata_for_message(
+            h->group,
+            (nw_content_context_t)context,
+            (nw_protocol_definition_t)definition);
+    }
+    return NULL;
+}
+
+void *nw_shim_connection_group_copy_protocol_metadata(void *handle, void *definition) {
+    nw_connection_group_handle *h = (nw_connection_group_handle *)handle;
+    if (!h || !definition) {
+        return NULL;
+    }
+    if (__builtin_available(macOS 12.0, *)) {
+        return nw_connection_group_copy_protocol_metadata(h->group, (nw_protocol_definition_t)definition);
+    }
+    return NULL;
+}
+
+void *nw_shim_connection_group_extract_connection_for_message(void *handle, void *context, int *out_status) {
+    nw_connection_group_handle *h = (nw_connection_group_handle *)handle;
+    if (!h || !context) {
+        if (out_status) *out_status = NW_INVALID_ARG;
+        return NULL;
+    }
+    nw_connection_t connection = nw_connection_group_extract_connection_for_message(h->group, (nw_content_context_t)context);
+    if (!connection) {
+        if (out_status) *out_status = NW_CONNECT_FAILED;
+        return NULL;
+    }
+    return nw_shim_wrap_started_connection(connection, "networkframework-rs.connection-group.message", out_status);
+}
+
+void *nw_shim_connection_group_extract_connection(void *handle, void *endpoint, void *protocol_options, int *out_status) {
+    nw_connection_group_handle *h = (nw_connection_group_handle *)handle;
+    if (!h) {
+        if (out_status) *out_status = NW_INVALID_ARG;
+        return NULL;
+    }
+    if (__builtin_available(macOS 12.0, *)) {
+        nw_connection_t connection = nw_connection_group_extract_connection(
+            h->group,
+            (nw_endpoint_t)endpoint,
+            (nw_protocol_options_t)protocol_options);
+        if (!connection) {
+            if (out_status) *out_status = NW_CONNECT_FAILED;
+            return NULL;
+        }
+        return nw_shim_wrap_started_connection(connection, "networkframework-rs.connection-group.extract", out_status);
+    }
+    if (out_status) *out_status = NW_INVALID_ARG;
+    return NULL;
+}
+
+int nw_shim_connection_group_reinsert_extracted_connection(void *handle, void *connection_handle) {
+    nw_connection_group_handle *h = (nw_connection_group_handle *)handle;
+    nw_conn_handle *connection = (nw_conn_handle *)connection_handle;
+    if (!h || !connection || !connection->conn) {
+        return 0;
+    }
+    if (__builtin_available(macOS 12.0, *)) {
+        return nw_connection_group_reinsert_extracted_connection(h->group, connection->conn) ? 1 : 0;
+    }
+    return 0;
+}
+
+int nw_shim_connection_group_reply(
+    void *handle,
+    void *inbound_message,
+    void *outbound_message,
+    const uint8_t *data,
+    size_t len
+) {
+    nw_connection_group_handle *h = (nw_connection_group_handle *)handle;
+    if (!h || !inbound_message || !outbound_message) {
+        return NW_INVALID_ARG;
+    }
+    dispatch_data_t payload = NULL;
+    if (data || len != 0) {
+        payload = dispatch_data_create(data, len, h->queue, DISPATCH_DATA_DESTRUCTOR_DEFAULT);
+    }
+    nw_connection_group_reply(h->group, (nw_content_context_t)inbound_message, (nw_content_context_t)outbound_message, payload);
+    if (payload) {
+        dispatch_release(payload);
+    }
+    return NW_OK;
+}
+
+void nw_shim_connection_group_set_new_connection_handler(
+    void *handle,
+    ConnectionGroupNewConnectionCallback callback,
+    void *user_info
+) {
+    nw_connection_group_handle *h = (nw_connection_group_handle *)handle;
+    if (!h) {
+        return;
+    }
+    if (!callback) {
+        if (__builtin_available(macOS 12.0, *)) {
+            nw_connection_group_set_new_connection_handler(h->group, NULL);
+        }
+        return;
+    }
+    if (__builtin_available(macOS 12.0, *)) {
+        nw_connection_group_set_new_connection_handler(h->group, ^(nw_connection_t connection) {
+            int status = NW_OK;
+            nw_connection_t retained = nw_retain(connection);
+            nw_conn_handle *wrapped = nw_shim_wrap_started_connection(retained, "networkframework-rs.connection-group.new-connection", &status);
+            if (wrapped) {
+                callback(wrapped, user_info);
+            }
+        });
+    }
+}
+
+int nw_shim_error_get_domain(void *error) {
+    if (!error) {
+        return 0;
+    }
+    return (int)nw_error_get_error_domain((nw_error_t)error);
+}
+
+int nw_shim_error_get_code(void *error) {
+    if (!error) {
+        return 0;
+    }
+    return nw_error_get_error_code((nw_error_t)error);
+}
+
+char *nw_shim_error_copy_cf_error_domain(void *error) {
+    if (!error) {
+        return NULL;
+    }
+    CFErrorRef cf_error = nw_error_copy_cf_error((nw_error_t)error);
+    if (!cf_error) {
+        return NULL;
+    }
+    char *result = nw_shim_copy_cfstring_value(CFErrorGetDomain(cf_error));
+    CFRelease(cf_error);
+    return result;
+}
+
+char *nw_shim_error_copy_cf_error_description(void *error) {
+    if (!error) {
+        return NULL;
+    }
+    CFErrorRef cf_error = nw_error_copy_cf_error((nw_error_t)error);
+    if (!cf_error) {
+        return NULL;
+    }
+    CFStringRef description = CFErrorCopyDescription(cf_error);
+    CFRelease(cf_error);
+    char *result = nw_shim_copy_cfstring_value(description);
+    if (description) {
+        CFRelease(description);
+    }
+    return result;
+}
+
+char *nw_shim_error_copy_posix_domain(void) {
+    return nw_shim_copy_cfstring_value(kNWErrorDomainPOSIX);
+}
+
+char *nw_shim_error_copy_dns_domain(void) {
+    return nw_shim_copy_cfstring_value(kNWErrorDomainDNS);
+}
+
+char *nw_shim_error_copy_tls_domain(void) {
+    return nw_shim_copy_cfstring_value(kNWErrorDomainTLS);
+}
+
+char *nw_shim_error_copy_wifi_aware_domain(void) {
+    if (__builtin_available(macOS 26.0, *)) {
+        return nw_shim_copy_cfstring_value(kNWErrorDomainWiFiAware);
+    }
+    return NULL;
+}
+
+void *nw_shim_parameters_create_custom_ip(uint8_t protocol_number) {
+    if (__builtin_available(macOS 10.15, *)) {
+        return nw_parameters_create_custom_ip(protocol_number, NW_PARAMETERS_DEFAULT_CONFIGURATION);
+    }
+    return NULL;
+}
+
+void *nw_shim_listener_create_direct(void *parameters, int *out_status) {
+    if (!parameters) {
+        if (out_status) *out_status = NW_INVALID_ARG;
+        return NULL;
+    }
+    nw_listener_t listener = nw_listener_create((nw_parameters_t)parameters);
+    return nw_shim_wrap_listener_common(listener, "networkframework-rs.listener.direct", out_status);
+}
+
+void *nw_shim_listener_create_with_connection(void *connection_handle, void *parameters, int *out_status) {
+    nw_conn_handle *connection = (nw_conn_handle *)connection_handle;
+    if (!connection || !connection->conn || !parameters) {
+        if (out_status) *out_status = NW_INVALID_ARG;
+        return NULL;
+    }
+    if (__builtin_available(macOS 11.0, *)) {
+        nw_listener_t listener = nw_listener_create_with_connection(connection->conn, (nw_parameters_t)parameters);
+        return nw_shim_wrap_listener_common(listener, "networkframework-rs.listener.connection", out_status);
+    }
+    if (out_status) *out_status = NW_INVALID_ARG;
+    return NULL;
+}
+
+void *nw_shim_listener_create_with_launchd_key(void *parameters, const char *launchd_key, int *out_status) {
+    if (!parameters || !launchd_key) {
+        if (out_status) *out_status = NW_INVALID_ARG;
+        return NULL;
+    }
+    nw_listener_t listener = nw_listener_create_with_launchd_key((nw_parameters_t)parameters, launchd_key);
+    return nw_shim_wrap_listener_common(listener, "networkframework-rs.listener.launchd", out_status);
+}
+
+uint32_t nw_shim_listener_get_new_connection_limit(void *handle) {
+    nw_listener_handle *h = (nw_listener_handle *)handle;
+    if (!h) {
+        return 0;
+    }
+    return nw_listener_get_new_connection_limit(h->listener);
+}
+
+void nw_shim_listener_set_new_connection_limit(void *handle, uint32_t new_connection_limit) {
+    nw_listener_handle *h = (nw_listener_handle *)handle;
+    if (h) {
+        nw_listener_set_new_connection_limit(h->listener, new_connection_limit);
+    }
+}
+
+void nw_shim_listener_set_advertised_endpoint_changed_handler(
+    void *handle,
+    ListenerAdvertisedEndpointChangedCallback callback,
+    void *user_info
+) {
+    nw_listener_handle *h = (nw_listener_handle *)handle;
+    if (!h) {
+        return;
+    }
+    if (!callback) {
+        nw_listener_set_advertised_endpoint_changed_handler(h->listener, NULL);
+        return;
+    }
+    nw_listener_set_advertised_endpoint_changed_handler(h->listener, ^(nw_endpoint_t endpoint, bool added) {
+        void *retained_endpoint = endpoint ? nw_retain(endpoint) : NULL;
+        callback(retained_endpoint, added ? 1 : 0, user_info);
+    });
+}
+
+void nw_shim_listener_set_new_connection_group_handler(
+    void *handle,
+    ListenerNewConnectionGroupCallback callback,
+    void *user_info
+) {
+    nw_listener_handle *h = (nw_listener_handle *)handle;
+    if (!h) {
+        return;
+    }
+    if (__builtin_available(macOS 12.0, *)) {
+        if (!callback) {
+            nw_listener_set_new_connection_group_handler(h->listener, NULL);
+            return;
+        }
+        nw_listener_set_new_connection_group_handler(h->listener, ^(nw_connection_group_t group) {
+            nw_connection_group_handle *wrapped = nw_shim_wrap_connection_group(group, "networkframework-rs.listener.group");
+            if (wrapped) {
+                callback(wrapped, user_info);
+            }
+        });
+    }
+}
+
+int nw_shim_path_enumerate_gateways(void *path, EndpointEnumerationCallback callback, void *user_info) {
+    if (!path || !callback) {
+        return 0;
+    }
+    __block int count = 0;
+    if (__builtin_available(macOS 11.0, *)) {
+        nw_path_enumerate_gateways((nw_path_t)path, ^bool(nw_endpoint_t gateway) {
+            int keep_going = nw_shim_invoke_endpoint_callback(gateway, callback, user_info);
+            count += 1;
+            return keep_going != 0;
+        });
+    }
+    return count;
+}
+
+static void *nw_shim_start_path_monitor_with_monitor(
+    nw_path_monitor_t monitor,
+    PathMonitorCallback callback,
+    void *user_info,
+    const char *label
+) {
+    if (!monitor) {
+        return NULL;
+    }
+    nw_path_handle *h = (nw_path_handle *)calloc(1, sizeof(nw_path_handle));
+    h->monitor = monitor;
+    h->queue = dispatch_queue_create(label, DISPATCH_QUEUE_SERIAL);
+    h->callback = callback;
+    h->user_info = user_info;
+    nw_path_monitor_set_queue(h->monitor, h->queue);
+    nw_path_monitor_set_update_handler(h->monitor, ^(nw_path_t path) {
+        if (h->latest_path) {
+            nw_release(h->latest_path);
+            h->latest_path = NULL;
+        }
+        if (path) {
+            h->latest_path = nw_retain(path);
+        }
+        if (!h->callback) return;
+        int satisfied = (nw_path_get_status(path) == nw_path_status_satisfied) ? 1 : 0;
+        int iface = 0;
+        if (nw_path_uses_interface_type(path, nw_interface_type_wifi)) iface = 1;
+        else if (nw_path_uses_interface_type(path, nw_interface_type_cellular)) iface = 2;
+        else if (nw_path_uses_interface_type(path, nw_interface_type_wired)) iface = 3;
+        else if (nw_path_uses_interface_type(path, nw_interface_type_loopback)) iface = 4;
+        h->callback(satisfied, iface, h->user_info);
+    });
+    nw_path_monitor_start(h->monitor);
+    return h;
+}
+
+void *nw_shim_path_monitor_start_with_type(int interface_type, PathMonitorCallback callback, void *user_info) {
+    return nw_shim_start_path_monitor_with_monitor(
+        nw_path_monitor_create_with_type((nw_interface_type_t)interface_type),
+        callback,
+        user_info,
+        "networkframework-rs.path.type");
+}
+
+void *nw_shim_path_monitor_start_for_ethernet_channel(PathMonitorCallback callback, void *user_info) {
+    if (__builtin_available(macOS 13.0, *)) {
+        return nw_shim_start_path_monitor_with_monitor(
+            nw_path_monitor_create_for_ethernet_channel(),
+            callback,
+            user_info,
+            "networkframework-rs.path.ethernet");
+    }
+    return NULL;
+}
+
+void nw_shim_path_monitor_prohibit_interface_type(void *handle, int interface_type) {
+    nw_path_handle *h = (nw_path_handle *)handle;
+    if (!h) {
+        return;
+    }
+    if (__builtin_available(macOS 11.0, *)) {
+        nw_path_monitor_prohibit_interface_type(h->monitor, (nw_interface_type_t)interface_type);
+    }
+}
+
+void nw_shim_path_monitor_set_cancel_handler(void *handle, PathMonitorCancelCallback callback, void *user_info) {
+    nw_path_handle *h = (nw_path_handle *)handle;
+    if (!h) {
+        return;
+    }
+    if (!callback) {
+        nw_path_monitor_set_cancel_handler(h->monitor, NULL);
+        return;
+    }
+    nw_path_monitor_set_cancel_handler(h->monitor, ^{
+        callback(user_info);
+    });
+}
+
+void *nw_shim_protocol_create_ip_metadata(void) {
+    return nw_ip_create_metadata();
+}
+
+void *nw_shim_protocol_create_udp_metadata(void) {
+    return nw_udp_create_metadata();
+}
+
+void *nw_shim_protocol_create_ws_options_with_version(int version) {
+    if (__builtin_available(macOS 10.15, *)) {
+        return nw_ws_create_options((nw_ws_version_t)version);
+    }
+    return NULL;
+}
+
+void *nw_shim_protocol_create_ws_metadata(int opcode) {
+    if (__builtin_available(macOS 10.15, *)) {
+        return nw_ws_create_metadata((nw_ws_opcode_t)opcode);
+    }
+    return NULL;
+}
+
+int nw_shim_protocol_metadata_is_ip(void *metadata) {
+    return metadata ? (nw_protocol_metadata_is_ip((nw_protocol_metadata_t)metadata) ? 1 : 0) : 0;
+}
+
+int nw_shim_protocol_metadata_is_tcp(void *metadata) {
+    return metadata ? (nw_protocol_metadata_is_tcp((nw_protocol_metadata_t)metadata) ? 1 : 0) : 0;
+}
+
+int nw_shim_protocol_metadata_is_tls(void *metadata) {
+    return metadata ? (nw_protocol_metadata_is_tls((nw_protocol_metadata_t)metadata) ? 1 : 0) : 0;
+}
+
+int nw_shim_protocol_metadata_is_udp(void *metadata) {
+    return metadata ? (nw_protocol_metadata_is_udp((nw_protocol_metadata_t)metadata) ? 1 : 0) : 0;
+}
+
+int nw_shim_protocol_metadata_is_ws(void *metadata) {
+    if (!metadata) {
+        return 0;
+    }
+    if (__builtin_available(macOS 10.15, *)) {
+        return nw_protocol_metadata_is_ws((nw_protocol_metadata_t)metadata) ? 1 : 0;
+    }
+    return 0;
+}
+
+#define NW_SHIM_BOOL_PROTOCOL_OPTION_SETTER(name, fn) \
+    void name(void *options, int value) { if (options) { fn((nw_protocol_options_t)options, value != 0); } }
+#define NW_SHIM_U32_PROTOCOL_OPTION_SETTER(name, fn) \
+    void name(void *options, uint32_t value) { if (options) { fn((nw_protocol_options_t)options, value); } }
+#define NW_SHIM_U8_PROTOCOL_OPTION_SETTER(name, fn) \
+    void name(void *options, uint8_t value) { if (options) { fn((nw_protocol_options_t)options, value); } }
+
+void nw_shim_ip_options_set_version(void *options, int version) {
+    if (options) {
+        nw_ip_options_set_version((nw_protocol_options_t)options, (nw_ip_version_t)version);
+    }
+}
+NW_SHIM_U8_PROTOCOL_OPTION_SETTER(nw_shim_ip_options_set_hop_limit, nw_ip_options_set_hop_limit)
+NW_SHIM_BOOL_PROTOCOL_OPTION_SETTER(nw_shim_ip_options_set_use_minimum_mtu, nw_ip_options_set_use_minimum_mtu)
+NW_SHIM_BOOL_PROTOCOL_OPTION_SETTER(nw_shim_ip_options_set_disable_fragmentation, nw_ip_options_set_disable_fragmentation)
+NW_SHIM_BOOL_PROTOCOL_OPTION_SETTER(nw_shim_ip_options_set_calculate_receive_time, nw_ip_options_set_calculate_receive_time)
+void nw_shim_ip_options_set_local_address_preference(void *options, int preference) {
+    if (options && __builtin_available(macOS 10.15, *)) {
+        nw_ip_options_set_local_address_preference((nw_protocol_options_t)options, (nw_ip_local_address_preference_t)preference);
+    }
+}
+NW_SHIM_BOOL_PROTOCOL_OPTION_SETTER(nw_shim_ip_options_set_disable_multicast_loopback, nw_ip_options_set_disable_multicast_loopback)
+void nw_shim_ip_metadata_set_ecn_flag(void *metadata, int ecn_flag) {
+    if (metadata) {
+        nw_ip_metadata_set_ecn_flag((nw_protocol_metadata_t)metadata, (nw_ip_ecn_flag_t)ecn_flag);
+    }
+}
+int nw_shim_ip_metadata_get_ecn_flag(void *metadata) {
+    return metadata ? (int)nw_ip_metadata_get_ecn_flag((nw_protocol_metadata_t)metadata) : 0;
+}
+void nw_shim_ip_metadata_set_service_class(void *metadata, int service_class) {
+    if (metadata) {
+        nw_ip_metadata_set_service_class((nw_protocol_metadata_t)metadata, (nw_service_class_t)service_class);
+    }
+}
+int nw_shim_ip_metadata_get_service_class(void *metadata) {
+    return metadata ? (int)nw_ip_metadata_get_service_class((nw_protocol_metadata_t)metadata) : 0;
+}
+uint64_t nw_shim_ip_metadata_get_receive_time(void *metadata) {
+    return metadata ? nw_ip_metadata_get_receive_time((nw_protocol_metadata_t)metadata) : 0;
+}
+
+NW_SHIM_BOOL_PROTOCOL_OPTION_SETTER(nw_shim_tcp_options_set_no_delay, nw_tcp_options_set_no_delay)
+NW_SHIM_BOOL_PROTOCOL_OPTION_SETTER(nw_shim_tcp_options_set_no_push, nw_tcp_options_set_no_push)
+NW_SHIM_BOOL_PROTOCOL_OPTION_SETTER(nw_shim_tcp_options_set_no_options, nw_tcp_options_set_no_options)
+NW_SHIM_BOOL_PROTOCOL_OPTION_SETTER(nw_shim_tcp_options_set_enable_keepalive, nw_tcp_options_set_enable_keepalive)
+NW_SHIM_U32_PROTOCOL_OPTION_SETTER(nw_shim_tcp_options_set_keepalive_count, nw_tcp_options_set_keepalive_count)
+NW_SHIM_U32_PROTOCOL_OPTION_SETTER(nw_shim_tcp_options_set_keepalive_idle_time, nw_tcp_options_set_keepalive_idle_time)
+NW_SHIM_U32_PROTOCOL_OPTION_SETTER(nw_shim_tcp_options_set_keepalive_interval, nw_tcp_options_set_keepalive_interval)
+NW_SHIM_U32_PROTOCOL_OPTION_SETTER(nw_shim_tcp_options_set_maximum_segment_size, nw_tcp_options_set_maximum_segment_size)
+NW_SHIM_U32_PROTOCOL_OPTION_SETTER(nw_shim_tcp_options_set_connection_timeout, nw_tcp_options_set_connection_timeout)
+NW_SHIM_U32_PROTOCOL_OPTION_SETTER(nw_shim_tcp_options_set_persist_timeout, nw_tcp_options_set_persist_timeout)
+NW_SHIM_U32_PROTOCOL_OPTION_SETTER(nw_shim_tcp_options_set_retransmit_connection_drop_time, nw_tcp_options_set_retransmit_connection_drop_time)
+NW_SHIM_BOOL_PROTOCOL_OPTION_SETTER(nw_shim_tcp_options_set_retransmit_fin_drop, nw_tcp_options_set_retransmit_fin_drop)
+NW_SHIM_BOOL_PROTOCOL_OPTION_SETTER(nw_shim_tcp_options_set_disable_ack_stretching, nw_tcp_options_set_disable_ack_stretching)
+NW_SHIM_BOOL_PROTOCOL_OPTION_SETTER(nw_shim_tcp_options_set_enable_fast_open, nw_tcp_options_set_enable_fast_open)
+NW_SHIM_BOOL_PROTOCOL_OPTION_SETTER(nw_shim_tcp_options_set_disable_ecn, nw_tcp_options_set_disable_ecn)
+void nw_shim_tcp_options_set_multipath_force_version(void *options, int multipath_force_version) {
+    if (options && __builtin_available(macOS 12.0, *)) {
+        nw_tcp_options_set_multipath_force_version((nw_protocol_options_t)options, (nw_multipath_version_t)multipath_force_version);
+    }
+}
+uint32_t nw_shim_tcp_get_available_receive_buffer(void *metadata) {
+    return metadata ? nw_tcp_get_available_receive_buffer((nw_protocol_metadata_t)metadata) : 0;
+}
+uint32_t nw_shim_tcp_get_available_send_buffer(void *metadata) {
+    return metadata ? nw_tcp_get_available_send_buffer((nw_protocol_metadata_t)metadata) : 0;
+}
+
+void *nw_shim_tls_copy_sec_protocol_options(void *options) {
+    return options ? nw_tls_copy_sec_protocol_options((nw_protocol_options_t)options) : NULL;
+}
+
+void *nw_shim_tls_copy_sec_protocol_metadata(void *metadata) {
+    return metadata ? nw_tls_copy_sec_protocol_metadata((nw_protocol_metadata_t)metadata) : NULL;
+}
+
+NW_SHIM_BOOL_PROTOCOL_OPTION_SETTER(nw_shim_udp_options_set_prefer_no_checksum, nw_udp_options_set_prefer_no_checksum)
+
+void nw_shim_ws_options_add_additional_header(void *options, const char *name, const char *value) {
+    if (options && name && value && __builtin_available(macOS 10.15, *)) {
+        nw_ws_options_add_additional_header((nw_protocol_options_t)options, name, value);
+    }
+}
+
+void nw_shim_ws_options_add_subprotocol(void *options, const char *subprotocol) {
+    if (options && subprotocol && __builtin_available(macOS 10.15, *)) {
+        nw_ws_options_add_subprotocol((nw_protocol_options_t)options, subprotocol);
+    }
+}
+
+NW_SHIM_BOOL_PROTOCOL_OPTION_SETTER(nw_shim_ws_options_set_auto_reply_ping, nw_ws_options_set_auto_reply_ping)
+NW_SHIM_BOOL_PROTOCOL_OPTION_SETTER(nw_shim_ws_options_set_skip_handshake, nw_ws_options_set_skip_handshake)
+void nw_shim_ws_options_set_maximum_message_size(void *options, size_t maximum_message_size) {
+    if (options && __builtin_available(macOS 10.15, *)) {
+        nw_ws_options_set_maximum_message_size((nw_protocol_options_t)options, maximum_message_size);
+    }
+}
+
+void nw_shim_ws_metadata_set_close_code(void *metadata, int close_code) {
+    if (metadata && __builtin_available(macOS 10.15, *)) {
+        nw_ws_metadata_set_close_code((nw_protocol_metadata_t)metadata, (nw_ws_close_code_t)close_code);
+    }
+}
+
+int nw_shim_ws_metadata_get_close_code(void *metadata) {
+    if (!metadata) {
+        return 0;
+    }
+    if (__builtin_available(macOS 10.15, *)) {
+        return (int)nw_ws_metadata_get_close_code((nw_protocol_metadata_t)metadata);
+    }
+    return 0;
+}
+
+void *nw_shim_ws_metadata_copy_server_response(void *metadata) {
+    if (!metadata) {
+        return NULL;
+    }
+    if (__builtin_available(macOS 10.15, *)) {
+        return nw_ws_metadata_copy_server_response((nw_protocol_metadata_t)metadata);
+    }
+    return NULL;
+}
+
+void nw_shim_ws_metadata_set_pong_handler(void *metadata, WsPongCallback callback, void *user_info) {
+    if (!metadata || !__builtin_available(macOS 10.15, *)) {
+        return;
+    }
+    if (!callback) {
+        nw_ws_metadata_set_pong_handler((nw_protocol_metadata_t)metadata, dispatch_get_main_queue(), NULL);
+        return;
+    }
+    dispatch_queue_t queue = dispatch_queue_create("networkframework-rs.ws.pong", DISPATCH_QUEUE_SERIAL);
+    nw_ws_metadata_set_pong_handler((nw_protocol_metadata_t)metadata, queue, ^(nw_error_t error) {
+        void *retained_error = error ? nw_retain(error) : NULL;
+        callback(retained_error, user_info);
+    });
+    dispatch_release(queue);
+}
+
+int nw_shim_ws_request_enumerate_subprotocols(void *request, StringEnumerationCallback callback, void *user_info) {
+    if (!request || !callback) {
+        return 0;
+    }
+    if (!__builtin_available(macOS 10.15, *)) {
+        return 0;
+    }
+    __block int count = 0;
+    bool completed = nw_ws_request_enumerate_subprotocols((nw_ws_request_t)request, ^bool(const char *subprotocol) {
+        callback(subprotocol ? subprotocol : "", user_info);
+        count += 1;
+        return true;
+    });
+    return completed ? count : -count;
+}
+
+int nw_shim_ws_request_enumerate_additional_headers(void *request, HeaderEnumerationCallback callback, void *user_info) {
+    if (!request || !callback) {
+        return 0;
+    }
+    if (!__builtin_available(macOS 10.15, *)) {
+        return 0;
+    }
+    __block int count = 0;
+    bool completed = nw_ws_request_enumerate_additional_headers((nw_ws_request_t)request, ^bool(const char *name, const char *value) {
+        int keep_going = callback(name ? name : "", value ? value : "", user_info);
+        count += 1;
+        return keep_going != 0;
+    });
+    return completed ? count : -count;
+}
+
+void *nw_shim_ws_response_create(int status, const char *selected_subprotocol) {
+    if (__builtin_available(macOS 10.15, *)) {
+        return nw_ws_response_create((nw_ws_response_status_t)status, selected_subprotocol);
+    }
+    return NULL;
+}
+
+int nw_shim_ws_response_get_status(void *response) {
+    if (!__builtin_available(macOS 10.15, *)) {
+        return 0;
+    }
+    return (int)nw_ws_response_get_status((nw_ws_response_t)response);
+}
+
+char *nw_shim_ws_response_get_selected_subprotocol(void *response) {
+    if (!response) {
+        return NULL;
+    }
+    if (!__builtin_available(macOS 10.15, *)) {
+        return NULL;
+    }
+    const char *value = nw_ws_response_get_selected_subprotocol((nw_ws_response_t)response);
+    return value ? strdup(value) : NULL;
+}
+
+void nw_shim_ws_response_add_additional_header(void *response, const char *name, const char *value) {
+    if (response && name && value && __builtin_available(macOS 10.15, *)) {
+        nw_ws_response_add_additional_header((nw_ws_response_t)response, name, value);
+    }
+}
+
+int nw_shim_ws_response_enumerate_additional_headers(void *response, HeaderEnumerationCallback callback, void *user_info) {
+    if (!response || !callback) {
+        return 0;
+    }
+    if (!__builtin_available(macOS 10.15, *)) {
+        return 0;
+    }
+    __block int count = 0;
+    bool completed = nw_ws_response_enumerate_additional_headers((nw_ws_response_t)response, ^bool(const char *name, const char *value) {
+        int keep_going = callback(name ? name : "", value ? value : "", user_info);
+        count += 1;
+        return keep_going != 0;
+    });
+    return completed ? count : -count;
 }

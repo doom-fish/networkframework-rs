@@ -1,6 +1,21 @@
 //! Errors raised by [`networkframework`](crate).
 
+use core::ffi::c_void;
 use core::fmt;
+use std::ffi::CStr;
+
+use crate::ffi;
+
+fn copied_string(ptr: *mut i8) -> Option<String> {
+    if ptr.is_null() {
+        return None;
+    }
+    let value = unsafe { CStr::from_ptr(ptr) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { ffi::nw_shim_free_buffer(ptr.cast()) };
+    Some(value)
+}
 
 /// Failure modes from the C shim.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,6 +46,95 @@ impl fmt::Display for NetworkError {
 }
 
 impl std::error::Error for NetworkError {}
+
+/// Network.framework error domains.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorDomain {
+    Posix,
+    Dns,
+    Tls,
+    WifiAware,
+    Unknown(i32),
+}
+
+impl ErrorDomain {
+    #[must_use]
+    pub const fn from_raw(raw: i32) -> Self {
+        match raw {
+            1 => Self::Posix,
+            2 => Self::Dns,
+            3 => Self::Tls,
+            4 => Self::WifiAware,
+            other => Self::Unknown(other),
+        }
+    }
+
+    #[must_use]
+    pub fn name(self) -> Option<String> {
+        match self {
+            Self::Posix => copied_string(unsafe { ffi::nw_shim_error_copy_posix_domain() }),
+            Self::Dns => copied_string(unsafe { ffi::nw_shim_error_copy_dns_domain() }),
+            Self::Tls => copied_string(unsafe { ffi::nw_shim_error_copy_tls_domain() }),
+            Self::WifiAware => copied_string(unsafe { ffi::nw_shim_error_copy_wifi_aware_domain() }),
+            Self::Unknown(_) => None,
+        }
+    }
+}
+
+/// Opaque `nw_error_t` wrapper for advanced error inspection.
+pub struct FrameworkError {
+    handle: *mut c_void,
+}
+
+unsafe impl Send for FrameworkError {}
+unsafe impl Sync for FrameworkError {}
+
+impl FrameworkError {
+    /// # Safety
+    ///
+    /// `handle` must be a valid retained `nw_error_t` that remains alive for the
+    /// lifetime of the returned wrapper.
+    #[must_use]
+    pub const unsafe fn from_raw(handle: *mut c_void) -> Self {
+        Self { handle }
+    }
+
+    #[must_use]
+    pub fn domain(&self) -> ErrorDomain {
+        ErrorDomain::from_raw(unsafe { ffi::nw_shim_error_get_domain(self.handle) })
+    }
+
+    #[must_use]
+    pub fn code(&self) -> i32 {
+        unsafe { ffi::nw_shim_error_get_code(self.handle) }
+    }
+
+    #[must_use]
+    pub fn cf_error_domain(&self) -> Option<String> {
+        copied_string(unsafe { ffi::nw_shim_error_copy_cf_error_domain(self.handle) })
+    }
+
+    #[must_use]
+    pub fn cf_error_description(&self) -> Option<String> {
+        copied_string(unsafe { ffi::nw_shim_error_copy_cf_error_description(self.handle) })
+    }
+}
+
+impl Clone for FrameworkError {
+    fn clone(&self) -> Self {
+        let handle = unsafe { ffi::nw_shim_retain_object(self.handle) };
+        Self { handle }
+    }
+}
+
+impl Drop for FrameworkError {
+    fn drop(&mut self) {
+        if !self.handle.is_null() {
+            unsafe { ffi::nw_shim_release_object(self.handle) };
+            self.handle = core::ptr::null_mut();
+        }
+    }
+}
 
 #[must_use]
 pub(crate) fn from_status(code: i32) -> NetworkError {

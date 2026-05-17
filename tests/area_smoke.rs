@@ -4,14 +4,17 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use networkframework::{
-    advertise_with_descriptor, start_browser_with_descriptor, AdvertiseDescriptor,
-    BrowseDescriptor, BrowserEvent, ConnectionGroup, ConnectionGroupDescriptor,
+    advertise_with_descriptor, start_browser_results_with_descriptor, start_browser_with_descriptor,
+    start_path_monitor_for_ethernet_channel, start_path_monitor_with_type, AdvertiseDescriptor,
+    BrowseDescriptor, BrowserEvent, BrowserState, ConnectionGroup, ConnectionGroupDescriptor,
     ConnectionParameters, ContentContext, DataTransferReportState, Endpoint, EndpointType,
-    EthernetChannel, ExpiredDnsBehavior, Framer, FramerContext, FramerDefinition,
-    FramerMessageView, FramerStart, InterfaceType, MultipathService, ParametersAttribution,
-    PathStatus, PrivacyContext, ProtocolDefinition, ProtocolOptions, ProxyConfig, QuicOptions,
-    RelayHop, ResolverConfig, ServiceClass, TcpClient, TcpListener, TxtRecord,
-    TxtRecordFindResult,
+    ErrorDomain, EthernetChannel, ExpiredDnsBehavior, Framer, FramerContext, FramerDefinition,
+    FramerMessageView, FramerStart, InterfaceType, IpEcnFlag, IpLocalAddressPreference,
+    IpVersion, MultipathService, ParametersAttribution, PathStatus, PrivacyContext,
+    ProtocolDefinition, ProtocolMetadata, ProtocolOptions, ProxyConfig, QuicOptions, RelayHop,
+    ResolverConfig, ServiceClass, TcpClient, TcpListener, TcpMultipathVersion, TxtRecord,
+    TxtRecordFindResult, UrlSessionConfiguration, WsCloseCode, WsResponse, WsResponseStatus,
+    WsVersion,
 };
 
 fn unique_label(prefix: &str) -> String {
@@ -98,7 +101,10 @@ fn connection_area_round_trip_exposes_metadata() -> Result<(), networkframework:
         Ok(())
     });
 
-    let client = TcpClient::connect("127.0.0.1", port)?;
+    let mut client = TcpClient::connect("127.0.0.1", port)?;
+    client.set_viability_changed_handler(|_is_viable| {});
+    client.set_better_path_available_handler(|_has_better_path| {});
+    client.set_path_changed_handler(|_path| {});
     client.send(b"ping")?;
     assert_eq!(client.receive(1024)?, b"pong");
     assert!(matches!(
@@ -106,6 +112,11 @@ fn connection_area_round_trip_exposes_metadata() -> Result<(), networkframework:
         EndpointType::Host | EndpointType::Address
     ));
     assert!(client.parameters().is_some());
+    let _ = client.description();
+    let _ = client.maximum_datagram_size();
+    client.batch(|| {});
+    let tcp_definition = ProtocolDefinition::tcp()?;
+    let _ = client.protocol_metadata(&tcp_definition);
 
     server.join().expect("server thread")?;
     Ok(())
@@ -113,7 +124,9 @@ fn connection_area_round_trip_exposes_metadata() -> Result<(), networkframework:
 
 #[test]
 fn listener_area_accepts_connections() -> Result<(), networkframework::NetworkError> {
-    let listener = TcpListener::bind(0)?;
+    let mut listener = TcpListener::bind(0)?;
+    listener.set_advertised_endpoint_changed_handler(|_endpoint, _is_added| {});
+    listener.set_new_connection_group_handler(|_group| {});
     assert!(listener.local_port() > 0);
     let port = listener.local_port();
     let server = std::thread::spawn(move || -> Result<Vec<u8>, networkframework::NetworkError> {
@@ -143,11 +156,53 @@ fn browser_area_descriptor_and_start() -> Result<(), networkframework::NetworkEr
 
     let events = Arc::new(Mutex::new(Vec::new()));
     let events_for_callback = Arc::clone(&events);
-    let browser = start_browser_with_descriptor(&descriptor, None, move |event| {
+    let mut browser = start_browser_with_descriptor(&descriptor, None, move |event| {
         events_for_callback.lock().expect("events lock").push(event);
     })?;
+    let states = Arc::new(Mutex::new(Vec::new()));
+    let states_for_callback = Arc::clone(&states);
+    browser.set_state_changed_handler(move |state, error| {
+        if let Some(error) = error {
+            let _ = error.code();
+            let _ = error.domain();
+        }
+        states_for_callback.lock().expect("states lock").push(state);
+    });
+    let _ = browser.browse_descriptor();
+    let _ = browser.parameters();
+
+    let result_changes = Arc::new(Mutex::new(Vec::new()));
+    let result_changes_for_callback = Arc::clone(&result_changes);
+    let mut results_browser = start_browser_results_with_descriptor(&descriptor, None, move |old_result, new_result, changes, _batch_complete| {
+        if let Some(result) = old_result.as_ref() {
+            let _ = result.endpoint();
+            let _ = result.interface_count();
+            let _ = result.interfaces();
+            let _ = result.txt_record_object();
+        }
+        if let Some(result) = new_result.as_ref() {
+            let _ = result.endpoint();
+            let _ = result.interface_count();
+            let _ = result.interfaces();
+            let _ = result.txt_record_object();
+        }
+        result_changes_for_callback
+            .lock()
+            .expect("result changes lock")
+            .push(changes.bits());
+    })?;
+    let states_for_results = Arc::clone(&states);
+    results_browser.set_state_changed_handler(move |state, _error| {
+        states_for_results.lock().expect("states lock").push(state);
+    });
+    let _ = results_browser.browse_descriptor();
+    let _ = results_browser.parameters();
+
     std::thread::sleep(Duration::from_millis(100));
+    drop(results_browser);
     drop(browser);
+    let _ = states.lock().expect("states lock").contains(&BrowserState::Ready);
+    let _ = result_changes.lock().expect("result changes lock").len();
 
     let recorded = events.lock().expect("events lock");
     assert!(recorded
@@ -313,6 +368,7 @@ fn path_area_reports_connection_path() -> Result<(), networkframework::NetworkEr
     let _ = path.link_quality();
     let _ = path.effective_local_endpoint();
     let _ = path.effective_remote_endpoint();
+    let _ = path.gateways();
 
     server.join().expect("server thread")?;
     Ok(())
@@ -345,7 +401,13 @@ fn framer_area_round_trip() -> Result<(), networkframework::NetworkError> {
 
 #[test]
 fn group_area_starts_and_cancels() -> Result<(), networkframework::NetworkError> {
-    let descriptor = ConnectionGroupDescriptor::multicast("239.255.0.1", 5000)?;
+    let mut descriptor = ConnectionGroupDescriptor::multicast("239.255.0.1", 5000)?;
+    let specific_source = Endpoint::address("127.0.0.1", 5000)?;
+    descriptor.set_specific_source(&specific_source);
+    descriptor.set_disable_unicast_traffic(true);
+    assert!(descriptor.disable_unicast_traffic());
+    let _ = descriptor.endpoints();
+
     let parameters = ConnectionParameters::udp()?;
     let mut group = ConnectionGroup::new(&descriptor, &parameters)?;
 
@@ -354,9 +416,12 @@ fn group_area_starts_and_cancels() -> Result<(), networkframework::NetworkError>
     group.set_state_changed_handler(move |state| {
         states_for_callback.lock().expect("states lock").push(state);
     });
+    group.set_new_connection_handler(|_connection| {});
     group.set_receive_handler(2048, false, |_message| {});
     group.start()?;
     std::thread::sleep(Duration::from_millis(200));
+    let _ = group.descriptor();
+    let _ = group.parameters();
     group.cancel();
 
     let observed = states.lock().expect("states lock");
@@ -366,6 +431,7 @@ fn group_area_starts_and_cancels() -> Result<(), networkframework::NetworkError>
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn protocol_area_exposes_definitions_and_options() -> Result<(), networkframework::NetworkError> {
     let tcp_definition = ProtocolDefinition::tcp()?;
     let udp_definition = ProtocolDefinition::udp()?;
@@ -378,11 +444,12 @@ fn protocol_area_exposes_definitions_and_options() -> Result<(), networkframewor
     assert_ne!(tls_definition, ip_definition);
     assert_ne!(websocket_definition, quic_definition);
 
-    let tcp_options = ProtocolOptions::tcp()?;
-    let udp_options = ProtocolOptions::udp()?;
+    let mut tcp_options = ProtocolOptions::tcp()?;
+    let mut udp_options = ProtocolOptions::udp()?;
     let tls_options = ProtocolOptions::tls()?;
-    let ip_options = ProtocolOptions::ip()?;
-    let websocket_options = ProtocolOptions::websocket()?;
+    let mut ip_options = ProtocolOptions::ip()?;
+    let mut websocket_options = ProtocolOptions::websocket()?;
+    let websocket_v13 = ProtocolOptions::websocket_with_version(WsVersion::V13)?;
     let quic_options = ProtocolOptions::quic()?;
 
     assert_eq!(
@@ -405,6 +472,65 @@ fn protocol_area_exposes_definitions_and_options() -> Result<(), networkframewor
         websocket_options.definition().expect("ws definition"),
         websocket_definition
     );
+    assert_eq!(
+        websocket_v13.definition().expect("ws v13 definition"),
+        websocket_definition
+    );
+    ip_options
+        .set_ip_version(IpVersion::V6)
+        .set_ip_hop_limit(8)
+        .set_ip_use_minimum_mtu(true)
+        .set_ip_disable_fragmentation(true)
+        .set_ip_calculate_receive_time(true)
+        .set_ip_local_address_preference(IpLocalAddressPreference::Temporary)
+        .set_ip_disable_multicast_loopback(true);
+    tcp_options
+        .set_tcp_no_delay(true)
+        .set_tcp_no_push(false)
+        .set_tcp_no_options(false)
+        .set_tcp_enable_keepalive(true)
+        .set_tcp_keepalive_count(3)
+        .set_tcp_keepalive_idle_time(30)
+        .set_tcp_keepalive_interval(10)
+        .set_tcp_maximum_segment_size(1200)
+        .set_tcp_connection_timeout(10)
+        .set_tcp_persist_timeout(5)
+        .set_tcp_retransmit_connection_drop_time(20)
+        .set_tcp_retransmit_fin_drop(true)
+        .set_tcp_disable_ack_stretching(false)
+        .set_tcp_enable_fast_open(true)
+        .set_tcp_disable_ecn(false)
+        .set_tcp_multipath_force_version(TcpMultipathVersion::V1);
+    udp_options.set_udp_prefer_no_checksum(true);
+    websocket_options
+        .add_ws_additional_header("X-Test", "1")?
+        .add_ws_subprotocol("chat")?
+        .set_ws_auto_reply_ping(true)
+        .set_ws_skip_handshake(false)
+        .set_ws_maximum_message_size(4096)
+        .set_ws_client_request_handler(|request| {
+            let _ = request.subprotocols();
+            let _ = request.additional_headers();
+            Some(WsResponse::new(WsResponseStatus::Accept, Some("chat")).expect("create ws response"))
+        });
+    let _ = tls_options.tls_security_options();
+    let mut ip_metadata = ProtocolMetadata::ip()?;
+    ip_metadata
+        .set_ip_ecn_flag(IpEcnFlag::Ect0)
+        .set_ip_service_class(ServiceClass::ResponsiveData);
+    assert_eq!(ip_metadata.ip_ecn_flag(), IpEcnFlag::Ect0);
+    let _ = ip_metadata.ip_receive_time();
+    let udp_metadata = ProtocolMetadata::udp()?;
+    assert!(udp_metadata.is_udp());
+    let mut websocket_metadata = ProtocolMetadata::websocket(networkframework::Opcode::Close)?;
+    websocket_metadata.set_ws_close_code(WsCloseCode::GoingAway);
+    assert_eq!(websocket_metadata.ws_close_code(), WsCloseCode::GoingAway);
+    let _ = websocket_metadata.ws_server_response();
+    let _ = websocket_metadata.tls_security_metadata();
+    let mut response = WsResponse::new(WsResponseStatus::Accept, Some("chat"))?;
+    response.add_additional_header("X-Reply", "1")?;
+    assert_eq!(response.status(), WsResponseStatus::Accept);
+    assert_eq!(response.selected_subprotocol().as_deref(), Some("chat"));
     assert!(quic_options.is_quic());
     assert_eq!(
         quic_options.definition().expect("quic definition"),
@@ -430,6 +556,7 @@ fn content_context_area_tracks_properties() -> Result<(), networkframework::Netw
     let _ = context.expiration_milliseconds();
     let _ = context.relative_priority();
     let _ = context.copy_antecedent();
+    let _ = context.protocol_metadata_entries();
     Ok(())
 }
 
@@ -512,6 +639,11 @@ fn proxy_config_area_tracks_domains_and_optional_relay(
         .excluded_domains()
         .iter()
         .any(|domain| domain == "internal.example.com"));
+    if let Some(mut configuration) = UrlSessionConfiguration::default_session() {
+        configuration.set_proxy_configurations(&[proxy.clone()]);
+        let _ = configuration.proxy_configurations();
+    }
+    assert!(ErrorDomain::Posix.name().is_some());
 
     let relay_endpoint = Endpoint::host("relay.example", 443)?;
     let relay_tls = ProtocolOptions::tls()?;
@@ -660,6 +792,29 @@ fn ethernet_channel_area_smoke() -> Result<(), networkframework::NetworkError> {
         channel.cancel();
         drop(states.lock().expect("states lock"));
     }
+
+    Ok(())
+}
+
+#[test]
+fn advanced_path_monitor_and_misc_area_smoke() -> Result<(), networkframework::NetworkError> {
+    let mut monitor = start_path_monitor_with_type(InterfaceType::Loopback, |_update| {});
+    monitor.set_cancel_handler(|| {});
+    monitor.prohibit_interface_type(InterfaceType::WiFi);
+    drop(monitor);
+
+    let ethernet_monitor = start_path_monitor_for_ethernet_channel(|_update| {});
+    drop(ethernet_monitor);
+
+    let _ = ConnectionParameters::custom_ip(253);
+
+    let mut listener = TcpListener::bind(0)?;
+    let current_limit = listener.new_connection_limit();
+    listener.set_new_connection_limit(current_limit.max(1));
+
+    let parameters = ConnectionParameters::tcp()?;
+    let _ = TcpListener::bind_direct(&parameters);
+    let _ = TcpListener::bind_with_launchd_key(&parameters, "com.example.networkframework.test");
 
     Ok(())
 }

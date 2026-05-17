@@ -260,6 +260,11 @@ pub struct ProxyConfig {
     handle: *mut c_void,
 }
 
+/// Minimal wrapper around `NSURLSessionConfiguration`'s Network.framework proxy settings.
+pub struct UrlSessionConfiguration {
+    handle: *mut c_void,
+}
+
 unsafe impl Send for ProxyConfig {}
 unsafe impl Sync for ProxyConfig {}
 
@@ -424,6 +429,68 @@ impl ProxyConfig {
             );
         };
         domains
+    }
+
+    #[must_use]
+    pub(crate) const fn as_ptr(&self) -> *mut c_void {
+        self.handle
+    }
+}
+
+impl UrlSessionConfiguration {
+    /// Create a wrapper around `URLSessionConfiguration.default` when available.
+    #[must_use]
+    pub fn default_session() -> Option<Self> {
+        let handle = unsafe { ffi::nw_shim_url_session_configuration_default() };
+        (!handle.is_null()).then_some(Self { handle })
+    }
+
+    /// Create a wrapper around `URLSessionConfiguration.ephemeral` when available.
+    #[must_use]
+    pub fn ephemeral_session() -> Option<Self> {
+        let handle = unsafe { ffi::nw_shim_url_session_configuration_ephemeral() };
+        (!handle.is_null()).then_some(Self { handle })
+    }
+
+    /// Replace the configuration's `proxyConfigurations` array.
+    pub fn set_proxy_configurations(&mut self, proxy_configurations: &[ProxyConfig]) -> &mut Self {
+        let items: Vec<*mut c_void> = proxy_configurations.iter().map(ProxyConfig::as_ptr).collect();
+        unsafe {
+            ffi::nw_shim_url_session_configuration_set_proxy_configurations(
+                self.handle,
+                items.as_ptr(),
+                items.len(),
+            );
+        };
+        self
+    }
+
+    /// Copy the configuration's `proxyConfigurations` array.
+    #[must_use]
+    pub fn proxy_configurations(&self) -> Vec<ProxyConfig> {
+        let mut count = 0_usize;
+        let items = unsafe {
+            ffi::nw_shim_url_session_configuration_copy_proxy_configurations(self.handle, &mut count)
+        };
+        if items.is_null() || count == 0 {
+            return Vec::new();
+        }
+        let slice = unsafe { std::slice::from_raw_parts(items, count) };
+        let configs = slice
+            .iter()
+            .filter_map(|handle| (!handle.is_null()).then_some(ProxyConfig { handle: *handle }))
+            .collect();
+        unsafe { ffi::nw_shim_free_buffer(items.cast()) };
+        configs
+    }
+}
+
+impl Drop for UrlSessionConfiguration {
+    fn drop(&mut self) {
+        if !self.handle.is_null() {
+            unsafe { ffi::nw_shim_url_session_configuration_release(self.handle) };
+            self.handle = core::ptr::null_mut();
+        }
     }
 }
 
