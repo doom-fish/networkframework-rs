@@ -492,7 +492,7 @@ impl WebSocket {
     /// Register a pong handler callback for WebSocket messages.
     ///
     /// This registers a callback that will be invoked whenever a pong frame is received.
-    /// The callback will receive a [`FrameworkError`] if there was an error processing the pong,
+    /// The callback will receive a [`crate::FrameworkError`] if there was an error processing the pong,
     /// or `None` if the pong was handled successfully.
     ///
     /// # Safety

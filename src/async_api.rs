@@ -25,6 +25,7 @@ use core::ffi::{c_int, c_void};
 use core::fmt;
 use core::marker::PhantomData;
 use core::ptr;
+use doom_fish_utils::panic_safe::catch_user_panic;
 use doom_fish_utils::stream::{AsyncStreamSender, BoundedAsyncStream, NextItem};
 
 use crate::browser::{BrowseResult, BrowseResultChange, BrowserState};
@@ -43,7 +44,11 @@ impl Drop for SubscriptionHandle {
     }
 }
 
+// SAFETY: `SubscriptionHandle` only stores a `Send` cleanup closure and moves
+// it to the dropping thread; no raw pointers are shared here.
 unsafe impl Send for SubscriptionHandle {}
+// SAFETY: shared references never execute the cleanup closure. It is only taken
+// and run during `Drop`, which requires unique access.
 unsafe impl Sync for SubscriptionHandle {}
 
 /// State of an `nw_connection_t`.
@@ -102,11 +107,26 @@ pub struct ConnectionStateStream<'a> {
 }
 
 unsafe extern "C" fn connection_state_cb(state: c_int, error: *mut c_void, ctx: *mut c_void) {
-    let sender = unsafe { &*ctx.cast::<AsyncStreamSender<ConnectionStateEvent>>() };
-    let error = (!error.is_null()).then(|| unsafe { FrameworkError::from_raw(error) });
-    sender.push(ConnectionStateEvent {
-        state: ConnectionState::from_raw(state),
-        error,
+    if ctx.is_null() {
+        return;
+    }
+
+    catch_user_panic("connection_state_cb", || {
+        // SAFETY: `ctx` was created by `Box::into_raw` in `subscribe` and
+        // remains valid until cleanup clears the handler, drains the queue,
+        // and reclaims the sender box.
+        let sender = unsafe { &*ctx.cast::<AsyncStreamSender<ConnectionStateEvent>>() };
+        let error = if error.is_null() {
+            None
+        } else {
+            // SAFETY: the shim hands this callback a retained `nw_error_t`
+            // ownership token, which `FrameworkError::from_raw` takes over.
+            Some(unsafe { FrameworkError::from_raw(error) })
+        };
+        sender.push(ConnectionStateEvent {
+            state: ConnectionState::from_raw(state),
+            error,
+        });
     });
 }
 
@@ -119,6 +139,9 @@ impl<'a> ConnectionStateStream<'a> {
         let obj_ptr = client.as_ptr();
         let sender_addr = sender_ptr as usize;
         let obj_addr = obj_ptr as usize;
+        // SAFETY: `obj_ptr` is a live borrowed connection handle and
+        // `sender_ptr` stays valid until the cleanup closure clears the handler,
+        // drains the queue, and frees it.
         unsafe {
             ffi::nw_shim_connection_set_state_changed_handler(
                 obj_ptr,
@@ -126,12 +149,17 @@ impl<'a> ConnectionStateStream<'a> {
                 sender_ptr.cast(),
             );
         }
-        let cleanup: Box<dyn FnOnce() + Send> = Box::new(move || unsafe {
+        let cleanup: Box<dyn FnOnce() + Send> = Box::new(move || {
             let obj_ptr = obj_addr as *mut c_void;
             let sender_ptr = sender_addr as *mut AsyncStreamSender<ConnectionStateEvent>;
-            ffi::nw_shim_connection_set_state_changed_handler(obj_ptr, None, ptr::null_mut());
-            ffi::nw_shim_connection_drain_queue(obj_ptr);
-            drop(Box::from_raw(sender_ptr));
+            // SAFETY: `sender_ptr` was produced by `Box::into_raw` above. The
+            // handler is cleared and the queue is drained before we reconstruct
+            // the box, so no callback can ever observe `sender_ptr` again.
+            unsafe {
+                ffi::nw_shim_connection_set_state_changed_handler(obj_ptr, None, ptr::null_mut());
+                ffi::nw_shim_connection_drain_queue(obj_ptr);
+                drop(Box::from_raw(sender_ptr));
+            }
         });
         Self {
             inner: stream,
@@ -169,8 +197,17 @@ pub struct ConnectionViabilityStream<'a> {
 }
 
 unsafe extern "C" fn connection_viability_cb(value: c_int, ctx: *mut c_void) {
-    let sender = unsafe { &*ctx.cast::<AsyncStreamSender<bool>>() };
-    sender.push(value != 0);
+    if ctx.is_null() {
+        return;
+    }
+
+    catch_user_panic("connection_viability_cb", || {
+        // SAFETY: `ctx` was created by `Box::into_raw` in `subscribe` and
+        // remains valid until cleanup clears the handler, drains the queue,
+        // and reclaims the sender box.
+        let sender = unsafe { &*ctx.cast::<AsyncStreamSender<bool>>() };
+        sender.push(value != 0);
+    });
 }
 
 impl<'a> ConnectionViabilityStream<'a> {
@@ -182,6 +219,9 @@ impl<'a> ConnectionViabilityStream<'a> {
         let obj_ptr = client.as_ptr();
         let sender_addr = sender_ptr as usize;
         let obj_addr = obj_ptr as usize;
+        // SAFETY: `obj_ptr` is a live borrowed connection handle and
+        // `sender_ptr` stays valid until the cleanup closure clears the handler,
+        // drains the queue, and frees it.
         unsafe {
             ffi::nw_shim_connection_set_viability_changed_handler(
                 obj_ptr,
@@ -189,12 +229,21 @@ impl<'a> ConnectionViabilityStream<'a> {
                 sender_ptr.cast(),
             );
         }
-        let cleanup: Box<dyn FnOnce() + Send> = Box::new(move || unsafe {
+        let cleanup: Box<dyn FnOnce() + Send> = Box::new(move || {
             let obj_ptr = obj_addr as *mut c_void;
             let sender_ptr = sender_addr as *mut AsyncStreamSender<bool>;
-            ffi::nw_shim_connection_set_viability_changed_handler(obj_ptr, None, ptr::null_mut());
-            ffi::nw_shim_connection_drain_queue(obj_ptr);
-            drop(Box::from_raw(sender_ptr));
+            // SAFETY: `sender_ptr` was produced by `Box::into_raw` above. The
+            // handler is cleared and the queue is drained before we reconstruct
+            // the box, so no callback can ever observe `sender_ptr` again.
+            unsafe {
+                ffi::nw_shim_connection_set_viability_changed_handler(
+                    obj_ptr,
+                    None,
+                    ptr::null_mut(),
+                );
+                ffi::nw_shim_connection_drain_queue(obj_ptr);
+                drop(Box::from_raw(sender_ptr));
+            }
         });
         Self {
             inner: stream,
@@ -232,8 +281,17 @@ pub struct ConnectionBetterPathStream<'a> {
 }
 
 unsafe extern "C" fn connection_better_path_cb(value: c_int, ctx: *mut c_void) {
-    let sender = unsafe { &*ctx.cast::<AsyncStreamSender<bool>>() };
-    sender.push(value != 0);
+    if ctx.is_null() {
+        return;
+    }
+
+    catch_user_panic("connection_better_path_cb", || {
+        // SAFETY: `ctx` was created by `Box::into_raw` in `subscribe` and
+        // remains valid until cleanup clears the handler, drains the queue,
+        // and reclaims the sender box.
+        let sender = unsafe { &*ctx.cast::<AsyncStreamSender<bool>>() };
+        sender.push(value != 0);
+    });
 }
 
 impl<'a> ConnectionBetterPathStream<'a> {
@@ -245,6 +303,9 @@ impl<'a> ConnectionBetterPathStream<'a> {
         let obj_ptr = client.as_ptr();
         let sender_addr = sender_ptr as usize;
         let obj_addr = obj_ptr as usize;
+        // SAFETY: `obj_ptr` is a live borrowed connection handle and
+        // `sender_ptr` stays valid until the cleanup closure clears the handler,
+        // drains the queue, and frees it.
         unsafe {
             ffi::nw_shim_connection_set_better_path_available_handler(
                 obj_ptr,
@@ -252,16 +313,21 @@ impl<'a> ConnectionBetterPathStream<'a> {
                 sender_ptr.cast(),
             );
         }
-        let cleanup: Box<dyn FnOnce() + Send> = Box::new(move || unsafe {
+        let cleanup: Box<dyn FnOnce() + Send> = Box::new(move || {
             let obj_ptr = obj_addr as *mut c_void;
             let sender_ptr = sender_addr as *mut AsyncStreamSender<bool>;
-            ffi::nw_shim_connection_set_better_path_available_handler(
-                obj_ptr,
-                None,
-                ptr::null_mut(),
-            );
-            ffi::nw_shim_connection_drain_queue(obj_ptr);
-            drop(Box::from_raw(sender_ptr));
+            // SAFETY: `sender_ptr` was produced by `Box::into_raw` above. The
+            // handler is cleared and the queue is drained before we reconstruct
+            // the box, so no callback can ever observe `sender_ptr` again.
+            unsafe {
+                ffi::nw_shim_connection_set_better_path_available_handler(
+                    obj_ptr,
+                    None,
+                    ptr::null_mut(),
+                );
+                ffi::nw_shim_connection_drain_queue(obj_ptr);
+                drop(Box::from_raw(sender_ptr));
+            }
         });
         Self {
             inner: stream,
@@ -299,11 +365,20 @@ pub struct ConnectionPathChangedStream<'a> {
 }
 
 unsafe extern "C" fn connection_path_changed_cb(path: *mut c_void, ctx: *mut c_void) {
-    if path.is_null() {
+    if path.is_null() || ctx.is_null() {
         return;
     }
-    let sender = unsafe { &*ctx.cast::<AsyncStreamSender<crate::path::Path>>() };
-    sender.push(unsafe { crate::path::Path::from_raw(path) });
+
+    catch_user_panic("connection_path_changed_cb", || {
+        // SAFETY: `ctx` was created by `Box::into_raw` in `subscribe` and
+        // remains valid until cleanup clears the handler, drains the queue,
+        // and reclaims the sender box.
+        let sender = unsafe { &*ctx.cast::<AsyncStreamSender<crate::path::Path>>() };
+        // SAFETY: the shim passes this callback a retained `nw_path_t`
+        // ownership token, which `Path::from_raw` takes over.
+        let path = unsafe { crate::path::Path::from_raw(path) };
+        sender.push(path);
+    });
 }
 
 impl<'a> ConnectionPathChangedStream<'a> {
@@ -315,6 +390,9 @@ impl<'a> ConnectionPathChangedStream<'a> {
         let obj_ptr = client.as_ptr();
         let sender_addr = sender_ptr as usize;
         let obj_addr = obj_ptr as usize;
+        // SAFETY: `obj_ptr` is a live borrowed connection handle and
+        // `sender_ptr` stays valid until the cleanup closure clears the handler,
+        // drains the queue, and frees it.
         unsafe {
             ffi::nw_shim_connection_set_path_changed_handler(
                 obj_ptr,
@@ -322,12 +400,17 @@ impl<'a> ConnectionPathChangedStream<'a> {
                 sender_ptr.cast(),
             );
         }
-        let cleanup: Box<dyn FnOnce() + Send> = Box::new(move || unsafe {
+        let cleanup: Box<dyn FnOnce() + Send> = Box::new(move || {
             let obj_ptr = obj_addr as *mut c_void;
             let sender_ptr = sender_addr as *mut AsyncStreamSender<crate::path::Path>;
-            ffi::nw_shim_connection_set_path_changed_handler(obj_ptr, None, ptr::null_mut());
-            ffi::nw_shim_connection_drain_queue(obj_ptr);
-            drop(Box::from_raw(sender_ptr));
+            // SAFETY: `sender_ptr` was produced by `Box::into_raw` above. The
+            // handler is cleared and the queue is drained before we reconstruct
+            // the box, so no callback can ever observe `sender_ptr` again.
+            unsafe {
+                ffi::nw_shim_connection_set_path_changed_handler(obj_ptr, None, ptr::null_mut());
+                ffi::nw_shim_connection_drain_queue(obj_ptr);
+                drop(Box::from_raw(sender_ptr));
+            }
         });
         Self {
             inner: stream,
@@ -421,26 +504,50 @@ pub struct ListenerEventStream<'a> {
 }
 
 unsafe extern "C" fn listener_state_cb(state: c_int, error: *mut c_void, ctx: *mut c_void) {
-    let sender = unsafe { &*ctx.cast::<AsyncStreamSender<ListenerEvent>>() };
-    let error = (!error.is_null()).then(|| unsafe { FrameworkError::from_raw(error) });
-    sender.push(ListenerEvent::State {
-        state: ListenerState::from_raw(state),
-        error,
+    if ctx.is_null() {
+        return;
+    }
+
+    catch_user_panic("listener_state_cb", || {
+        // SAFETY: `ctx` was created by `Box::into_raw` in `subscribe` and
+        // remains valid until cleanup clears the handler, drains the queue,
+        // and reclaims the sender box.
+        let sender = unsafe { &*ctx.cast::<AsyncStreamSender<ListenerEvent>>() };
+        let error = if error.is_null() {
+            None
+        } else {
+            // SAFETY: the shim hands this callback a retained `nw_error_t`
+            // ownership token, which `FrameworkError::from_raw` takes over.
+            Some(unsafe { FrameworkError::from_raw(error) })
+        };
+        sender.push(ListenerEvent::State {
+            state: ListenerState::from_raw(state),
+            error,
+        });
     });
 }
 
 unsafe extern "C" fn listener_new_connection_cb(connection_handle: *mut c_void, ctx: *mut c_void) {
-    if connection_handle.is_null() {
+    if connection_handle.is_null() || ctx.is_null() {
         return;
     }
-    let ctx = unsafe { &*ctx.cast::<ListenerNewConnectionContext>() };
-    let client = unsafe {
-        crate::client::TcpClient::from_raw_with_keepalives(
-            connection_handle,
-            ctx.keepalives.clone(),
-        )
-    };
-    ctx.sender.push(ListenerEvent::NewConnection(client));
+
+    catch_user_panic("listener_new_connection_cb", || {
+        // SAFETY: `ctx` was created by `Box::into_raw` in `subscribe` and
+        // remains valid until cleanup clears the handler, drains the queue,
+        // and reclaims the context box.
+        let ctx = unsafe { &*ctx.cast::<ListenerNewConnectionContext>() };
+        // SAFETY: `connection_handle` is a live accepted-connection handle
+        // produced by the listener shim, and ownership transfers to the new
+        // `TcpClient` wrapper.
+        let client = unsafe {
+            crate::client::TcpClient::from_raw_with_keepalives(
+                connection_handle,
+                ctx.keepalives.clone(),
+            )
+        };
+        ctx.sender.push(ListenerEvent::NewConnection(client));
+    });
 }
 
 impl<'a> ListenerEventStream<'a> {
@@ -457,6 +564,9 @@ impl<'a> ListenerEventStream<'a> {
         let state_addr = state_ptr as usize;
         let conn_addr = conn_ptr as usize;
         let obj_addr = obj_ptr as usize;
+        // SAFETY: `obj_ptr` is a live borrowed listener handle, and both box
+        // pointers stay valid until the cleanup closure clears the handlers,
+        // drains the queue, and frees them.
         unsafe {
             ffi::nw_shim_listener_set_state_changed_handler(
                 obj_ptr,
@@ -469,15 +579,21 @@ impl<'a> ListenerEventStream<'a> {
                 conn_ptr.cast(),
             );
         }
-        let cleanup: Box<dyn FnOnce() + Send> = Box::new(move || unsafe {
+        let cleanup: Box<dyn FnOnce() + Send> = Box::new(move || {
             let obj_ptr = obj_addr as *mut c_void;
             let state_ptr = state_addr as *mut AsyncStreamSender<ListenerEvent>;
             let conn_ptr = conn_addr as *mut ListenerNewConnectionContext;
-            ffi::nw_shim_listener_set_state_changed_handler(obj_ptr, None, ptr::null_mut());
-            ffi::nw_shim_listener_set_new_connection_handler(obj_ptr, None, ptr::null_mut());
-            ffi::nw_shim_listener_drain_queue(obj_ptr);
-            drop(Box::from_raw(state_ptr));
-            drop(Box::from_raw(conn_ptr));
+            // SAFETY: `state_ptr` and `conn_ptr` were produced by `Box::into_raw`
+            // above. Both handlers are cleared and the queue is drained before
+            // we reconstruct the boxes, so no callback can ever observe these
+            // pointers again.
+            unsafe {
+                ffi::nw_shim_listener_set_state_changed_handler(obj_ptr, None, ptr::null_mut());
+                ffi::nw_shim_listener_set_new_connection_handler(obj_ptr, None, ptr::null_mut());
+                ffi::nw_shim_listener_drain_queue(obj_ptr);
+                drop(Box::from_raw(state_ptr));
+                drop(Box::from_raw(conn_ptr));
+            }
         });
         Self {
             inner: stream,
@@ -515,11 +631,20 @@ pub struct PathUpdateStream<'a> {
 }
 
 unsafe extern "C" fn path_update_cb(path: *mut c_void, ctx: *mut c_void) {
-    if path.is_null() {
+    if path.is_null() || ctx.is_null() {
         return;
     }
-    let sender = unsafe { &*ctx.cast::<AsyncStreamSender<crate::path::Path>>() };
-    sender.push(unsafe { crate::path::Path::from_raw(path) });
+
+    catch_user_panic("path_update_cb", || {
+        // SAFETY: `ctx` was created by `Box::into_raw` in `subscribe` and
+        // remains valid until cleanup clears the handler, drains the queue,
+        // and reclaims the sender box.
+        let sender = unsafe { &*ctx.cast::<AsyncStreamSender<crate::path::Path>>() };
+        // SAFETY: the shim passes this callback a retained `nw_path_t`
+        // ownership token, which `Path::from_raw` takes over.
+        let path = unsafe { crate::path::Path::from_raw(path) };
+        sender.push(path);
+    });
 }
 
 impl<'a> PathUpdateStream<'a> {
@@ -531,6 +656,9 @@ impl<'a> PathUpdateStream<'a> {
         let obj_ptr = monitor.as_ptr();
         let sender_addr = sender_ptr as usize;
         let obj_addr = obj_ptr as usize;
+        // SAFETY: `obj_ptr` is a live borrowed path-monitor handle and
+        // `sender_ptr` stays valid until the cleanup closure clears the handler,
+        // drains the queue, and frees it.
         unsafe {
             ffi::nw_shim_path_monitor_set_update_handler(
                 obj_ptr,
@@ -538,12 +666,17 @@ impl<'a> PathUpdateStream<'a> {
                 sender_ptr.cast(),
             );
         }
-        let cleanup: Box<dyn FnOnce() + Send> = Box::new(move || unsafe {
+        let cleanup: Box<dyn FnOnce() + Send> = Box::new(move || {
             let obj_ptr = obj_addr as *mut c_void;
             let sender_ptr = sender_addr as *mut AsyncStreamSender<crate::path::Path>;
-            ffi::nw_shim_path_monitor_set_update_handler(obj_ptr, None, ptr::null_mut());
-            ffi::nw_shim_path_monitor_drain_queue(obj_ptr);
-            drop(Box::from_raw(sender_ptr));
+            // SAFETY: `sender_ptr` was produced by `Box::into_raw` above. The
+            // handler is cleared and the queue is drained before we reconstruct
+            // the box, so no callback can ever observe `sender_ptr` again.
+            unsafe {
+                ffi::nw_shim_path_monitor_set_update_handler(obj_ptr, None, ptr::null_mut());
+                ffi::nw_shim_path_monitor_drain_queue(obj_ptr);
+                drop(Box::from_raw(sender_ptr));
+            }
         });
         Self {
             inner: stream,
@@ -625,11 +758,26 @@ pub struct BrowserEventStream<'a> {
 }
 
 unsafe extern "C" fn browser_state_cb(state: c_int, error: *mut c_void, ctx: *mut c_void) {
-    let sender = unsafe { &*ctx.cast::<AsyncStreamSender<BrowserAsyncEvent>>() };
-    let error = (!error.is_null()).then(|| unsafe { FrameworkError::from_raw(error) });
-    sender.push(BrowserAsyncEvent::State {
-        state: BrowserState::from_raw(state),
-        error,
+    if ctx.is_null() {
+        return;
+    }
+
+    catch_user_panic("browser_state_cb", || {
+        // SAFETY: `ctx` was created by `Box::into_raw` in `subscribe` and
+        // remains valid until cleanup clears the handler, drains the queue,
+        // and reclaims the sender box.
+        let sender = unsafe { &*ctx.cast::<AsyncStreamSender<BrowserAsyncEvent>>() };
+        let error = if error.is_null() {
+            None
+        } else {
+            // SAFETY: the shim hands this callback a retained `nw_error_t`
+            // ownership token, which `FrameworkError::from_raw` takes over.
+            Some(unsafe { FrameworkError::from_raw(error) })
+        };
+        sender.push(BrowserAsyncEvent::State {
+            state: BrowserState::from_raw(state),
+            error,
+        });
     });
 }
 
@@ -640,12 +788,35 @@ unsafe extern "C" fn browser_results_cb(
     batch_complete: c_int,
     ctx: *mut c_void,
 ) {
-    let sender = unsafe { &*ctx.cast::<AsyncStreamSender<BrowserAsyncEvent>>() };
-    sender.push(BrowserAsyncEvent::Results {
-        old_result: (!old_result.is_null()).then(|| unsafe { BrowseResult::from_raw(old_result) }),
-        new_result: (!new_result.is_null()).then(|| unsafe { BrowseResult::from_raw(new_result) }),
-        changes: BrowseResultChange::from_raw(changes),
-        batch_complete: batch_complete != 0,
+    if ctx.is_null() {
+        return;
+    }
+
+    catch_user_panic("browser_results_cb", || {
+        // SAFETY: `ctx` was created by `Box::into_raw` in `subscribe` and
+        // remains valid until cleanup clears the handler, drains the queue,
+        // and reclaims the sender box.
+        let sender = unsafe { &*ctx.cast::<AsyncStreamSender<BrowserAsyncEvent>>() };
+        let old_result = if old_result.is_null() {
+            None
+        } else {
+            // SAFETY: the shim passes retained browse-result handles to the
+            // callback, and ownership transfers to the Rust wrappers.
+            Some(unsafe { BrowseResult::from_raw(old_result) })
+        };
+        let new_result = if new_result.is_null() {
+            None
+        } else {
+            // SAFETY: the shim passes retained browse-result handles to the
+            // callback, and ownership transfers to the Rust wrappers.
+            Some(unsafe { BrowseResult::from_raw(new_result) })
+        };
+        sender.push(BrowserAsyncEvent::Results {
+            old_result,
+            new_result,
+            changes: BrowseResultChange::from_raw(changes),
+            batch_complete: batch_complete != 0,
+        });
     });
 }
 
@@ -660,6 +831,9 @@ impl<'a> BrowserEventStream<'a> {
         let state_addr = state_ptr as usize;
         let results_addr = results_ptr as usize;
         let obj_addr = obj_ptr as usize;
+        // SAFETY: `obj_ptr` is a live borrowed browser handle, and both box
+        // pointers stay valid until the cleanup closure clears the handlers,
+        // drains the queue, and frees them.
         unsafe {
             ffi::nw_shim_browser_set_state_changed_handler(
                 obj_ptr,
@@ -672,15 +846,25 @@ impl<'a> BrowserEventStream<'a> {
                 results_ptr.cast(),
             );
         }
-        let cleanup: Box<dyn FnOnce() + Send> = Box::new(move || unsafe {
+        let cleanup: Box<dyn FnOnce() + Send> = Box::new(move || {
             let obj_ptr = obj_addr as *mut c_void;
             let state_ptr = state_addr as *mut AsyncStreamSender<BrowserAsyncEvent>;
             let results_ptr = results_addr as *mut AsyncStreamSender<BrowserAsyncEvent>;
-            ffi::nw_shim_browser_set_state_changed_handler(obj_ptr, None, ptr::null_mut());
-            ffi::nw_shim_browser_set_browse_results_changed_handler(obj_ptr, None, ptr::null_mut());
-            ffi::nw_shim_browser_drain_queue(obj_ptr);
-            drop(Box::from_raw(state_ptr));
-            drop(Box::from_raw(results_ptr));
+            // SAFETY: `state_ptr` and `results_ptr` were produced by
+            // `Box::into_raw` above. Both handlers are cleared and the queue is
+            // drained before we reconstruct the boxes, so no callback can ever
+            // observe these pointers again.
+            unsafe {
+                ffi::nw_shim_browser_set_state_changed_handler(obj_ptr, None, ptr::null_mut());
+                ffi::nw_shim_browser_set_browse_results_changed_handler(
+                    obj_ptr,
+                    None,
+                    ptr::null_mut(),
+                );
+                ffi::nw_shim_browser_drain_queue(obj_ptr);
+                drop(Box::from_raw(state_ptr));
+                drop(Box::from_raw(results_ptr));
+            }
         });
         Self {
             inner: stream,

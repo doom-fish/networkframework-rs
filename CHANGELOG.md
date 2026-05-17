@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.11.1] - 2026-05-17
+
+- Fixed Arc strong-reference leak in `PathMonitor`: the raw Arc clone given to
+  the C shim's update handler was never reconstituted; it is now freed in `Drop`
+  after `nw_path_monitor_cancel` + `dispatch_sync` confirms the queue is idle.
+- Fixed Arc strong-reference leak in `TcpClient`: `viability_raw`,
+  `better_path_raw`, and `path_raw` Arc clones given to the C shim were never
+  freed; they are now reconstituted in `Drop` after `nw_shim_tcp_close` confirms
+  the connection's serial queue has drained.
+- Added `doom_fish_utils::panic_safe::catch_user_panic` wrappers to all
+  `extern "C"` callbacks that invoke user-supplied `FnMut` closures, preventing
+  UB from Rust panics unwinding across the C ABI.
+- Added `// SAFETY:` comments to all unsafe blocks in `client/mod.rs`,
+  `path_monitor/mod.rs`, and `async_api.rs`.
+- Tightened `Cargo.toml` version ranges: `apple-cf` `>=0.7, <0.9`;
+  `doom-fish-utils` `>=0.1, <0.3`.
 
 ## [0.11.0] - 2026-05-17
 
