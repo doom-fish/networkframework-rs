@@ -75,7 +75,9 @@ impl ErrorDomain {
             Self::Posix => copied_string(unsafe { ffi::nw_shim_error_copy_posix_domain() }),
             Self::Dns => copied_string(unsafe { ffi::nw_shim_error_copy_dns_domain() }),
             Self::Tls => copied_string(unsafe { ffi::nw_shim_error_copy_tls_domain() }),
-            Self::WifiAware => copied_string(unsafe { ffi::nw_shim_error_copy_wifi_aware_domain() }),
+            Self::WifiAware => {
+                copied_string(unsafe { ffi::nw_shim_error_copy_wifi_aware_domain() })
+            }
             Self::Unknown(_) => None,
         }
     }

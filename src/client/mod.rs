@@ -222,7 +222,9 @@ impl TcpClient {
     /// Copy protocol metadata associated with the connection for a specific protocol definition.
     #[must_use]
     pub fn protocol_metadata(&self, definition: &ProtocolDefinition) -> Option<ProtocolMetadata> {
-        let handle = unsafe { ffi::nw_shim_connection_copy_protocol_metadata(self.handle, definition.as_ptr()) };
+        let handle = unsafe {
+            ffi::nw_shim_connection_copy_protocol_metadata(self.handle, definition.as_ptr())
+        };
         (!handle.is_null()).then_some(unsafe { ProtocolMetadata::from_raw(handle) })
     }
 

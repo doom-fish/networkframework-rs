@@ -454,7 +454,10 @@ impl UrlSessionConfiguration {
 
     /// Replace the configuration's `proxyConfigurations` array.
     pub fn set_proxy_configurations(&mut self, proxy_configurations: &[ProxyConfig]) -> &mut Self {
-        let items: Vec<*mut c_void> = proxy_configurations.iter().map(ProxyConfig::as_ptr).collect();
+        let items: Vec<*mut c_void> = proxy_configurations
+            .iter()
+            .map(ProxyConfig::as_ptr)
+            .collect();
         unsafe {
             ffi::nw_shim_url_session_configuration_set_proxy_configurations(
                 self.handle,
@@ -470,7 +473,10 @@ impl UrlSessionConfiguration {
     pub fn proxy_configurations(&self) -> Vec<ProxyConfig> {
         let mut count = 0_usize;
         let items = unsafe {
-            ffi::nw_shim_url_session_configuration_copy_proxy_configurations(self.handle, &mut count)
+            ffi::nw_shim_url_session_configuration_copy_proxy_configurations(
+                self.handle,
+                &mut count,
+            )
         };
         if items.is_null() || count == 0 {
             return Vec::new();

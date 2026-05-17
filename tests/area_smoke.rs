@@ -4,17 +4,17 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use networkframework::{
-    advertise_with_descriptor, start_browser_results_with_descriptor, start_browser_with_descriptor,
-    start_path_monitor_for_ethernet_channel, start_path_monitor_with_type, AdvertiseDescriptor,
-    BrowseDescriptor, BrowserEvent, BrowserState, ConnectionGroup, ConnectionGroupDescriptor,
-    ConnectionParameters, ContentContext, DataTransferReportState, Endpoint, EndpointType,
-    ErrorDomain, EthernetChannel, ExpiredDnsBehavior, Framer, FramerContext, FramerDefinition,
-    FramerMessageView, FramerStart, InterfaceType, IpEcnFlag, IpLocalAddressPreference,
-    IpVersion, MultipathService, ParametersAttribution, PathStatus, PrivacyContext,
-    ProtocolDefinition, ProtocolMetadata, ProtocolOptions, ProxyConfig, QuicOptions, RelayHop,
-    ResolverConfig, ServiceClass, TcpClient, TcpListener, TcpMultipathVersion, TxtRecord,
-    TxtRecordFindResult, UrlSessionConfiguration, WsCloseCode, WsResponse, WsResponseStatus,
-    WsVersion,
+    advertise_with_descriptor, start_browser_results_with_descriptor,
+    start_browser_with_descriptor, start_path_monitor_for_ethernet_channel,
+    start_path_monitor_with_type, AdvertiseDescriptor, BrowseDescriptor, BrowserEvent,
+    BrowserState, ConnectionGroup, ConnectionGroupDescriptor, ConnectionParameters, ContentContext,
+    DataTransferReportState, Endpoint, EndpointType, ErrorDomain, EthernetChannel,
+    ExpiredDnsBehavior, Framer, FramerContext, FramerDefinition, FramerMessageView, FramerStart,
+    InterfaceType, IpEcnFlag, IpLocalAddressPreference, IpVersion, MultipathService,
+    ParametersAttribution, PathStatus, PrivacyContext, ProtocolDefinition, ProtocolMetadata,
+    ProtocolOptions, ProxyConfig, QuicOptions, RelayHop, ResolverConfig, ServiceClass, TcpClient,
+    TcpListener, TcpMultipathVersion, TxtRecord, TxtRecordFindResult, UrlSessionConfiguration,
+    WsCloseCode, WsResponse, WsResponseStatus, WsVersion,
 };
 
 fn unique_label(prefix: &str) -> String {
@@ -173,24 +173,28 @@ fn browser_area_descriptor_and_start() -> Result<(), networkframework::NetworkEr
 
     let result_changes = Arc::new(Mutex::new(Vec::new()));
     let result_changes_for_callback = Arc::clone(&result_changes);
-    let mut results_browser = start_browser_results_with_descriptor(&descriptor, None, move |old_result, new_result, changes, _batch_complete| {
-        if let Some(result) = old_result.as_ref() {
-            let _ = result.endpoint();
-            let _ = result.interface_count();
-            let _ = result.interfaces();
-            let _ = result.txt_record_object();
-        }
-        if let Some(result) = new_result.as_ref() {
-            let _ = result.endpoint();
-            let _ = result.interface_count();
-            let _ = result.interfaces();
-            let _ = result.txt_record_object();
-        }
-        result_changes_for_callback
-            .lock()
-            .expect("result changes lock")
-            .push(changes.bits());
-    })?;
+    let mut results_browser = start_browser_results_with_descriptor(
+        &descriptor,
+        None,
+        move |old_result, new_result, changes, _batch_complete| {
+            if let Some(result) = old_result.as_ref() {
+                let _ = result.endpoint();
+                let _ = result.interface_count();
+                let _ = result.interfaces();
+                let _ = result.txt_record_object();
+            }
+            if let Some(result) = new_result.as_ref() {
+                let _ = result.endpoint();
+                let _ = result.interface_count();
+                let _ = result.interfaces();
+                let _ = result.txt_record_object();
+            }
+            result_changes_for_callback
+                .lock()
+                .expect("result changes lock")
+                .push(changes.bits());
+        },
+    )?;
     let states_for_results = Arc::clone(&states);
     results_browser.set_state_changed_handler(move |state, _error| {
         states_for_results.lock().expect("states lock").push(state);
@@ -201,7 +205,10 @@ fn browser_area_descriptor_and_start() -> Result<(), networkframework::NetworkEr
     std::thread::sleep(Duration::from_millis(100));
     drop(results_browser);
     drop(browser);
-    let _ = states.lock().expect("states lock").contains(&BrowserState::Ready);
+    let _ = states
+        .lock()
+        .expect("states lock")
+        .contains(&BrowserState::Ready);
     let _ = result_changes.lock().expect("result changes lock").len();
 
     let recorded = events.lock().expect("events lock");
@@ -303,7 +310,9 @@ fn parameters_area_supports_advanced_knobs() -> Result<(), networkframework::Net
     let udp_definition = udp.definition().expect("udp definition");
     stack.set_transport_protocol(&udp);
     assert_eq!(
-        stack.transport_protocol().and_then(|protocol| protocol.definition()),
+        stack
+            .transport_protocol()
+            .and_then(|protocol| protocol.definition()),
         Some(udp_definition)
     );
     let _ = stack.internet_protocol();
@@ -511,7 +520,10 @@ fn protocol_area_exposes_definitions_and_options() -> Result<(), networkframewor
         .set_ws_client_request_handler(|request| {
             let _ = request.subprotocols();
             let _ = request.additional_headers();
-            Some(WsResponse::new(WsResponseStatus::Accept, Some("chat")).expect("create ws response"))
+            Some(
+                WsResponse::new(WsResponseStatus::Accept, Some("chat"))
+                    .expect("create ws response"),
+            )
         });
     let _ = tls_options.tls_security_options();
     let mut ip_metadata = ProtocolMetadata::ip()?;
@@ -592,8 +604,14 @@ fn quic_area_exposes_transport_settings() -> Result<(), networkframework::Networ
     assert_eq!(options.initial_max_data(), 65_536);
     assert_eq!(options.initial_max_streams_bidirectional(), 8);
     assert_eq!(options.initial_max_streams_unidirectional(), 4);
-    assert_eq!(options.initial_max_stream_data_bidirectional_local(), 32_768);
-    assert_eq!(options.initial_max_stream_data_bidirectional_remote(), 16_384);
+    assert_eq!(
+        options.initial_max_stream_data_bidirectional_local(),
+        32_768
+    );
+    assert_eq!(
+        options.initial_max_stream_data_bidirectional_remote(),
+        16_384
+    );
     assert_eq!(options.initial_max_stream_data_unidirectional(), 8_192);
     assert_eq!(options.max_udp_payload_size(), 1350);
     assert_eq!(options.max_datagram_frame_size(), 1200);
@@ -694,10 +712,7 @@ fn txt_record_area_supports_lookup_and_endpoint_helpers(
     assert!(txt.is_dictionary());
     assert_eq!(txt.key_count(), 3);
     assert_eq!(txt.find_key("alpha")?, TxtRecordFindResult::NonEmptyValue);
-    assert_eq!(
-        txt.lookup("alpha")?.value.as_deref(),
-        Some(&b"beta"[..])
-    );
+    assert_eq!(txt.lookup("alpha")?.value.as_deref(), Some(&b"beta"[..]));
     let empty = txt.lookup("empty")?;
     assert_eq!(empty.status, TxtRecordFindResult::EmptyValue);
     assert_eq!(empty.value, Some(Vec::new()));
@@ -711,7 +726,10 @@ fn txt_record_area_supports_lookup_and_endpoint_helpers(
     let bytes = txt.bytes();
     assert!(!bytes.is_empty());
     let parsed = TxtRecord::from_bytes(&bytes)?;
-    assert_eq!(parsed.find_key("alpha")?, TxtRecordFindResult::NonEmptyValue);
+    assert_eq!(
+        parsed.find_key("alpha")?,
+        TxtRecordFindResult::NonEmptyValue
+    );
     let clone = txt.clone();
     assert_eq!(clone, txt);
     assert!(txt.remove_key("flag")?);

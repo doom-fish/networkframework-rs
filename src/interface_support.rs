@@ -97,7 +97,9 @@ pub(crate) fn network_interface_from_parts(
 }
 
 #[must_use]
-pub(crate) unsafe fn network_interface_from_handle(handle: *mut c_void) -> Option<NetworkInterface> {
+pub(crate) unsafe fn network_interface_from_handle(
+    handle: *mut c_void,
+) -> Option<NetworkInterface> {
     if handle.is_null() {
         return None;
     }

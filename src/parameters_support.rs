@@ -163,7 +163,9 @@ impl ProtocolStack {
         let slice = unsafe { std::slice::from_raw_parts(items, count) };
         let protocols = slice
             .iter()
-            .filter_map(|handle| (!handle.is_null()).then_some(unsafe { ProtocolOptions::from_raw(*handle) }))
+            .filter_map(|handle| {
+                (!handle.is_null()).then_some(unsafe { ProtocolOptions::from_raw(*handle) })
+            })
             .collect();
         unsafe { ffi::nw_shim_free_buffer(items.cast()) };
         protocols
@@ -178,7 +180,9 @@ impl ProtocolStack {
 
     /// Replace the current transport protocol.
     pub fn set_transport_protocol(&mut self, protocol: &ProtocolOptions) -> &mut Self {
-        unsafe { ffi::nw_shim_protocol_stack_set_transport_protocol(self.handle, protocol.as_ptr()) };
+        unsafe {
+            ffi::nw_shim_protocol_stack_set_transport_protocol(self.handle, protocol.as_ptr())
+        };
         self
     }
 
@@ -285,7 +289,9 @@ impl ConnectionParameters {
     #[must_use]
     pub fn prohibited_interfaces(&self) -> Vec<NetworkInterface> {
         let mut count = 0_usize;
-        let items = unsafe { ffi::nw_shim_parameters_copy_prohibited_interfaces(self.as_ptr(), &mut count) };
+        let items = unsafe {
+            ffi::nw_shim_parameters_copy_prohibited_interfaces(self.as_ptr(), &mut count)
+        };
         if items.is_null() || count == 0 {
             return Vec::new();
         }
@@ -412,10 +418,7 @@ impl ConnectionParameters {
     /// Set the multipath policy.
     pub fn set_multipath_service(&mut self, multipath_service: MultipathService) -> &mut Self {
         unsafe {
-            ffi::nw_shim_parameters_set_multipath_service(
-                self.as_ptr(),
-                multipath_service.as_raw(),
-            )
+            ffi::nw_shim_parameters_set_multipath_service(self.as_ptr(), multipath_service.as_raw())
         };
         self
     }
@@ -448,7 +451,10 @@ impl ConnectionParameters {
     }
 
     /// Control whether expired DNS answers may be reused.
-    pub fn set_expired_dns_behavior(&mut self, expired_dns_behavior: ExpiredDnsBehavior) -> &mut Self {
+    pub fn set_expired_dns_behavior(
+        &mut self,
+        expired_dns_behavior: ExpiredDnsBehavior,
+    ) -> &mut Self {
         unsafe {
             ffi::nw_shim_parameters_set_expired_dns_behavior(
                 self.as_ptr(),
@@ -467,7 +473,10 @@ impl ConnectionParameters {
     }
 
     /// Require DNSSEC validation for endpoint resolution.
-    pub fn set_requires_dnssec_validation(&mut self, requires_dnssec_validation: bool) -> &mut Self {
+    pub fn set_requires_dnssec_validation(
+        &mut self,
+        requires_dnssec_validation: bool,
+    ) -> &mut Self {
         unsafe {
             ffi::nw_shim_parameters_set_requires_dnssec_validation(
                 self.as_ptr(),

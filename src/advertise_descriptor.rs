@@ -144,7 +144,10 @@ impl AdvertiseDescriptor {
     /// Attach a structured TXT-record object.
     pub fn set_txt_record_object(&mut self, txt_record: &TxtRecord) -> &mut Self {
         unsafe {
-            ffi::nw_shim_advertise_descriptor_set_txt_record_object(self.handle, txt_record.as_ptr());
+            ffi::nw_shim_advertise_descriptor_set_txt_record_object(
+                self.handle,
+                txt_record.as_ptr(),
+            );
         };
         self
     }
@@ -152,7 +155,8 @@ impl AdvertiseDescriptor {
     /// Copy the current structured TXT-record object.
     #[must_use]
     pub fn txt_record_object(&self) -> Option<TxtRecord> {
-        let handle = unsafe { ffi::nw_shim_advertise_descriptor_copy_txt_record_object(self.handle) };
+        let handle =
+            unsafe { ffi::nw_shim_advertise_descriptor_copy_txt_record_object(self.handle) };
         (!handle.is_null()).then_some(unsafe { TxtRecord::from_raw(handle) })
     }
 

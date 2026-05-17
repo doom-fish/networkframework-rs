@@ -90,14 +90,21 @@ impl ConnectionGroupDescriptor {
 
     /// Restrict multicast traffic to a specific source endpoint.
     pub fn set_specific_source(&mut self, endpoint: &Endpoint) -> &mut Self {
-        unsafe { ffi::nw_shim_multicast_group_descriptor_set_specific_source(self.handle, endpoint.as_ptr()) };
+        unsafe {
+            ffi::nw_shim_multicast_group_descriptor_set_specific_source(
+                self.handle,
+                endpoint.as_ptr(),
+            )
+        };
         self
     }
 
     /// Whether unicast traffic is disabled for multicast descriptors.
     #[must_use]
     pub fn disable_unicast_traffic(&self) -> bool {
-        unsafe { ffi::nw_shim_multicast_group_descriptor_get_disable_unicast_traffic(self.handle) != 0 }
+        unsafe {
+            ffi::nw_shim_multicast_group_descriptor_get_disable_unicast_traffic(self.handle) != 0
+        }
     }
 
     /// Enable or disable unicast traffic for multicast descriptors.
@@ -452,7 +459,10 @@ impl ConnectionGroup {
     /// Reinsert an extracted connection back into the group.
     pub fn reinsert_extracted_connection(&self, connection: TcpClient) -> Result<(), NetworkError> {
         let status = unsafe {
-            ffi::nw_shim_connection_group_reinsert_extracted_connection(self.handle, connection.as_ptr())
+            ffi::nw_shim_connection_group_reinsert_extracted_connection(
+                self.handle,
+                connection.as_ptr(),
+            )
         };
         if status != ffi::NW_OK {
             return Err(from_status(status));

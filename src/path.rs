@@ -192,7 +192,10 @@ impl Path {
     /// Enumerate the gateways attached to this path snapshot.
     #[must_use]
     pub fn gateways(&self) -> Vec<Endpoint> {
-        unsafe extern "C" fn collect_gateway(endpoint: *mut c_void, user_info: *mut c_void) -> c_int {
+        unsafe extern "C" fn collect_gateway(
+            endpoint: *mut c_void,
+            user_info: *mut c_void,
+        ) -> c_int {
             if user_info.is_null() || endpoint.is_null() {
                 return 0;
             }

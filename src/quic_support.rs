@@ -173,7 +173,10 @@ impl QuicMetadata {
     }
 
     /// Update the local bidirectional stream limit.
-    pub fn set_local_max_streams_bidirectional(&mut self, max_streams_bidirectional: u64) -> &mut Self {
+    pub fn set_local_max_streams_bidirectional(
+        &mut self,
+        max_streams_bidirectional: u64,
+    ) -> &mut Self {
         unsafe {
             ffi::nw_shim_quic_set_local_max_streams_bidirectional(
                 self.handle,
@@ -190,7 +193,10 @@ impl QuicMetadata {
     }
 
     /// Update the local unidirectional stream limit.
-    pub fn set_local_max_streams_unidirectional(&mut self, max_streams_unidirectional: u64) -> &mut Self {
+    pub fn set_local_max_streams_unidirectional(
+        &mut self,
+        max_streams_unidirectional: u64,
+    ) -> &mut Self {
         unsafe {
             ffi::nw_shim_quic_set_local_max_streams_unidirectional(
                 self.handle,
@@ -237,12 +243,16 @@ impl QuicMetadata {
         application_error: u64,
         reason: Option<&str>,
     ) -> Result<&mut Self, NetworkError> {
-        let reason = reason.map(|reason| to_cstring(reason, "reason")).transpose()?;
+        let reason = reason
+            .map(|reason| to_cstring(reason, "reason"))
+            .transpose()?;
         unsafe {
             ffi::nw_shim_quic_set_application_error(
                 self.handle,
                 application_error,
-                reason.as_ref().map_or(core::ptr::null(), |reason| reason.as_ptr()),
+                reason
+                    .as_ref()
+                    .map_or(core::ptr::null(), |reason| reason.as_ptr()),
             )
         };
         Ok(self)
@@ -408,7 +418,9 @@ impl QuicOptions {
     /// Set the maximum QUIC datagram frame size.
     pub fn set_max_datagram_frame_size(&mut self, max_datagram_frame_size: u16) -> &mut Self {
         let options = self.protocol_options();
-        unsafe { ffi::nw_shim_quic_set_max_datagram_frame_size(options.as_ptr(), max_datagram_frame_size) };
+        unsafe {
+            ffi::nw_shim_quic_set_max_datagram_frame_size(options.as_ptr(), max_datagram_frame_size)
+        };
         self
     }
 
@@ -433,7 +445,9 @@ impl QuicConnection {
 impl ContentContext {
     /// Attach QUIC metadata to this content context.
     pub fn set_quic_metadata(&mut self, metadata: &QuicMetadata) -> &mut Self {
-        unsafe { ffi::nw_shim_content_context_set_protocol_metadata(self.as_ptr(), metadata.as_ptr()) };
+        unsafe {
+            ffi::nw_shim_content_context_set_protocol_metadata(self.as_ptr(), metadata.as_ptr())
+        };
         self
     }
 

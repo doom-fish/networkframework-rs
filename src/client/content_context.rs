@@ -152,7 +152,8 @@ impl ContentContext {
             if user_info.is_null() || definition.is_null() || metadata.is_null() {
                 return 0;
             }
-            let entries = unsafe { &mut *user_info.cast::<Vec<(ProtocolDefinition, ProtocolMetadata)>>() };
+            let entries =
+                unsafe { &mut *user_info.cast::<Vec<(ProtocolDefinition, ProtocolMetadata)>>() };
             entries.push((
                 unsafe { ProtocolDefinition::from_raw(definition) },
                 unsafe { ProtocolMetadata::from_raw(metadata) },

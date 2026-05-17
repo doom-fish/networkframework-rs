@@ -173,7 +173,11 @@ impl FramerOptions {
     ///
     /// `value` must be either null or a valid Objective-C/Network.framework
     /// object handle that remains valid for the duration expected by the framer.
-    pub unsafe fn set_object_value_handle(&mut self, key: &str, value: *mut c_void) -> Result<&mut Self, NetworkError> {
+    pub unsafe fn set_object_value_handle(
+        &mut self,
+        key: &str,
+        value: *mut c_void,
+    ) -> Result<&mut Self, NetworkError> {
         let key = CString::new(key)
             .map_err(|e| NetworkError::InvalidArgument(format!("key NUL byte: {e}")))?;
         unsafe { ffi::nw_shim_framer_options_set_object_value(self.handle, key.as_ptr(), value) };
@@ -236,7 +240,11 @@ impl FramerMessage {
     ///
     /// `value` must be either null or a valid Objective-C/Network.framework
     /// object handle that remains valid for the duration expected by the framer.
-    pub unsafe fn set_object_value_handle(&mut self, key: &str, value: *mut c_void) -> Result<&mut Self, NetworkError> {
+    pub unsafe fn set_object_value_handle(
+        &mut self,
+        key: &str,
+        value: *mut c_void,
+    ) -> Result<&mut Self, NetworkError> {
         let key = CString::new(key)
             .map_err(|e| NetworkError::InvalidArgument(format!("key NUL byte: {e}")))?;
         unsafe { ffi::nw_shim_framer_message_set_object_value(self.handle, key.as_ptr(), value) };

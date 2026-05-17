@@ -79,7 +79,8 @@ impl TxtRecord {
                 "TXT record bytes must not be empty".into(),
             ));
         }
-        let handle = unsafe { ffi::nw_shim_txt_record_create_with_bytes(bytes.as_ptr(), bytes.len()) };
+        let handle =
+            unsafe { ffi::nw_shim_txt_record_create_with_bytes(bytes.as_ptr(), bytes.len()) };
         if handle.is_null() {
             return Err(NetworkError::InvalidArgument(
                 "failed to create TXT record from bytes".into(),
@@ -144,8 +145,9 @@ impl TxtRecord {
     /// Insert or replace a key.
     pub fn set_key(&mut self, key: &str, value: Option<&[u8]>) -> Result<&mut Self, NetworkError> {
         let key = to_cstring(key, "key")?;
-        let (value_ptr, value_length) = value
-            .map_or((core::ptr::null(), 0), |value| (value.as_ptr(), value.len()));
+        let (value_ptr, value_length) = value.map_or((core::ptr::null(), 0), |value| {
+            (value.as_ptr(), value.len())
+        });
         let set = unsafe {
             ffi::nw_shim_txt_record_set_key(self.handle, key.as_ptr(), value_ptr, value_length)
         };

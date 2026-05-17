@@ -26,7 +26,6 @@ impl InterfaceType {
             _ => Self::Other,
         }
     }
-
 }
 
 /// One visible network interface.

@@ -131,7 +131,9 @@ impl ResolutionReport {
     /// Source used for this resolution report.
     #[must_use]
     pub fn source(&self) -> ResolutionSource {
-        ResolutionSource::from_raw(unsafe { ffi::nw_shim_resolution_report_get_source(self.handle) })
+        ResolutionSource::from_raw(unsafe {
+            ffi::nw_shim_resolution_report_get_source(self.handle)
+        })
     }
 
     /// Duration of this resolution report in milliseconds.
@@ -149,7 +151,8 @@ impl ResolutionReport {
     /// Successful endpoint, if one exists.
     #[must_use]
     pub fn successful_endpoint(&self) -> Option<Endpoint> {
-        let handle = unsafe { ffi::nw_shim_resolution_report_copy_successful_endpoint(self.handle) };
+        let handle =
+            unsafe { ffi::nw_shim_resolution_report_copy_successful_endpoint(self.handle) };
         (!handle.is_null()).then_some(unsafe { Endpoint::from_raw(handle) })
     }
 
@@ -163,7 +166,9 @@ impl ResolutionReport {
     /// Resolution protocol used by this step.
     #[must_use]
     pub fn protocol(&self) -> ResolutionProtocol {
-        ResolutionProtocol::from_raw(unsafe { ffi::nw_shim_resolution_report_get_protocol(self.handle) })
+        ResolutionProtocol::from_raw(unsafe {
+            ffi::nw_shim_resolution_report_get_protocol(self.handle)
+        })
     }
 }
 
@@ -240,7 +245,8 @@ impl EstablishmentReport {
     #[must_use]
     pub fn protocols(&self) -> Vec<EstablishmentProtocol> {
         let mut count = 0_usize;
-        let items = unsafe { ffi::nw_shim_establishment_report_copy_protocols(self.handle, &mut count) };
+        let items =
+            unsafe { ffi::nw_shim_establishment_report_copy_protocols(self.handle, &mut count) };
         if items.is_null() || count == 0 {
             return Vec::new();
         }
@@ -249,7 +255,9 @@ impl EstablishmentReport {
             .iter()
             .filter_map(|item| {
                 (!item.protocol_definition.is_null()).then_some(EstablishmentProtocol {
-                    protocol_definition: unsafe { ProtocolDefinition::from_raw(item.protocol_definition) },
+                    protocol_definition: unsafe {
+                        ProtocolDefinition::from_raw(item.protocol_definition)
+                    },
                     handshake_milliseconds: item.handshake_milliseconds,
                     handshake_rtt_milliseconds: item.handshake_rtt_milliseconds,
                 })
@@ -263,7 +271,8 @@ impl EstablishmentReport {
     #[must_use]
     pub fn resolutions(&self) -> Vec<ResolutionStep> {
         let mut count = 0_usize;
-        let items = unsafe { ffi::nw_shim_establishment_report_copy_resolutions(self.handle, &mut count) };
+        let items =
+            unsafe { ffi::nw_shim_establishment_report_copy_resolutions(self.handle, &mut count) };
         if items.is_null() || count == 0 {
             return Vec::new();
         }
@@ -297,7 +306,9 @@ impl EstablishmentReport {
         let slice = unsafe { std::slice::from_raw_parts(items, count) };
         let reports = slice
             .iter()
-            .filter_map(|handle| (!handle.is_null()).then_some(unsafe { ResolutionReport::from_raw(*handle) }))
+            .filter_map(|handle| {
+                (!handle.is_null()).then_some(unsafe { ResolutionReport::from_raw(*handle) })
+            })
             .collect();
         unsafe { ffi::nw_shim_free_buffer(items.cast()) };
         reports
@@ -352,7 +363,9 @@ impl DataTransferReport {
     /// Current collection state.
     #[must_use]
     pub fn state(&self) -> DataTransferReportState {
-        DataTransferReportState::from_raw(unsafe { ffi::nw_shim_data_transfer_report_get_state(self.handle) })
+        DataTransferReportState::from_raw(unsafe {
+            ffi::nw_shim_data_transfer_report_get_state(self.handle)
+        })
     }
 
     /// Duration covered by the report, in milliseconds.
@@ -385,13 +398,19 @@ impl DataTransferReport {
                 ffi::nw_shim_data_transfer_report_get_path_radio_type(self.handle, path_index)
             }),
             received_ip_packet_count: unsafe {
-                ffi::nw_shim_data_transfer_report_get_received_ip_packet_count(self.handle, path_index)
+                ffi::nw_shim_data_transfer_report_get_received_ip_packet_count(
+                    self.handle,
+                    path_index,
+                )
             },
             sent_ip_packet_count: unsafe {
                 ffi::nw_shim_data_transfer_report_get_sent_ip_packet_count(self.handle, path_index)
             },
             received_transport_byte_count: unsafe {
-                ffi::nw_shim_data_transfer_report_get_received_transport_byte_count(self.handle, path_index)
+                ffi::nw_shim_data_transfer_report_get_received_transport_byte_count(
+                    self.handle,
+                    path_index,
+                )
             },
             received_transport_duplicate_byte_count: unsafe {
                 ffi::nw_shim_data_transfer_report_get_received_transport_duplicate_byte_count(
@@ -406,7 +425,10 @@ impl DataTransferReport {
                 )
             },
             sent_transport_byte_count: unsafe {
-                ffi::nw_shim_data_transfer_report_get_sent_transport_byte_count(self.handle, path_index)
+                ffi::nw_shim_data_transfer_report_get_sent_transport_byte_count(
+                    self.handle,
+                    path_index,
+                )
             },
             sent_transport_retransmitted_byte_count: unsafe {
                 ffi::nw_shim_data_transfer_report_get_sent_transport_retransmitted_byte_count(
@@ -427,7 +449,10 @@ impl DataTransferReport {
                 )
             },
             transport_rtt_variance: unsafe {
-                ffi::nw_shim_data_transfer_report_get_transport_rtt_variance(self.handle, path_index)
+                ffi::nw_shim_data_transfer_report_get_transport_rtt_variance(
+                    self.handle,
+                    path_index,
+                )
             },
             received_application_byte_count: unsafe {
                 ffi::nw_shim_data_transfer_report_get_received_application_byte_count(
@@ -436,7 +461,10 @@ impl DataTransferReport {
                 )
             },
             sent_application_byte_count: unsafe {
-                ffi::nw_shim_data_transfer_report_get_sent_application_byte_count(self.handle, path_index)
+                ffi::nw_shim_data_transfer_report_get_sent_application_byte_count(
+                    self.handle,
+                    path_index,
+                )
             },
         })
     }

@@ -6,13 +6,18 @@ impl Endpoint {
     /// Copy the raw `sockaddr` backing an address endpoint.
     #[must_use]
     pub fn raw_address(&self) -> Option<Vec<u8>> {
-        let len = unsafe { ffi::nw_shim_endpoint_copy_address(self.as_ptr(), core::ptr::null_mut(), 0) };
+        let len =
+            unsafe { ffi::nw_shim_endpoint_copy_address(self.as_ptr(), core::ptr::null_mut(), 0) };
         if len == 0 {
             return None;
         }
         let mut bytes = vec![0_u8; len];
         let copied = unsafe {
-            ffi::nw_shim_endpoint_copy_address(self.as_ptr(), bytes.as_mut_ptr().cast(), bytes.len())
+            ffi::nw_shim_endpoint_copy_address(
+                self.as_ptr(),
+                bytes.as_mut_ptr().cast(),
+                bytes.len(),
+            )
         };
         if copied == 0 {
             return None;
