@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.12.2] - 2026-05-18
+
+- Widen apple-cf version bound to `<0.10` so 0.9.x resolves.
+
 ## [0.12.1] - 2026-05-18
 
 - Added `Debug` coverage for the remaining public structs across `src/`, using derives for stream/message containers and manual pointer-printing impls for raw-handle wrappers.
