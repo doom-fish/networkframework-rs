@@ -1,10 +1,10 @@
 # networkframework-rs coverage audit (vs MacOSX26.2.sdk)
 
 SDK_PUBLIC_SYMBOLS: 500
-VERIFIED: 498
-GAPS: 2
+VERIFIED: 500
+GAPS: 0
 EXEMPT: 0
-COVERAGE_PCT: 99.60%
+COVERAGE_PCT: 100%
 
 Methodology: enumerated the macOS 26.2 Network.framework C surface from headers, then marked symbols as verified when they are reachable through the crate's safe Rust API or (where noted) the public `raw-ffi` shim bridge. No macOS-deprecated Network.framework symbols were present in this SDK, so the exempt set is empty.
 
@@ -148,6 +148,7 @@ Methodology: enumerated the macOS 26.2 Network.framework C surface from headers,
 | `nw_endpoint_get_url` | function | `endpoint.h` | Endpoint |
 | `nw_endpoint_type_t` | enum | `endpoint.h` | Endpoint |
 | `nw_error_domain_t` | enum | `error.h` | ErrorDomain, FrameworkError |
+| `nw_error_copy_cf_error` | function | `error.h` | FrameworkError |
 | `nw_error_get_error_code` | function | `error.h` | ErrorDomain, FrameworkError |
 | `nw_error_get_error_domain` | function | `error.h` | ErrorDomain, FrameworkError |
 | `nw_error_t` | type | `error.h` | AdvertiseDescriptor, Advertiser, advertise_with_descriptor, Browser, BrowseDescriptor, start_browser_with_descriptor, ConnectionGroup, ConnectionGroupDescriptor, QuicConnection, QuicOptions, TcpClient, TcpListener, UdpClient, WebSocket |
@@ -492,6 +493,7 @@ Methodology: enumerated the macOS 26.2 Network.framework C surface from headers,
 | `nw_ws_metadata_get_close_code` | function | `ws_options.h` | ProtocolOptions, ProtocolMetadata, WsRequest, WsResponse, WsVersion, WsCloseCode, WsResponseStatus |
 | `nw_ws_metadata_get_opcode` | function | `ws_options.h` | WebSocket |
 | `nw_ws_metadata_set_close_code` | function | `ws_options.h` | ProtocolOptions, ProtocolMetadata, WsRequest, WsResponse, WsVersion, WsCloseCode, WsResponseStatus |
+| `nw_ws_metadata_set_pong_handler` | function | `ws_options.h` | ProtocolMetadata |
 | `nw_ws_options_add_additional_header` | function | `ws_options.h` | ProtocolOptions, ProtocolMetadata, WsRequest, WsResponse, WsVersion, WsCloseCode, WsResponseStatus |
 | `nw_ws_options_add_subprotocol` | function | `ws_options.h` | ProtocolOptions, ProtocolMetadata, WsRequest, WsResponse, WsVersion, WsCloseCode, WsResponseStatus |
 | `nw_ws_options_set_auto_reply_ping` | function | `ws_options.h` | ProtocolOptions, ProtocolMetadata, WsRequest, WsResponse, WsVersion, WsCloseCode, WsResponseStatus |
@@ -510,8 +512,3 @@ Methodology: enumerated the macOS 26.2 Network.framework C surface from headers,
 | `nw_ws_response_t` | type | `ws_options.h` | ProtocolOptions, ProtocolMetadata, WsRequest, WsResponse, WsVersion, WsCloseCode, WsResponseStatus |
 | `nw_ws_version_t` | enum | `ws_options.h` | ProtocolOptions, ProtocolMetadata, WsRequest, WsResponse, WsVersion, WsCloseCode, WsResponseStatus |
 
-## 🔴 GAPS
-| Symbol | Kind | Header | Why not wrapped |
-| --- | --- | --- | --- |
-| `nw_error_copy_cf_error` | function | `error.h` | The crate maps errors to NetworkError but does not expose nw_error domain/CFError utilities. |
-| `nw_ws_metadata_set_pong_handler` | function | `ws_options.h` | WebSocket transport is wrapped, but request/response metadata and most WS option setters are missing. |

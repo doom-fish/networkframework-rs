@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.13.0] - 2026-05-18
+
+- Added `FrameworkError::cf_error()` for safe access to the underlying `apple_cf::cf::CFError` via `nw_error_copy_cf_error`.
+- Added `ProtocolMetadata::set_pong_handler()` for safe WebSocket pong callbacks via `nw_ws_metadata_set_pong_handler`.
+- Closed the final two SDK coverage gaps and refreshed `COVERAGE_AUDIT.md` to 100.0% verified coverage (500 / 500 symbols).
+
 ## [0.12.2] - 2026-05-18
 
 - Widen apple-cf version bound to `<0.10` so 0.9.x resolves.

@@ -1,7 +1,7 @@
-# Network.framework coverage (v0.9.3)
+# Network.framework coverage (v0.13.0)
 
 Audited against the macOS 26.2 SDK headers under `Network.framework/Headers`.
-Current audit status: **498 / 500 SDK symbols verified (99.60%)**. See `COVERAGE_AUDIT.md` for the full symbol-by-symbol table.
+Current audit status: **500 / 500 SDK symbols verified (100.0%)**. See `COVERAGE_AUDIT.md` for the full symbol-by-symbol table.
 
 ## Requested logical areas
 
@@ -24,10 +24,7 @@ Current audit status: **498 / 500 SDK symbols verified (99.60%)**. See `COVERAGE
 
 ## Remaining gaps
 
-| SDK surface | Status | Reason |
-| --- | --- | --- |
-| `nw_error_copy_cf_error` | ⏭️ pending | `FrameworkError` exposes the Network.framework domain/code plus CFError-derived strings, but the raw `CFErrorRef` itself is not surfaced as a safe Rust type yet. |
-| `nw_ws_metadata_set_pong_handler` | ⏭️ pending | WebSocket request/response objects, metadata, and option handlers are wrapped, but the metadata-level pong callback is still missing. |
+None — all 500 / 500 public SDK symbols in the audited surface are now covered.
 
 ## Notes
 

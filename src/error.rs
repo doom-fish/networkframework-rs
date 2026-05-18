@@ -131,15 +131,19 @@ impl FrameworkError {
         copied_string(unsafe { ffi::nw_shim_error_copy_cf_error_description(self.handle) })
     }
 
-    /// Get the underlying Core Foundation [`CFError`](apple_cf::cf::CFError) from this framework error.
+    /// Returns the underlying Core Foundation [`CFError`](apple_cf::cf::CFError), if available.
     ///
-    /// Returns `Some(CFError)` if a valid `CFError` is available, `None` otherwise.
-    /// The returned `CFError` is owned and will be automatically released when dropped.
+    /// Wraps `nw_error_copy_cf_error`.
+    #[must_use]
+    pub fn cf_error(&self) -> Option<apple_cf::cf::CFError> {
+        let cf_error_ptr = unsafe { ffi::nw_shim_error_copy_cf_error(self.handle) };
+        unsafe { apple_cf::cf::CFError::from_raw_retained(cf_error_ptr) }
+    }
+
+    /// Alias for [`Self::cf_error`].
     #[must_use]
     pub fn copy_cf_error(&self) -> Option<apple_cf::cf::CFError> {
-        let cf_error_ptr = unsafe { ffi::nw_shim_error_copy_cf_error(self.handle) };
-        // nw_error_copy_cf_error returns a retained CFErrorRef, so we use from_raw_retained
-        unsafe { apple_cf::cf::CFError::from_raw_retained(cf_error_ptr) }
+        self.cf_error()
     }
 }
 
@@ -174,5 +178,41 @@ pub(crate) fn from_status(code: i32) -> NetworkError {
         NW_CANCELLED => NetworkError::Cancelled,
         NW_TIMEOUT => NetworkError::Timeout,
         other => NetworkError::Unknown(other),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FrameworkError;
+    use core::ffi::{c_char, c_int, c_void};
+    use std::ffi::CString;
+    use std::net::TcpListener;
+
+    unsafe extern "C" {
+        fn nw_shim_test_copy_failed_connection_error(
+            host: *const c_char,
+            port: u16,
+            use_tls: c_int,
+        ) -> *mut c_void;
+    }
+
+    #[test]
+    fn framework_error_cf_error_returns_underlying_cf_error() {
+        let probe_listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind probe listener");
+        let port = probe_listener.local_addr().expect("listener addr").port();
+        drop(probe_listener);
+
+        let host = CString::new("127.0.0.1").expect("host CString");
+        let error = unsafe { nw_shim_test_copy_failed_connection_error(host.as_ptr(), port, 0) };
+        assert!(
+            !error.is_null(),
+            "expected a retained nw_error_t from a refused connection"
+        );
+
+        let error = unsafe { FrameworkError::from_raw(error) };
+        assert!(
+            error.cf_error().is_some(),
+            "expected nw_error_copy_cf_error to return a CFError"
+        );
     }
 }

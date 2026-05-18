@@ -6,7 +6,9 @@ use core::ffi::{c_int, c_void};
 use std::ffi::CString;
 use std::sync::{Arc, Mutex};
 
-use crate::error::NetworkError;
+use doom_fish_utils::panic_safe::catch_user_panic;
+
+use crate::error::{FrameworkError, NetworkError};
 use crate::ffi;
 use crate::parameters_support::ServiceClass;
 use crate::quic_support::{SecurityProtocolMetadata, SecurityProtocolOptions};
@@ -121,6 +123,8 @@ impl Drop for ProtocolDefinition {
 
 type WsClientRequestHandlerCallback =
     Mutex<Box<dyn FnMut(WsRequest) -> Option<WsResponse> + Send + 'static>>;
+type WsPongHandlerCallback =
+    Mutex<Box<dyn FnMut(Option<FrameworkError>) + Send + Sync + 'static>>;
 
 pub struct ProtocolOptions {
     handle: *mut c_void,
@@ -393,6 +397,7 @@ impl TcpMultipathVersion {
 /// Generic protocol metadata wrapper.
 pub struct ProtocolMetadata {
     handle: *mut c_void,
+    ws_pong_handler_callback: Option<Arc<WsPongHandlerCallback>>,
 }
 
 unsafe impl Send for ProtocolMetadata {}
@@ -402,7 +407,11 @@ impl std::fmt::Debug for ProtocolMetadata {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ProtocolMetadata")
             .field("handle", &self.handle)
-            .finish()
+            .field(
+                "has_ws_pong_handler_callback",
+                &self.ws_pong_handler_callback.is_some(),
+            )
+            .finish_non_exhaustive()
     }
 }
 
@@ -414,6 +423,7 @@ impl ProtocolMetadata {
                 unsafe { ffi::nw_shim_protocol_create_ip_metadata() },
                 "IP metadata",
             )?,
+            ws_pong_handler_callback: None,
         })
     }
 
@@ -424,6 +434,7 @@ impl ProtocolMetadata {
                 unsafe { ffi::nw_shim_protocol_create_udp_metadata() },
                 "UDP metadata",
             )?,
+            ws_pong_handler_callback: None,
         })
     }
 
@@ -434,6 +445,7 @@ impl ProtocolMetadata {
                 unsafe { ffi::nw_shim_protocol_create_ws_metadata(opcode as c_int) },
                 "WebSocket metadata",
             )?,
+            ws_pong_handler_callback: None,
         })
     }
 
@@ -443,7 +455,10 @@ impl ProtocolMetadata {
     /// caller and remain alive for the returned wrapper.
     #[must_use]
     pub const unsafe fn from_raw(handle: *mut c_void) -> Self {
-        Self { handle }
+        Self {
+            handle,
+            ws_pong_handler_callback: None,
+        }
     }
 
     #[must_use]
@@ -528,6 +543,28 @@ impl ProtocolMetadata {
         (!handle.is_null()).then_some(unsafe { WsResponse::from_raw(handle) })
     }
 
+    /// Register a handler that fires when a pong is received for this ping metadata.
+    ///
+    /// Wraps `nw_ws_metadata_set_pong_handler`.
+    pub fn set_pong_handler<F>(&mut self, handler: F) -> &mut Self
+    where
+        F: FnMut(Option<FrameworkError>) + Send + Sync + 'static,
+    {
+        let handler: Box<dyn FnMut(Option<FrameworkError>) + Send + Sync + 'static> =
+            Box::new(handler);
+        let arc = Arc::new(Mutex::new(handler));
+        let raw = Arc::into_raw(arc.clone()).cast::<c_void>().cast_mut();
+        unsafe {
+            ffi::nw_shim_ws_metadata_set_pong_handler(
+                self.handle,
+                Some(ws_pong_trampoline),
+                raw,
+            );
+        }
+        self.ws_pong_handler_callback = Some(arc);
+        self
+    }
+
     #[must_use]
     pub fn tls_security_metadata(&self) -> Option<SecurityProtocolMetadata> {
         let handle = unsafe { ffi::nw_shim_tls_copy_sec_protocol_metadata(self.handle) };
@@ -538,8 +575,23 @@ impl ProtocolMetadata {
 impl Clone for ProtocolMetadata {
     fn clone(&self) -> Self {
         let handle = unsafe { ffi::nw_shim_retain_object(self.handle) };
-        Self { handle }
+        Self {
+            handle,
+            ws_pong_handler_callback: None,
+        }
     }
+}
+
+unsafe extern "C" fn ws_pong_trampoline(error: *mut c_void, user_info: *mut c_void) {
+    if user_info.is_null() {
+        return;
+    }
+    let callback = unsafe { &*user_info.cast::<WsPongHandlerCallback>() };
+    let Ok(mut guard) = callback.lock() else {
+        return;
+    };
+    let error = (!error.is_null()).then_some(unsafe { FrameworkError::from_raw(error) });
+    catch_user_panic("ws_pong_trampoline", || guard(error));
 }
 
 impl Drop for ProtocolMetadata {
@@ -791,5 +843,86 @@ impl ProtocolOptions {
             ffi::nw_shim_ws_options_set_maximum_message_size(self.handle, maximum_message_size);
         };
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    use super::{Opcode, ProtocolMetadata, ProtocolOptions};
+    use crate::client::ContentContext;
+    use crate::parameters::ConnectionParameters;
+    use crate::websocket::{WebSocket, WsResponse, WsResponseStatus};
+    use crate::{ffi, TcpListener};
+
+    #[test]
+    fn websocket_pong_handler_runs_for_ping_metadata() -> Result<(), crate::error::NetworkError> {
+        let mut server_parameters = ConnectionParameters::tcp()?;
+        let mut server_ws_options = ProtocolOptions::websocket()?;
+        server_ws_options
+            .set_ws_auto_reply_ping(false)
+            .set_ws_client_request_handler(|_request| {
+                Some(WsResponse::new(WsResponseStatus::Accept, None).expect("accept WebSocket"))
+            });
+        server_parameters.prepend_application_protocol(&server_ws_options)?;
+
+        let listener = TcpListener::bind_with_parameters(0, &server_parameters)?;
+        let port = listener.local_port();
+        let server = thread::spawn(move || -> Result<(), crate::error::NetworkError> {
+            let connection = listener.accept()?;
+            let ping = connection.receive_with_context(1024)?;
+            assert_eq!(ping.data, b"doomfish-ping");
+
+            let pong_metadata = ProtocolMetadata::websocket(Opcode::Pong)?;
+            let pong_context = ContentContext::new("ws-pong")?;
+            unsafe {
+                ffi::nw_shim_content_context_set_protocol_metadata(
+                    pong_context.as_ptr(),
+                    pong_metadata.as_ptr(),
+                );
+            }
+            connection.send_with_context(&ping.data, &pong_context)?;
+            Ok(())
+        });
+
+        let client = WebSocket::connect("127.0.0.1", port, "/", false)?;
+
+        let (tx, rx) = mpsc::channel();
+        let mut ping_metadata = ProtocolMetadata::websocket(Opcode::Ping)?;
+        ping_metadata.set_pong_handler(move |error| {
+            tx.send(error.map(|error| (error.domain(), error.code())))
+                .expect("pong callback send");
+        });
+
+        let ping_context = ContentContext::new("ws-ping")?;
+        unsafe {
+            ffi::nw_shim_content_context_set_protocol_metadata(
+                ping_context.as_ptr(),
+                ping_metadata.as_ptr(),
+            );
+        }
+        let status = unsafe {
+            ffi::nw_shim_connection_send_with_context(
+                client.as_ptr(),
+                b"doomfish-ping".as_ptr(),
+                b"doomfish-ping".len(),
+                ping_context.as_ptr(),
+            )
+        };
+        assert_eq!(status, ffi::NW_OK, "failed to send ping metadata over WebSocket");
+
+        let callback_error = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("receive pong callback");
+        assert!(
+            callback_error.is_none(),
+            "unexpected pong callback error: {callback_error:?}"
+        );
+
+        server.join().expect("server thread")?;
+        Ok(())
     }
 }

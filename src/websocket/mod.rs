@@ -451,6 +451,12 @@ impl WebSocket {
         Ok(Self { handle })
     }
 
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) const fn as_ptr(&self) -> *mut c_void {
+        self.handle
+    }
+
     /// Send a UTF-8 text message.
     ///
     /// # Errors

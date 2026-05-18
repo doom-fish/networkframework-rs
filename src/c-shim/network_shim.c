@@ -1120,6 +1120,62 @@ void *nw_shim_connection_create_with_parameters(
     return h;
 }
 
+void *nw_shim_test_copy_failed_connection_error(const char *host, uint16_t port, int use_tls) {
+    if (!host) {
+        return NULL;
+    }
+
+    nw_endpoint_t endpoint = nw_shim_create_host_endpoint(host, port);
+    if (!endpoint) {
+        return NULL;
+    }
+
+    nw_parameters_t parameters = nw_parameters_create_secure_tcp(
+        use_tls ? NW_PARAMETERS_DEFAULT_CONFIGURATION : NW_PARAMETERS_DISABLE_PROTOCOL,
+        NW_PARAMETERS_DEFAULT_CONFIGURATION);
+    if (!parameters) {
+        nw_release(endpoint);
+        return NULL;
+    }
+
+    nw_connection_t connection = nw_connection_create(endpoint, parameters);
+    nw_release(parameters);
+    nw_release(endpoint);
+    if (!connection) {
+        return NULL;
+    }
+
+    dispatch_queue_t queue = dispatch_queue_create("networkframework-rs.test.error", DISPATCH_QUEUE_SERIAL);
+    dispatch_semaphore_t ready = dispatch_semaphore_create(0);
+    __block void *retained_error = NULL;
+    __block int finished = 0;
+
+    nw_connection_set_queue(connection, queue);
+    nw_connection_set_state_changed_handler(connection, ^(nw_connection_state_t state, nw_error_t error) {
+        if (!retained_error && error) {
+            retained_error = nw_retain(error);
+        }
+        if (finished) {
+            return;
+        }
+        if (retained_error || state == nw_connection_state_ready || state == nw_connection_state_cancelled || state == nw_connection_state_failed || state == nw_connection_state_waiting) {
+            finished = 1;
+            dispatch_semaphore_signal(ready);
+        }
+    });
+    nw_connection_start(connection);
+
+    dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, 10LL * NSEC_PER_SEC);
+    if (dispatch_semaphore_wait(ready, deadline) != 0) {
+        nw_connection_cancel(connection);
+    }
+    dispatch_sync(queue, ^{});
+    nw_release(connection);
+    dispatch_release(ready);
+    dispatch_release(queue);
+    return retained_error;
+}
+
 void *nw_shim_listener_create_with_parameters(void *parameters, uint16_t port, int *out_status) {
     if (!parameters) {
         if (out_status) *out_status = NW_INVALID_ARG;
