@@ -98,6 +98,14 @@ pub struct BrowseResult {
 unsafe impl Send for BrowseResult {}
 unsafe impl Sync for BrowseResult {}
 
+impl std::fmt::Debug for BrowseResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BrowseResult")
+            .field("handle", &self.handle)
+            .finish()
+    }
+}
+
 impl BrowseResult {
     /// # Safety
     ///
@@ -191,6 +199,15 @@ pub struct BrowseDescriptor {
 
 unsafe impl Send for BrowseDescriptor {}
 unsafe impl Sync for BrowseDescriptor {}
+
+impl std::fmt::Debug for BrowseDescriptor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BrowseDescriptor")
+            .field("handle", &self.handle)
+            .field("include_txt_record", &self.include_txt_record())
+            .finish()
+    }
+}
 
 fn copied_string(ptr: *mut c_char) -> Option<String> {
     if ptr.is_null() {
@@ -329,6 +346,15 @@ pub struct Browser {
 unsafe impl Send for Browser {}
 unsafe impl Sync for Browser {}
 
+impl std::fmt::Debug for Browser {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Browser")
+            .field("handle", &self.handle)
+            .field("has_state_callback", &self.state_callback.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
 impl Browser {
     /// Copy the active browse descriptor.
     #[must_use]
@@ -388,6 +414,15 @@ pub struct BrowseResultsBrowser {
 
 unsafe impl Send for BrowseResultsBrowser {}
 unsafe impl Sync for BrowseResultsBrowser {}
+
+impl std::fmt::Debug for BrowseResultsBrowser {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BrowseResultsBrowser")
+            .field("handle", &self.handle)
+            .field("has_state_callback", &self.state_callback.is_some())
+            .finish_non_exhaustive()
+    }
+}
 
 impl BrowseResultsBrowser {
     /// Copy the active browse descriptor.
@@ -606,6 +641,14 @@ pub struct BonjourAdvertiser {
 
 unsafe impl Send for BonjourAdvertiser {}
 unsafe impl Sync for BonjourAdvertiser {}
+
+impl std::fmt::Debug for BonjourAdvertiser {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BonjourAdvertiser")
+            .field("handle", &self.handle)
+            .finish()
+    }
+}
 
 impl Drop for BonjourAdvertiser {
     fn drop(&mut self) {

@@ -10,7 +10,7 @@ use crate::ffi;
 use crate::protocol::{ProtocolDefinition, ProtocolMetadata};
 
 /// One received payload and its associated content context.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct ReceivedContent {
     pub data: Vec<u8>,
     pub context: Option<ContentContext>,
@@ -24,6 +24,16 @@ pub struct ContentContext {
 
 unsafe impl Send for ContentContext {}
 unsafe impl Sync for ContentContext {}
+
+impl std::fmt::Debug for ContentContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ContentContext")
+            .field("handle", &self.handle)
+            .field("identifier", &self.identifier())
+            .field("is_final", &self.is_final())
+            .finish()
+    }
+}
 
 impl ContentContext {
     /// Create a new content context with a descriptive identifier.

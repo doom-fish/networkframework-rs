@@ -71,6 +71,15 @@ pub struct FramerDefinition {
 unsafe impl Send for FramerDefinition {}
 unsafe impl Sync for FramerDefinition {}
 
+impl std::fmt::Debug for FramerDefinition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FramerDefinition")
+            .field("handle", &self.handle)
+            .field("keepalive_refs", &Arc::strong_count(&self.keepalive))
+            .finish_non_exhaustive()
+    }
+}
+
 /// Framer options attachable to [`crate::ConnectionParameters`].
 pub struct FramerOptions {
     handle: *mut c_void,
@@ -80,6 +89,15 @@ pub struct FramerOptions {
 unsafe impl Send for FramerOptions {}
 unsafe impl Sync for FramerOptions {}
 
+impl std::fmt::Debug for FramerOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FramerOptions")
+            .field("handle", &self.handle)
+            .field("keepalive_refs", &Arc::strong_count(&self.keepalive))
+            .finish_non_exhaustive()
+    }
+}
+
 /// Owned framer metadata.
 pub struct FramerMessage {
     handle: *mut c_void,
@@ -88,10 +106,26 @@ pub struct FramerMessage {
 unsafe impl Send for FramerMessage {}
 unsafe impl Sync for FramerMessage {}
 
+impl std::fmt::Debug for FramerMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FramerMessage")
+            .field("handle", &self.handle)
+            .finish()
+    }
+}
+
 /// Borrowed framer metadata passed to [`Framer::on_output`].
 pub struct FramerMessageView<'a> {
     handle: *mut c_void,
     _marker: PhantomData<&'a ()>,
+}
+
+impl std::fmt::Debug for FramerMessageView<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FramerMessageView")
+            .field("handle", &self.handle)
+            .finish_non_exhaustive()
+    }
 }
 
 struct AsyncCallbackHolder(Box<dyn FnMut(&mut FramerContext) + Send + 'static>);
@@ -304,6 +338,14 @@ impl FramerMessageView<'_> {
 /// Context passed into framer callbacks.
 pub struct FramerContext {
     handle: *mut c_void,
+}
+
+impl std::fmt::Debug for FramerContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FramerContext")
+            .field("handle", &self.handle)
+            .finish()
+    }
 }
 
 impl FramerContext {

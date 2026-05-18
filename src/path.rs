@@ -79,6 +79,18 @@ pub struct Path {
 unsafe impl Send for Path {}
 unsafe impl Sync for Path {}
 
+impl std::fmt::Debug for Path {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Path")
+            .field("handle", &self.handle)
+            .field("status", &self.status())
+            .field("has_ipv4", &self.has_ipv4())
+            .field("has_ipv6", &self.has_ipv6())
+            .field("has_dns", &self.has_dns())
+            .finish()
+    }
+}
+
 unsafe extern "C" fn collect_interface_trampoline(
     name: *const c_char,
     interface_type: c_int,

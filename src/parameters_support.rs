@@ -138,6 +138,14 @@ pub struct ProtocolStack {
 unsafe impl Send for ProtocolStack {}
 unsafe impl Sync for ProtocolStack {}
 
+impl std::fmt::Debug for ProtocolStack {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProtocolStack")
+            .field("handle", &self.handle)
+            .finish()
+    }
+}
+
 impl ProtocolStack {
     #[must_use]
     pub(crate) const unsafe fn from_raw(handle: *mut c_void) -> Self {

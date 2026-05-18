@@ -33,6 +33,16 @@ pub struct TcpListener {
 unsafe impl Send for TcpListener {}
 unsafe impl Sync for TcpListener {}
 
+impl std::fmt::Debug for TcpListener {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TcpListener")
+            .field("handle", &self.handle)
+            .field("has_advertised_endpoint_callback", &self.advertised_endpoint_callback.is_some())
+            .field("has_new_connection_group_callback", &self.new_connection_group_callback.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
 impl TcpListener {
     /// Bind a plain TCP listener on `port` (use `0` for an OS-assigned
     /// port).

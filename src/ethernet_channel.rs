@@ -67,6 +67,16 @@ pub struct EthernetChannel {
 unsafe impl Send for EthernetChannel {}
 unsafe impl Sync for EthernetChannel {}
 
+impl std::fmt::Debug for EthernetChannel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EthernetChannel")
+            .field("handle", &self.handle)
+            .field("has_state_callback", &self.state_callback.is_some())
+            .field("has_receive_callback", &self.receive_callback.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
 fn copy_mac_address(bytes: *const u8) -> [u8; 6] {
     if bytes.is_null() {
         return [0_u8; 6];

@@ -19,6 +19,14 @@ pub struct UdpClient {
 unsafe impl Send for UdpClient {}
 unsafe impl Sync for UdpClient {}
 
+impl std::fmt::Debug for UdpClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UdpClient")
+            .field("handle", &self.handle)
+            .finish_non_exhaustive()
+    }
+}
+
 impl UdpClient {
     /// Open a connected UDP socket to `host:port`.
     ///

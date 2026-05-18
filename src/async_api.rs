@@ -51,6 +51,14 @@ unsafe impl Send for SubscriptionHandle {}
 // and run during `Drop`, which requires unique access.
 unsafe impl Sync for SubscriptionHandle {}
 
+impl fmt::Debug for SubscriptionHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SubscriptionHandle")
+            .field("has_cleanup", &self.cleanup.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
 /// State of an `nw_connection_t`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionState {
@@ -100,6 +108,7 @@ impl fmt::Debug for ConnectionStateEvent {
 }
 
 /// Async stream of [`ConnectionStateEvent`] for a [`crate::client::TcpClient`].
+#[derive(Debug)]
 pub struct ConnectionStateStream<'a> {
     inner: BoundedAsyncStream<ConnectionStateEvent>,
     _handle: SubscriptionHandle,
@@ -190,6 +199,7 @@ impl<'a> ConnectionStateStream<'a> {
 }
 
 /// Async stream of viability changes (`true` = viable) for a [`crate::client::TcpClient`].
+#[derive(Debug)]
 pub struct ConnectionViabilityStream<'a> {
     inner: BoundedAsyncStream<bool>,
     _handle: SubscriptionHandle,
@@ -274,6 +284,7 @@ impl<'a> ConnectionViabilityStream<'a> {
 }
 
 /// Async stream of better-path-available events for a [`crate::client::TcpClient`].
+#[derive(Debug)]
 pub struct ConnectionBetterPathStream<'a> {
     inner: BoundedAsyncStream<bool>,
     _handle: SubscriptionHandle,
@@ -358,6 +369,7 @@ impl<'a> ConnectionBetterPathStream<'a> {
 }
 
 /// Async stream of path-changed events for a [`crate::client::TcpClient`].
+#[derive(Debug)]
 pub struct ConnectionPathChangedStream<'a> {
     inner: BoundedAsyncStream<crate::path::Path>,
     _handle: SubscriptionHandle,
@@ -497,6 +509,7 @@ struct ListenerNewConnectionContext {
 }
 
 /// Async stream of [`ListenerEvent`] for a [`crate::listener::TcpListener`].
+#[derive(Debug)]
 pub struct ListenerEventStream<'a> {
     inner: BoundedAsyncStream<ListenerEvent>,
     _handle: SubscriptionHandle,
@@ -624,6 +637,7 @@ impl<'a> ListenerEventStream<'a> {
 }
 
 /// Async stream of path updates from a [`crate::path_monitor::PathMonitor`].
+#[derive(Debug)]
 pub struct PathUpdateStream<'a> {
     inner: BoundedAsyncStream<crate::path::Path>,
     _handle: SubscriptionHandle,
@@ -751,6 +765,7 @@ impl fmt::Debug for BrowserAsyncEvent {
 }
 
 /// Async stream of [`BrowserAsyncEvent`] from a [`crate::browser::Browser`].
+#[derive(Debug)]
 pub struct BrowserEventStream<'a> {
     inner: BoundedAsyncStream<BrowserAsyncEvent>,
     _handle: SubscriptionHandle,

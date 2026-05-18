@@ -20,12 +20,32 @@ pub struct AdvertiseDescriptor {
 unsafe impl Send for AdvertiseDescriptor {}
 unsafe impl Sync for AdvertiseDescriptor {}
 
+impl std::fmt::Debug for AdvertiseDescriptor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AdvertiseDescriptor")
+            .field("handle", &self.handle)
+            .field("bonjour_name", &self.bonjour_name)
+            .field("bonjour_type", &self.bonjour_type)
+            .field("bonjour_domain", &self.bonjour_domain)
+            .field("application_service_name", &self.application_service_name)
+            .finish()
+    }
+}
+
 pub struct Advertiser {
     handle: *mut c_void,
 }
 
 unsafe impl Send for Advertiser {}
 unsafe impl Sync for Advertiser {}
+
+impl std::fmt::Debug for Advertiser {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Advertiser")
+            .field("handle", &self.handle)
+            .finish()
+    }
+}
 
 fn to_cstring(value: &str, field: &str) -> Result<CString, NetworkError> {
     CString::new(value).map_err(|e| NetworkError::InvalidArgument(format!("{field} NUL byte: {e}")))

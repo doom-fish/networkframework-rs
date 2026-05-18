@@ -37,6 +37,14 @@ pub struct PrivacyContext {
 unsafe impl Send for PrivacyContext {}
 unsafe impl Sync for PrivacyContext {}
 
+impl std::fmt::Debug for PrivacyContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PrivacyContext")
+            .field("handle", &self.handle)
+            .finish()
+    }
+}
+
 impl PrivacyContext {
     /// Create a named privacy context.
     pub fn new(description: &str) -> Result<Self, NetworkError> {
@@ -122,6 +130,14 @@ pub struct ResolverConfig {
 unsafe impl Send for ResolverConfig {}
 unsafe impl Sync for ResolverConfig {}
 
+impl std::fmt::Debug for ResolverConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolverConfig")
+            .field("handle", &self.handle)
+            .finish()
+    }
+}
+
 impl ResolverConfig {
     /// Create a DNS-over-HTTPS resolver from a URL template.
     pub fn dns_over_https(url: &str) -> Result<Self, NetworkError> {
@@ -192,6 +208,14 @@ pub struct RelayHop {
 
 unsafe impl Send for RelayHop {}
 unsafe impl Sync for RelayHop {}
+
+impl std::fmt::Debug for RelayHop {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RelayHop")
+            .field("handle", &self.handle)
+            .finish()
+    }
+}
 
 impl RelayHop {
     /// Create a relay hop using optional HTTP/3 and HTTP/2 endpoints.
@@ -267,6 +291,22 @@ pub struct UrlSessionConfiguration {
 
 unsafe impl Send for ProxyConfig {}
 unsafe impl Sync for ProxyConfig {}
+
+impl std::fmt::Debug for ProxyConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProxyConfig")
+            .field("handle", &self.handle)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for UrlSessionConfiguration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UrlSessionConfiguration")
+            .field("handle", &self.handle)
+            .finish()
+    }
+}
 
 impl ProxyConfig {
     /// Create an HTTP CONNECT proxy configuration.

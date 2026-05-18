@@ -43,6 +43,16 @@ unsafe impl Send for PathMonitor {}
 // the queue is idle.
 unsafe impl Sync for PathMonitor {}
 
+impl std::fmt::Debug for PathMonitor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PathMonitor")
+            .field("handle", &self.handle)
+            .field("callback_raw", &self.callback_raw)
+            .field("cancel_raw", &self.cancel_raw)
+            .finish_non_exhaustive()
+    }
+}
+
 fn reclaim_arc_raw<T>(raw: &mut *const T) {
     if !raw.is_null() {
         // SAFETY: `*raw` was produced by `Arc::into_raw`, and the caller only

@@ -52,6 +52,14 @@ pub struct ConnectionParameters {
 unsafe impl Send for ConnectionParameters {}
 unsafe impl Sync for ConnectionParameters {}
 
+impl std::fmt::Debug for ConnectionParameters {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConnectionParameters")
+            .field("handle", &self.handle)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Clone for ConnectionParameters {
     fn clone(&self) -> Self {
         let handle = unsafe { ffi::nw_shim_parameters_copy(self.handle) };

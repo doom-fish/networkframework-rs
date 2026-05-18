@@ -26,6 +26,14 @@ pub struct ConnectionGroupDescriptor {
 unsafe impl Send for ConnectionGroupDescriptor {}
 unsafe impl Sync for ConnectionGroupDescriptor {}
 
+impl std::fmt::Debug for ConnectionGroupDescriptor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConnectionGroupDescriptor")
+            .field("handle", &self.handle)
+            .finish()
+    }
+}
+
 impl ConnectionGroupDescriptor {
     /// Create a multiplex group descriptor for a remote endpoint.
     pub fn multiplex(host: &str, port: u16) -> Result<Self, NetworkError> {
@@ -163,7 +171,7 @@ impl ConnectionGroupState {
 }
 
 /// An inbound connection-group message.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct ConnectionGroupMessage {
     pub data: Vec<u8>,
     pub context: Option<ContentContext>,
@@ -190,6 +198,17 @@ pub struct ConnectionGroup {
 
 unsafe impl Send for ConnectionGroup {}
 unsafe impl Sync for ConnectionGroup {}
+
+impl std::fmt::Debug for ConnectionGroup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConnectionGroup")
+            .field("handle", &self.handle)
+            .field("has_state_callback", &self.state_callback.is_some())
+            .field("has_receive_callback", &self.receive_callback.is_some())
+            .field("has_new_connection_callback", &self.new_connection_callback.is_some())
+            .finish_non_exhaustive()
+    }
+}
 
 impl ConnectionGroup {
     /// Create a connection group from a descriptor and parameters.

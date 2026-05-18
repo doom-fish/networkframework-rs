@@ -33,6 +33,14 @@ pub struct SecurityProtocolOptions {
 unsafe impl Send for SecurityProtocolOptions {}
 unsafe impl Sync for SecurityProtocolOptions {}
 
+impl std::fmt::Debug for SecurityProtocolOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecurityProtocolOptions")
+            .field("handle", &self.handle)
+            .finish()
+    }
+}
+
 impl SecurityProtocolOptions {
     #[must_use]
     pub(crate) const unsafe fn from_raw(handle: *mut c_void) -> Self {
@@ -63,6 +71,14 @@ pub struct SecurityProtocolMetadata {
 
 unsafe impl Send for SecurityProtocolMetadata {}
 unsafe impl Sync for SecurityProtocolMetadata {}
+
+impl std::fmt::Debug for SecurityProtocolMetadata {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecurityProtocolMetadata")
+            .field("handle", &self.handle)
+            .finish()
+    }
+}
 
 impl SecurityProtocolMetadata {
     #[must_use]
@@ -116,6 +132,14 @@ pub struct QuicMetadata {
 
 unsafe impl Send for QuicMetadata {}
 unsafe impl Sync for QuicMetadata {}
+
+impl std::fmt::Debug for QuicMetadata {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QuicMetadata")
+            .field("handle", &self.handle)
+            .finish()
+    }
+}
 
 impl QuicMetadata {
     #[must_use]

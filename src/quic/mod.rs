@@ -23,6 +23,14 @@ pub struct QuicOptions {
 unsafe impl Send for QuicOptions {}
 unsafe impl Sync for QuicOptions {}
 
+impl std::fmt::Debug for QuicOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QuicOptions")
+            .field("handle", &self.handle)
+            .finish()
+    }
+}
+
 impl QuicOptions {
     /// Create a fresh QUIC protocol-options object.
     pub fn new() -> Result<Self, NetworkError> {
@@ -153,6 +161,14 @@ pub struct QuicConnection {
 
 unsafe impl Send for QuicConnection {}
 unsafe impl Sync for QuicConnection {}
+
+impl std::fmt::Debug for QuicConnection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QuicConnection")
+            .field("handle", &self.handle)
+            .finish_non_exhaustive()
+    }
+}
 
 impl QuicConnection {
     /// Open a QUIC connection to `host:port`.

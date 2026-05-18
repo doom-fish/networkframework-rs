@@ -91,6 +91,16 @@ pub struct FrameworkError {
 unsafe impl Send for FrameworkError {}
 unsafe impl Sync for FrameworkError {}
 
+impl fmt::Debug for FrameworkError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FrameworkError")
+            .field("handle", &self.handle)
+            .field("domain", &self.domain())
+            .field("code", &self.code())
+            .finish()
+    }
+}
+
 impl FrameworkError {
     /// # Safety
     ///

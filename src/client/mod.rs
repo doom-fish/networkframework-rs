@@ -44,6 +44,17 @@ unsafe impl Send for TcpClient {}
 // after the serial queue has finished running callbacks.
 unsafe impl Sync for TcpClient {}
 
+impl std::fmt::Debug for TcpClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TcpClient")
+            .field("handle", &self.handle)
+            .field("viability_raw", &self.viability_raw)
+            .field("better_path_raw", &self.better_path_raw)
+            .field("path_raw", &self.path_raw)
+            .finish_non_exhaustive()
+    }
+}
+
 fn reclaim_arc_raw<T>(raw: &mut *const T) {
     if !raw.is_null() {
         // SAFETY: `*raw` was produced by `Arc::into_raw`, and the caller only

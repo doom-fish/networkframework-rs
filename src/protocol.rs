@@ -130,6 +130,15 @@ pub struct ProtocolOptions {
 unsafe impl Send for ProtocolOptions {}
 unsafe impl Sync for ProtocolOptions {}
 
+impl std::fmt::Debug for ProtocolOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProtocolOptions")
+            .field("handle", &self.handle)
+            .field("has_ws_client_request_callback", &self.ws_client_request_callback.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
 impl ProtocolOptions {
     pub fn tcp() -> Result<Self, NetworkError> {
         Ok(Self {
@@ -388,6 +397,14 @@ pub struct ProtocolMetadata {
 
 unsafe impl Send for ProtocolMetadata {}
 unsafe impl Sync for ProtocolMetadata {}
+
+impl std::fmt::Debug for ProtocolMetadata {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProtocolMetadata")
+            .field("handle", &self.handle)
+            .finish()
+    }
+}
 
 impl ProtocolMetadata {
     /// Create IP metadata.

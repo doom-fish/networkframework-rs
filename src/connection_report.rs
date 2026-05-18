@@ -122,6 +122,14 @@ pub struct ResolutionReport {
 unsafe impl Send for ResolutionReport {}
 unsafe impl Sync for ResolutionReport {}
 
+impl std::fmt::Debug for ResolutionReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolutionReport")
+            .field("handle", &self.handle)
+            .finish()
+    }
+}
+
 impl ResolutionReport {
     #[must_use]
     pub(crate) const unsafe fn from_raw(handle: *mut c_void) -> Self {
@@ -195,6 +203,14 @@ pub struct EstablishmentReport {
 
 unsafe impl Send for EstablishmentReport {}
 unsafe impl Sync for EstablishmentReport {}
+
+impl std::fmt::Debug for EstablishmentReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EstablishmentReport")
+            .field("handle", &self.handle)
+            .finish()
+    }
+}
 
 impl EstablishmentReport {
     #[must_use]
@@ -338,6 +354,14 @@ pub struct DataTransferReport {
 
 unsafe impl Send for DataTransferReport {}
 unsafe impl Sync for DataTransferReport {}
+
+impl std::fmt::Debug for DataTransferReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DataTransferReport")
+            .field("handle", &self.handle)
+            .finish()
+    }
+}
 
 impl DataTransferReport {
     #[must_use]

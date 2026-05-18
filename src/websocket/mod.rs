@@ -201,6 +201,14 @@ pub struct WsRequest {
 unsafe impl Send for WsRequest {}
 unsafe impl Sync for WsRequest {}
 
+impl std::fmt::Debug for WsRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WsRequest")
+            .field("handle", &self.handle)
+            .finish()
+    }
+}
+
 impl WsRequest {
     /// # Safety
     ///
@@ -263,6 +271,14 @@ pub struct WsResponse {
 
 unsafe impl Send for WsResponse {}
 unsafe impl Sync for WsResponse {}
+
+impl std::fmt::Debug for WsResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WsResponse")
+            .field("handle", &self.handle)
+            .finish()
+    }
+}
 
 impl WsResponse {
     /// Create a WebSocket server response.
@@ -398,6 +414,14 @@ pub struct WebSocket {
 
 unsafe impl Send for WebSocket {}
 unsafe impl Sync for WebSocket {}
+
+impl std::fmt::Debug for WebSocket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WebSocket")
+            .field("handle", &self.handle)
+            .finish()
+    }
+}
 
 impl WebSocket {
     /// Open a WebSocket connection to `ws://host:port/path` (plain) or
