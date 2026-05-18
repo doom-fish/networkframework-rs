@@ -20,7 +20,7 @@ pub mod endpoint;
 mod endpoint_support;
 pub mod error;
 pub mod ethernet_channel;
-pub mod ffi;
+pub(crate) mod ffi;
 pub mod framer;
 pub mod group;
 pub mod interface;
@@ -37,6 +37,7 @@ pub mod proxy_config;
 pub mod quic;
 mod quic_support;
 #[cfg(feature = "raw-ffi")]
+#[cfg_attr(docsrs, doc(cfg(feature = "raw-ffi")))]
 pub mod raw_ffi;
 pub mod resolver;
 pub mod txt_record;

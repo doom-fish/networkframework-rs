@@ -1,6 +1,7 @@
 //! Swift-bridge FFI declarations.
 
 #![allow(missing_docs)]
+#![cfg_attr(not(feature = "raw-ffi"), allow(dead_code))]
 
 use core::ffi::{c_char, c_int, c_void};
 

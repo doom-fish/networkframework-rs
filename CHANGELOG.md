@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.12.0] - 2026-05-18
+
+### Breaking
+
+- `pub mod ffi` is now `pub(crate) mod ffi` — raw FFI symbols are no longer
+  reachable through `networkframework::ffi::*`. The `raw_ffi` module is the
+  intended escape hatch and was already gated behind the `raw-ffi` Cargo
+  feature; this change makes the gating effective. Users who need raw FFI
+  access must add `features = ["raw-ffi"]` and import from
+  `networkframework::raw_ffi::*` instead.
+- Added `#[cfg_attr(docsrs, doc(cfg(feature = "raw-ffi")))]` to `raw_ffi` so
+  the feature requirement renders in rustdoc.
+
 ## [0.11.1] - 2026-05-17
 
 - Fixed Arc strong-reference leak in `PathMonitor`: the raw Arc clone given to
