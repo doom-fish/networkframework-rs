@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.13.2] - 2026-05-20
+
+- Clippy hygiene sweep: cleared all `-D warnings` lints across the crate. No public API change.
+
 ## [0.13.1] - 2026-05-20
 
 - Widened `doom-fish-utils` dependency bound to `<0.4` so the 0.3.x SPSC-ring release resolves cleanly.

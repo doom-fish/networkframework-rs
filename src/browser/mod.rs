@@ -84,6 +84,7 @@ impl BrowseResultChange {
         Self(bits)
     }
 
+    #[cfg(feature = "async")]
     #[must_use]
     pub(crate) const fn from_raw(bits: u64) -> Self {
         Self(bits)
@@ -370,6 +371,7 @@ impl Browser {
         (!handle.is_null()).then_some(unsafe { ConnectionParameters::from_raw(handle) })
     }
 
+    #[cfg(feature = "async")]
     #[must_use]
     pub(crate) const fn as_ptr(&self) -> *mut c_void {
         self.handle

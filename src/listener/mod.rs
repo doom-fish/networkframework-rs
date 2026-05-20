@@ -228,11 +228,13 @@ impl TcpListener {
         self.new_connection_group_callback = Some(handler);
     }
 
+    #[cfg(feature = "async")]
     #[must_use]
     pub(crate) const fn as_ptr(&self) -> *mut c_void {
         self.handle
     }
 
+    #[cfg(feature = "async")]
     #[must_use]
     pub(crate) fn keepalives(&self) -> KeepAlives {
         self.keepalives.clone()
