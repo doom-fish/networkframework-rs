@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.13.1] - 2026-05-20
+
+- Widened `doom-fish-utils` dependency bound to `<0.4` so the 0.3.x SPSC-ring release resolves cleanly.
+- Expanded README with explicit async / sync usage sections, executor-agnostic design notes, and a curated examples list.
+
 ## [0.13.0] - 2026-05-18
 
 - Added `FrameworkError::cf_error()` for safe access to the underlying `apple_cf::cf::CFError` via `nw_error_copy_cf_error`.
