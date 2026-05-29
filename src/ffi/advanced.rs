@@ -78,6 +78,40 @@ pub struct NwShimResolutionStepInfo {
     pub preferred_endpoint: *mut c_void,
 }
 
+// MARK: - ABI Layout Assertions
+//
+// The two `#[repr(C)]` shim structs above are populated by the Swift/C bridge
+// (`nfw_*` / `nw_shim_*` entry points) and read back by value on the Rust side.
+// If a field type, field order, or padding ever drifts between the two
+// languages, the marshalled data silently corrupts.
+//
+// These compile-time assertions pin the exact size and alignment of each struct
+// so accidental layout changes fail `cargo build` immediately. The crate's MSRV
+// is 1.76, so `offset_of!` (stabilised in 1.77) is unavailable; size + alignment
+// are used instead. `verify_ffi_layout` re-checks the same invariants at runtime
+// and is exercised by the unit test at the bottom of this module.
+const _: () = assert!(core::mem::size_of::<NwShimEstablishmentProtocolInfo>() == 24);
+const _: () = assert!(core::mem::align_of::<NwShimEstablishmentProtocolInfo>() == 8);
+const _: () = assert!(core::mem::size_of::<NwShimResolutionStepInfo>() == 40);
+const _: () = assert!(core::mem::align_of::<NwShimResolutionStepInfo>() == 8);
+
+/// Runtime mirror of the compile-time ABI layout assertions for the
+/// `#[repr(C)]` shim structs shared with the Swift/C bridge.
+///
+/// Returns `true` only if the size and alignment of every boundary-crossing
+/// shim struct match the values pinned at compile time. A `false` return means
+/// the Rust layout drifted from what the bridge expects, i.e. a real ABI bug.
+#[must_use]
+#[allow(dead_code)]
+pub const fn verify_ffi_layout() -> bool {
+    use core::mem::{align_of, size_of};
+
+    size_of::<NwShimEstablishmentProtocolInfo>() == 24
+        && align_of::<NwShimEstablishmentProtocolInfo>() == 8
+        && size_of::<NwShimResolutionStepInfo>() == 40
+        && align_of::<NwShimResolutionStepInfo>() == 8
+}
+
 unsafe extern "C" {
     #[link_name = "nfw_sec_retain"]
     pub fn nw_shim_sec_retain(object: *mut c_void) -> *mut c_void;
@@ -1079,4 +1113,46 @@ unsafe extern "C" {
         out_count: *mut usize,
     ) -> *mut *mut c_void;
 
+}
+
+#[cfg(test)]
+mod ffi_layout_tests {
+    use super::{verify_ffi_layout, NwShimEstablishmentProtocolInfo, NwShimResolutionStepInfo};
+    use core::mem::{align_of, size_of};
+
+    #[test]
+    fn establishment_protocol_info_layout() {
+        assert_eq!(
+            size_of::<NwShimEstablishmentProtocolInfo>(),
+            24,
+            "NwShimEstablishmentProtocolInfo size drifted"
+        );
+        assert_eq!(
+            align_of::<NwShimEstablishmentProtocolInfo>(),
+            8,
+            "NwShimEstablishmentProtocolInfo alignment drifted"
+        );
+    }
+
+    #[test]
+    fn resolution_step_info_layout() {
+        assert_eq!(
+            size_of::<NwShimResolutionStepInfo>(),
+            40,
+            "NwShimResolutionStepInfo size drifted"
+        );
+        assert_eq!(
+            align_of::<NwShimResolutionStepInfo>(),
+            8,
+            "NwShimResolutionStepInfo alignment drifted"
+        );
+    }
+
+    #[test]
+    fn ffi_layout_self_consistent() {
+        assert!(
+            verify_ffi_layout(),
+            "FFI shim struct layout drifted from the pinned ABI"
+        );
+    }
 }
