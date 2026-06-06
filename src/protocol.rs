@@ -279,8 +279,12 @@ unsafe extern "C" fn ws_client_request_trampoline(
     let Ok(mut guard) = callback.lock() else {
         return core::ptr::null_mut();
     };
-    guard(unsafe { WsRequest::from_raw(request) })
-        .map_or(core::ptr::null_mut(), WsResponse::into_raw)
+    let request = unsafe { WsRequest::from_raw(request) };
+    let mut response = core::ptr::null_mut();
+    catch_user_panic("ws_client_request_trampoline", || {
+        response = guard(request).map_or(core::ptr::null_mut(), WsResponse::into_raw);
+    });
+    response
 }
 
 impl Drop for ProtocolOptions {

@@ -13,6 +13,7 @@ use crate::ffi;
 use crate::parameters::{ConnectionParameters, KeepAlives};
 use crate::path::Path;
 use crate::protocol::{ProtocolDefinition, ProtocolMetadata, ProtocolOptions};
+use doom_fish_utils::panic_safe::catch_user_panic;
 
 fn to_cstring(value: &str, field: &str) -> Result<CString, NetworkError> {
     CString::new(value).map_err(|e| NetworkError::InvalidArgument(format!("{field} NUL byte: {e}")))
@@ -535,7 +536,10 @@ unsafe extern "C" fn state_trampoline(state: c_int, user_info: *mut c_void) {
     let Ok(mut guard) = callback.lock() else {
         return;
     };
-    guard(ConnectionGroupState::from_raw(state));
+    let state = ConnectionGroupState::from_raw(state);
+    catch_user_panic("connection_group_state_trampoline", || {
+        guard(state);
+    });
 }
 
 unsafe extern "C" fn new_connection_trampoline(connection: *mut c_void, user_info: *mut c_void) {
@@ -546,7 +550,11 @@ unsafe extern "C" fn new_connection_trampoline(connection: *mut c_void, user_inf
     let Ok(mut guard) = callback.callback.lock() else {
         return;
     };
-    guard(unsafe { TcpClient::from_raw_with_keepalives(connection, callback.keepalives.clone()) });
+    let client =
+        unsafe { TcpClient::from_raw_with_keepalives(connection, callback.keepalives.clone()) };
+    catch_user_panic("connection_group_new_connection_trampoline", || {
+        guard(client);
+    });
 }
 
 unsafe extern "C" fn receive_trampoline(
@@ -573,9 +581,12 @@ unsafe extern "C" fn receive_trampoline(
     } else {
         Some(unsafe { ContentContext::from_raw(context) })
     };
-    guard(ConnectionGroupMessage {
+    let message = ConnectionGroupMessage {
         data: bytes,
         context,
         is_complete: is_complete != 0,
+    };
+    catch_user_panic("connection_group_receive_trampoline", || {
+        guard(message);
     });
 }

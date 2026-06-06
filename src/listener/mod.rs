@@ -12,6 +12,7 @@ use crate::endpoint::Endpoint;
 use crate::error::{from_status, NetworkError};
 use crate::ffi;
 use crate::parameters::{ConnectionParameters, KeepAlives};
+use doom_fish_utils::panic_safe::catch_user_panic;
 
 type AdvertisedEndpointCallback = Mutex<Box<dyn FnMut(Option<Endpoint>, bool) + Send + 'static>>;
 
@@ -273,7 +274,9 @@ unsafe extern "C" fn advertised_endpoint_trampoline(
         return;
     };
     let endpoint = (!endpoint.is_null()).then_some(unsafe { Endpoint::from_raw(endpoint) });
-    guard(endpoint, is_added != 0);
+    catch_user_panic("listener_advertised_endpoint_trampoline", || {
+        guard(endpoint, is_added != 0);
+    });
 }
 
 unsafe extern "C" fn new_connection_group_trampoline(group: *mut c_void, user_info: *mut c_void) {
@@ -284,7 +287,10 @@ unsafe extern "C" fn new_connection_group_trampoline(group: *mut c_void, user_in
     let Ok(mut guard) = callback.callback.lock() else {
         return;
     };
-    guard(unsafe { ConnectionGroup::from_raw(group, callback.keepalives.clone()) });
+    let group = unsafe { ConnectionGroup::from_raw(group, callback.keepalives.clone()) };
+    catch_user_panic("listener_new_connection_group_trampoline", || {
+        guard(group);
+    });
 }
 
 impl Drop for TcpListener {

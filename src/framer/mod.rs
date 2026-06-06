@@ -18,6 +18,7 @@ use crate::error::NetworkError;
 use crate::ffi;
 use crate::parameters::ConnectionParameters;
 use crate::protocol::ProtocolOptions;
+use doom_fish_utils::panic_safe::catch_user_panic;
 
 /// Result of [`Framer::on_start`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -555,27 +556,50 @@ impl FramerContext {
 
 unsafe extern "C" fn create_instance_trampoline(user_info: *mut c_void) -> *mut c_void {
     let owner = unsafe { &*user_info.cast::<FramerCallbacksOwner>() };
-    let instance = (owner.factory)();
-    Box::into_raw(Box::new(instance)).cast()
+    let mut instance: Option<Box<dyn Framer>> = None;
+    catch_user_panic("framer_create_instance_trampoline", || {
+        instance = Some((owner.factory)());
+    });
+    instance.map_or(core::ptr::null_mut(), |instance| {
+        Box::into_raw(Box::new(instance)).cast()
+    })
 }
 
 unsafe extern "C" fn drop_instance_trampoline(instance: *mut c_void) {
-    drop(unsafe { Box::from_raw(instance.cast::<Box<dyn Framer>>()) });
+    if instance.is_null() {
+        return;
+    }
+    let boxed = unsafe { Box::from_raw(instance.cast::<Box<dyn Framer>>()) };
+    catch_user_panic("framer_drop_instance_trampoline", move || drop(boxed));
 }
 
 unsafe extern "C" fn start_trampoline(instance: *mut c_void, framer: *mut c_void) -> c_int {
+    if instance.is_null() {
+        return ffi::NW_FRAMER_START_READY;
+    }
     let framer_instance = unsafe { &mut *instance.cast::<Box<dyn Framer>>() };
     let mut context = FramerContext::new(framer);
-    match framer_instance.as_mut().on_start(&mut context) {
-        FramerStart::Ready => ffi::NW_FRAMER_START_READY,
-        FramerStart::WillMarkReady => ffi::NW_FRAMER_START_WILL_MARK_READY,
-    }
+    let mut result = ffi::NW_FRAMER_START_READY;
+    catch_user_panic("framer_start_trampoline", || {
+        result = match framer_instance.as_mut().on_start(&mut context) {
+            FramerStart::Ready => ffi::NW_FRAMER_START_READY,
+            FramerStart::WillMarkReady => ffi::NW_FRAMER_START_WILL_MARK_READY,
+        };
+    });
+    result
 }
 
 unsafe extern "C" fn input_trampoline(instance: *mut c_void, framer: *mut c_void) -> usize {
+    if instance.is_null() {
+        return 0;
+    }
     let framer_instance = unsafe { &mut *instance.cast::<Box<dyn Framer>>() };
     let mut context = FramerContext::new(framer);
-    framer_instance.as_mut().on_input(&mut context)
+    let mut result = 0;
+    catch_user_panic("framer_input_trampoline", || {
+        result = framer_instance.as_mut().on_input(&mut context);
+    });
+    result
 }
 
 unsafe extern "C" fn output_trampoline(
@@ -585,33 +609,55 @@ unsafe extern "C" fn output_trampoline(
     message_length: usize,
     is_complete: c_int,
 ) {
+    if instance.is_null() {
+        return;
+    }
     let framer_instance = unsafe { &mut *instance.cast::<Box<dyn Framer>>() };
     let mut context = FramerContext::new(framer);
     let message = (!message.is_null()).then_some(FramerMessageView {
         handle: message,
         _marker: PhantomData,
     });
-    framer_instance
-        .as_mut()
-        .on_output(&mut context, message, message_length, is_complete != 0);
+    catch_user_panic("framer_output_trampoline", || {
+        framer_instance
+            .as_mut()
+            .on_output(&mut context, message, message_length, is_complete != 0);
+    });
 }
 
 unsafe extern "C" fn wakeup_trampoline(instance: *mut c_void, framer: *mut c_void) {
+    if instance.is_null() {
+        return;
+    }
     let framer_instance = unsafe { &mut *instance.cast::<Box<dyn Framer>>() };
     let mut context = FramerContext::new(framer);
-    framer_instance.as_mut().on_wakeup(&mut context);
+    catch_user_panic("framer_wakeup_trampoline", || {
+        framer_instance.as_mut().on_wakeup(&mut context);
+    });
 }
 
 unsafe extern "C" fn stop_trampoline(instance: *mut c_void, framer: *mut c_void) -> c_int {
+    if instance.is_null() {
+        return 1;
+    }
     let framer_instance = unsafe { &mut *instance.cast::<Box<dyn Framer>>() };
     let mut context = FramerContext::new(framer);
-    i32::from(framer_instance.as_mut().on_stop(&mut context))
+    let mut result = 1;
+    catch_user_panic("framer_stop_trampoline", || {
+        result = i32::from(framer_instance.as_mut().on_stop(&mut context));
+    });
+    result
 }
 
 unsafe extern "C" fn cleanup_trampoline(instance: *mut c_void, framer: *mut c_void) {
+    if instance.is_null() {
+        return;
+    }
     let framer_instance = unsafe { &mut *instance.cast::<Box<dyn Framer>>() };
     let mut context = FramerContext::new(framer);
-    framer_instance.as_mut().on_cleanup(&mut context);
+    catch_user_panic("framer_cleanup_trampoline", || {
+        framer_instance.as_mut().on_cleanup(&mut context);
+    });
 }
 
 unsafe extern "C" fn parse_trampoline<F>(
@@ -629,11 +675,17 @@ where
     } else {
         unsafe { slice::from_raw_parts(buffer, buffer_length) }
     };
-    callback(bytes, is_complete != 0)
+    let mut result = 0;
+    catch_user_panic("framer_parse_trampoline", || {
+        result = callback(bytes, is_complete != 0);
+    });
+    result
 }
 
 unsafe extern "C" fn async_callback_trampoline(framer: *mut c_void, user_info: *mut c_void) {
     let mut holder = unsafe { Box::from_raw(user_info.cast::<AsyncCallbackHolder>()) };
     let mut context = FramerContext::new(framer);
-    holder.0.as_mut()(&mut context);
+    catch_user_panic("framer_async_callback_trampoline", || {
+        holder.0.as_mut()(&mut context);
+    });
 }
