@@ -13,6 +13,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <CommonCrypto/CommonDigest.h>
+#include <Security/Security.h>
+#include <pthread.h>
+#include <time.h>
 
 #include "network_shim.h"
 
@@ -20,35 +24,751 @@
 // Connection (outbound TCP)
 // ---------------------------------------------------------------------
 
-typedef struct nw_conn_handle {
-    nw_connection_t conn;          // retained
-    dispatch_queue_t queue;        // retained
-    dispatch_semaphore_t ready;
-    _Atomic int state_code;        // 0=setup,1=ready,2=cancelled,3=failed
-} nw_conn_handle;
+#define NW_SHIM_CONNECT_TIMEOUT_NS (30LL * (int64_t)NSEC_PER_SEC)
+#define NW_SHIM_START_TIMEOUT_NS (10LL * (int64_t)NSEC_PER_SEC)
+#define NW_SHIM_ACCEPT_TIMEOUT_NS (10LL * (int64_t)NSEC_PER_SEC)
+#define NW_SHIM_ACCEPT_BACKLOG 128
+#define NW_SHIM_INLINE_SNAPSHOT 4
 
-static void destroy_handle(nw_conn_handle *h) {
-    if (!h) return;
-    if (h->conn) nw_release(h->conn);
-    if (h->queue) dispatch_release(h->queue);
-    if (h->ready) dispatch_release(h->ready);
-    free(h);
+enum {
+    NW_SHIM_EVENT_STATE = 1,
+    NW_SHIM_EVENT_VIABILITY,
+    NW_SHIM_EVENT_BETTER_PATH,
+    NW_SHIM_EVENT_PATH,
+    NW_SHIM_EVENT_NEW_CONNECTION,
+    NW_SHIM_EVENT_ADVERTISED_ENDPOINT,
+    NW_SHIM_EVENT_NEW_GROUP,
+    NW_SHIM_EVENT_RECEIVE,
+    NW_SHIM_EVENT_RESULTS,
+    NW_SHIM_EVENT_SERVICE,
+    NW_SHIM_EVENT_SUMMARY,
+    NW_SHIM_EVENT_CANCEL,
+};
+
+typedef void (*nw_shim_fn)(void);
+
+typedef struct nw_shim_callback {
+    nw_shim_fn fn;
+    void *context;
+    NwShimContextCallback retain;
+    NwShimContextCallback release;
+} nw_shim_callback;
+
+typedef struct nw_shim_subscription {
+    struct nw_shim_subscription *next;
+    uint64_t token;
+    int kind;
+    nw_shim_callback callback;
+} nw_shim_subscription;
+
+typedef struct nw_shim_subscriptions {
+    pthread_mutex_t lock;
+    nw_shim_subscription *head;
+    uint64_t next_token;
+} nw_shim_subscriptions;
+
+typedef struct nw_shim_snapshot {
+    size_t count;
+    nw_shim_callback *items;
+    nw_shim_callback inline_items[NW_SHIM_INLINE_SNAPSHOT];
+} nw_shim_snapshot;
+
+static nw_shim_callback nw_shim_make_callback(
+    nw_shim_fn fn,
+    void *context,
+    NwShimContextCallback retain,
+    NwShimContextCallback release
+) {
+    nw_shim_callback callback = { fn, context, retain, release };
+    return callback;
 }
 
-static void cancel_and_wait_handle(nw_conn_handle *h) {
-    if (!h || !h->conn) return;
-    nw_connection_cancel(h->conn);
-    dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, 5LL * NSEC_PER_SEC);
-    while (atomic_load(&h->state_code) != 2 && atomic_load(&h->state_code) != 3) {
-        if (dispatch_semaphore_wait(h->ready, deadline) != 0) {
-            break;
-        }
+static void nw_shim_callback_release(const nw_shim_callback *callback) {
+    if (callback->release && callback->context) {
+        callback->release(callback->context);
     }
 }
 
-static void cancel_and_destroy_handle(nw_conn_handle *h) {
-    cancel_and_wait_handle(h);
-    destroy_handle(h);
+static void nw_shim_subscriptions_init(nw_shim_subscriptions *subs) {
+    pthread_mutex_init(&subs->lock, NULL);
+    subs->head = NULL;
+    subs->next_token = 1;
+}
+
+static uint64_t nw_shim_subscriptions_add(nw_shim_subscriptions *subs, int kind, nw_shim_callback callback) {
+    if (!callback.fn) {
+        nw_shim_callback_release(&callback);
+        return 0;
+    }
+    nw_shim_subscription *entry = (nw_shim_subscription *)calloc(1, sizeof(nw_shim_subscription));
+    if (!entry) {
+        nw_shim_callback_release(&callback);
+        return 0;
+    }
+    entry->kind = kind;
+    entry->callback = callback;
+    pthread_mutex_lock(&subs->lock);
+    entry->token = subs->next_token++;
+    nw_shim_subscription **link = &subs->head;
+    while (*link) {
+        link = &(*link)->next;
+    }
+    *link = entry;
+    uint64_t token = entry->token;
+    pthread_mutex_unlock(&subs->lock);
+    return token;
+}
+
+static void nw_shim_subscriptions_remove(nw_shim_subscriptions *subs, uint64_t token) {
+    if (token == 0) {
+        return;
+    }
+    nw_shim_subscription *found = NULL;
+    pthread_mutex_lock(&subs->lock);
+    for (nw_shim_subscription **link = &subs->head; *link; link = &(*link)->next) {
+        if ((*link)->token == token) {
+            found = *link;
+            *link = found->next;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&subs->lock);
+    if (found) {
+        nw_shim_callback_release(&found->callback);
+        free(found);
+    }
+}
+
+static void nw_shim_subscriptions_snapshot(nw_shim_subscriptions *subs, int kind, nw_shim_snapshot *snapshot) {
+    snapshot->count = 0;
+    snapshot->items = snapshot->inline_items;
+    pthread_mutex_lock(&subs->lock);
+    size_t wanted = 0;
+    for (nw_shim_subscription *entry = subs->head; entry; entry = entry->next) {
+        if (entry->kind == kind) {
+            wanted += 1;
+        }
+    }
+    size_t capacity = NW_SHIM_INLINE_SNAPSHOT;
+    if (wanted > capacity) {
+        nw_shim_callback *items = (nw_shim_callback *)calloc(wanted, sizeof(nw_shim_callback));
+        if (items) {
+            snapshot->items = items;
+            capacity = wanted;
+        }
+    }
+    for (nw_shim_subscription *entry = subs->head; entry && snapshot->count < capacity; entry = entry->next) {
+        if (entry->kind != kind) {
+            continue;
+        }
+        nw_shim_callback item = entry->callback;
+        if (item.retain && item.context) {
+            item.retain(item.context);
+        } else {
+            item.release = NULL;
+        }
+        snapshot->items[snapshot->count++] = item;
+    }
+    pthread_mutex_unlock(&subs->lock);
+}
+
+static void nw_shim_snapshot_release(nw_shim_snapshot *snapshot) {
+    for (size_t index = 0; index < snapshot->count; index++) {
+        nw_shim_callback_release(&snapshot->items[index]);
+    }
+    if (snapshot->items != snapshot->inline_items) {
+        free(snapshot->items);
+    }
+    snapshot->items = snapshot->inline_items;
+    snapshot->count = 0;
+}
+
+static void nw_shim_subscriptions_destroy(nw_shim_subscriptions *subs) {
+    pthread_mutex_lock(&subs->lock);
+    nw_shim_subscription *entry = subs->head;
+    subs->head = NULL;
+    pthread_mutex_unlock(&subs->lock);
+    while (entry) {
+        nw_shim_subscription *next = entry->next;
+        nw_shim_callback_release(&entry->callback);
+        free(entry);
+        entry = next;
+    }
+    pthread_mutex_destroy(&subs->lock);
+}
+
+static uint64_t nw_shim_now_ns(void) {
+    return clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+}
+
+static uint64_t nw_shim_deadline_after(int64_t timeout_ns) {
+    return nw_shim_now_ns() + (uint64_t)timeout_ns;
+}
+
+static bool nw_shim_cond_wait_until(pthread_cond_t *cond, pthread_mutex_t *lock, uint64_t deadline) {
+    uint64_t now = nw_shim_now_ns();
+    if (now >= deadline) {
+        return false;
+    }
+    uint64_t remaining = deadline - now;
+    struct timespec relative;
+    relative.tv_sec = (time_t)(remaining / NSEC_PER_SEC);
+    relative.tv_nsec = (long)(remaining % NSEC_PER_SEC);
+    pthread_cond_timedwait_relative_np(cond, lock, &relative);
+    return true;
+}
+
+typedef struct nw_shim_waiter {
+    _Atomic long refs;
+    pthread_mutex_t lock;
+    pthread_cond_t cond;
+    bool done;
+    void *value;
+} nw_shim_waiter;
+
+static nw_shim_waiter *nw_shim_waiter_create(long refs) {
+    nw_shim_waiter *waiter = (nw_shim_waiter *)calloc(1, sizeof(nw_shim_waiter));
+    if (!waiter) {
+        return NULL;
+    }
+    atomic_init(&waiter->refs, refs);
+    pthread_mutex_init(&waiter->lock, NULL);
+    pthread_cond_init(&waiter->cond, NULL);
+    return waiter;
+}
+
+static void nw_shim_waiter_release(nw_shim_waiter *waiter) {
+    if (atomic_fetch_sub_explicit(&waiter->refs, 1, memory_order_acq_rel) != 1) {
+        return;
+    }
+    if (waiter->value) {
+        nw_release(waiter->value);
+    }
+    pthread_cond_destroy(&waiter->cond);
+    pthread_mutex_destroy(&waiter->lock);
+    free(waiter);
+}
+
+static void nw_shim_waiter_complete(nw_shim_waiter *waiter, void *value) {
+    pthread_mutex_lock(&waiter->lock);
+    bool keep = !waiter->done;
+    if (keep) {
+        waiter->done = true;
+        waiter->value = value;
+        pthread_cond_broadcast(&waiter->cond);
+    }
+    pthread_mutex_unlock(&waiter->lock);
+    if (!keep && value) {
+        nw_release(value);
+    }
+}
+
+static void *nw_shim_waiter_wait_take(nw_shim_waiter *waiter, int64_t timeout_ns, bool *out_done) {
+    uint64_t deadline = nw_shim_deadline_after(timeout_ns);
+    pthread_mutex_lock(&waiter->lock);
+    while (!waiter->done) {
+        if (!nw_shim_cond_wait_until(&waiter->cond, &waiter->lock, deadline)) {
+            break;
+        }
+    }
+    bool done = waiter->done;
+    void *value = waiter->value;
+    waiter->value = NULL;
+    waiter->done = true;
+    pthread_mutex_unlock(&waiter->lock);
+    if (out_done) {
+        *out_done = done;
+    }
+    return value;
+}
+
+static ssize_t nw_shim_copy_received(dispatch_data_t content, uint8_t *out_buf, size_t max_len, size_t *out_size) {
+    size_t size = content ? dispatch_data_get_size(content) : 0;
+    if (out_size) {
+        *out_size = size;
+    }
+    if (size > max_len) {
+        return NW_MESSAGE_TOO_LARGE;
+    }
+    if (size == 0) {
+        return 0;
+    }
+    __block size_t copied = 0;
+    dispatch_data_apply(content, ^bool(dispatch_data_t region, size_t offset, const void *buffer, size_t length) {
+        (void)region;
+        (void)offset;
+        memcpy(out_buf + copied, buffer, length);
+        copied += length;
+        return true;
+    });
+    return (ssize_t)copied;
+}
+
+static uint32_t nw_shim_clamp_receive_length(size_t max_len) {
+    return max_len > UINT32_MAX ? UINT32_MAX : (uint32_t)max_len;
+}
+
+typedef struct nw_shim_acceptor nw_shim_acceptor;
+
+enum {
+    NW_SHIM_SLOT_NONE = 0,
+    NW_SHIM_SLOT_PENDING,
+    NW_SHIM_SLOT_READY,
+};
+
+typedef struct nw_conn_handle {
+    _Atomic long refs;
+    nw_connection_t conn;
+    dispatch_queue_t queue;
+    pthread_mutex_t lock;
+    pthread_cond_t cond;
+    int state;
+    bool waiting_error;
+    bool cancelled;
+    bool cancel_requested;
+    nw_shim_subscriptions subs;
+    nw_shim_acceptor *acceptor;
+    int slot;
+    struct nw_conn_handle *prev;
+    struct nw_conn_handle *next;
+} nw_conn_handle;
+
+struct nw_shim_acceptor {
+    pthread_mutex_t lock;
+    pthread_cond_t cond;
+    bool closed;
+    bool terminal;
+    bool keep_ready;
+    nw_conn_handle *pending_head;
+    nw_conn_handle *pending_tail;
+    size_t pending_count;
+    nw_conn_handle *ready_head;
+    nw_conn_handle *ready_tail;
+    size_t ready_count;
+    nw_shim_subscriptions *subs;
+    void *owner;
+    void (*retain_owner)(void *owner);
+    void (*release_owner)(void *owner);
+};
+
+static void nw_shim_conn_retain(nw_conn_handle *h) {
+    atomic_fetch_add_explicit(&h->refs, 1, memory_order_relaxed);
+}
+
+static void nw_shim_conn_release(nw_conn_handle *h) {
+    if (atomic_fetch_sub_explicit(&h->refs, 1, memory_order_acq_rel) != 1) {
+        return;
+    }
+    nw_shim_subscriptions_destroy(&h->subs);
+    nw_release(h->conn);
+    dispatch_release(h->queue);
+    pthread_cond_destroy(&h->cond);
+    pthread_mutex_destroy(&h->lock);
+    free(h);
+}
+
+static void nw_shim_conn_release_async(void *context) {
+    nw_shim_conn_release((nw_conn_handle *)context);
+}
+
+static void nw_shim_conn_cancel(nw_conn_handle *h) {
+    pthread_mutex_lock(&h->lock);
+    bool should_cancel = !h->cancel_requested && !h->cancelled;
+    h->cancel_requested = true;
+    pthread_mutex_unlock(&h->lock);
+    if (should_cancel) {
+        nw_connection_cancel(h->conn);
+    }
+}
+
+static void nw_shim_conn_close(nw_conn_handle *h) {
+    nw_shim_conn_cancel(h);
+    nw_shim_conn_release(h);
+}
+
+static void nw_shim_acceptor_on_state(nw_conn_handle *h, nw_connection_state_t state, bool has_error);
+
+static void nw_shim_conn_on_state(nw_conn_handle *h, nw_connection_state_t state, nw_error_t error) {
+    pthread_mutex_lock(&h->lock);
+    if (h->cancelled) {
+        pthread_mutex_unlock(&h->lock);
+        return;
+    }
+    h->state = (int)state;
+    h->waiting_error = state == nw_connection_state_waiting && error != NULL;
+    bool final_event = state == nw_connection_state_cancelled;
+    if (final_event) {
+        h->cancelled = true;
+    }
+    pthread_cond_broadcast(&h->cond);
+    pthread_mutex_unlock(&h->lock);
+
+    nw_shim_acceptor_on_state(h, state, error != NULL);
+
+    nw_shim_snapshot snapshot;
+    nw_shim_subscriptions_snapshot(&h->subs, NW_SHIM_EVENT_STATE, &snapshot);
+    for (size_t index = 0; index < snapshot.count; index++) {
+        ((ConnectionStateCallback)snapshot.items[index].fn)(
+            (int)state,
+            error ? nw_retain(error) : NULL,
+            snapshot.items[index].context);
+    }
+    nw_shim_snapshot_release(&snapshot);
+
+    if (final_event) {
+        nw_connection_set_viability_changed_handler(h->conn, NULL);
+        nw_connection_set_better_path_available_handler(h->conn, NULL);
+        nw_connection_set_path_changed_handler(h->conn, NULL);
+        dispatch_async_f(h->queue, h, nw_shim_conn_release_async);
+    }
+}
+
+static void nw_shim_conn_on_boolean(nw_conn_handle *h, int kind, bool value) {
+    nw_shim_snapshot snapshot;
+    nw_shim_subscriptions_snapshot(&h->subs, kind, &snapshot);
+    for (size_t index = 0; index < snapshot.count; index++) {
+        ((ConnectionBooleanCallback)snapshot.items[index].fn)(value ? 1 : 0, snapshot.items[index].context);
+    }
+    nw_shim_snapshot_release(&snapshot);
+}
+
+static void nw_shim_conn_on_path(nw_conn_handle *h, nw_path_t path) {
+    nw_shim_snapshot snapshot;
+    nw_shim_subscriptions_snapshot(&h->subs, NW_SHIM_EVENT_PATH, &snapshot);
+    for (size_t index = 0; index < snapshot.count; index++) {
+        ((ConnectionPathCallback)snapshot.items[index].fn)(
+            path ? nw_retain(path) : NULL,
+            snapshot.items[index].context);
+    }
+    nw_shim_snapshot_release(&snapshot);
+}
+
+static nw_conn_handle *nw_shim_conn_create(nw_connection_t conn, const char *label) {
+    if (!conn) {
+        return NULL;
+    }
+    nw_conn_handle *h = (nw_conn_handle *)calloc(1, sizeof(nw_conn_handle));
+    if (!h) {
+        nw_connection_cancel(conn);
+        nw_release(conn);
+        return NULL;
+    }
+    atomic_init(&h->refs, 2);
+    h->conn = conn;
+    h->queue = dispatch_queue_create(label ? label : "networkframework-rs.connection", DISPATCH_QUEUE_SERIAL);
+    pthread_mutex_init(&h->lock, NULL);
+    pthread_cond_init(&h->cond, NULL);
+    nw_shim_subscriptions_init(&h->subs);
+
+    nw_connection_set_queue(conn, h->queue);
+    nw_connection_set_state_changed_handler(conn, ^(nw_connection_state_t state, nw_error_t error) {
+        nw_shim_conn_on_state(h, state, error);
+    });
+    nw_connection_set_viability_changed_handler(conn, ^(bool value) {
+        nw_shim_conn_on_boolean(h, NW_SHIM_EVENT_VIABILITY, value);
+    });
+    nw_connection_set_better_path_available_handler(conn, ^(bool value) {
+        nw_shim_conn_on_boolean(h, NW_SHIM_EVENT_BETTER_PATH, value);
+    });
+    nw_connection_set_path_changed_handler(conn, ^(nw_path_t path) {
+        nw_shim_conn_on_path(h, path);
+    });
+    return h;
+}
+
+static int nw_shim_conn_wait_ready(nw_conn_handle *h, int64_t timeout_ns) {
+    uint64_t deadline = nw_shim_deadline_after(timeout_ns);
+    pthread_mutex_lock(&h->lock);
+    while (h->state != nw_connection_state_ready
+           && h->state != nw_connection_state_failed
+           && !h->waiting_error
+           && !h->cancelled) {
+        if (!nw_shim_cond_wait_until(&h->cond, &h->lock, deadline)) {
+            break;
+        }
+    }
+    int state = h->state;
+    bool failed = h->cancelled || h->waiting_error || state == nw_connection_state_failed;
+    pthread_mutex_unlock(&h->lock);
+    if (failed) {
+        return NW_CONNECT_FAILED;
+    }
+    return state == nw_connection_state_ready ? NW_OK : NW_TIMEOUT;
+}
+
+static void *nw_shim_conn_start_and_wait(nw_connection_t conn, const char *label, int64_t timeout_ns, int *out_status) {
+    nw_conn_handle *h = nw_shim_conn_create(conn, label);
+    if (!h) {
+        if (out_status) *out_status = NW_CONNECT_FAILED;
+        return NULL;
+    }
+    nw_connection_start(h->conn);
+    int status = nw_shim_conn_wait_ready(h, timeout_ns);
+    if (status != NW_OK) {
+        nw_shim_conn_close(h);
+        if (out_status) *out_status = status;
+        return NULL;
+    }
+    if (out_status) *out_status = NW_OK;
+    return h;
+}
+
+static void nw_shim_acceptor_init(
+    nw_shim_acceptor *acceptor,
+    nw_shim_subscriptions *subs,
+    void *owner,
+    void (*retain_owner)(void *owner),
+    void (*release_owner)(void *owner),
+    bool keep_ready
+) {
+    pthread_mutex_init(&acceptor->lock, NULL);
+    pthread_cond_init(&acceptor->cond, NULL);
+    acceptor->subs = subs;
+    acceptor->owner = owner;
+    acceptor->retain_owner = retain_owner;
+    acceptor->release_owner = release_owner;
+    acceptor->keep_ready = keep_ready;
+}
+
+static void nw_shim_acceptor_destroy(nw_shim_acceptor *acceptor) {
+    pthread_cond_destroy(&acceptor->cond);
+    pthread_mutex_destroy(&acceptor->lock);
+}
+
+static void nw_shim_conn_list_append(nw_conn_handle **head, nw_conn_handle **tail, nw_conn_handle *h) {
+    h->prev = *tail;
+    h->next = NULL;
+    if (*tail) {
+        (*tail)->next = h;
+    } else {
+        *head = h;
+    }
+    *tail = h;
+}
+
+static void nw_shim_conn_list_remove(nw_conn_handle **head, nw_conn_handle **tail, nw_conn_handle *h) {
+    if (h->prev) {
+        h->prev->next = h->next;
+    } else {
+        *head = h->next;
+    }
+    if (h->next) {
+        h->next->prev = h->prev;
+    } else {
+        *tail = h->prev;
+    }
+    h->prev = NULL;
+    h->next = NULL;
+}
+
+static nw_shim_acceptor *nw_shim_conn_copy_acceptor(nw_conn_handle *h) {
+    pthread_mutex_lock(&h->lock);
+    nw_shim_acceptor *acceptor = h->acceptor;
+    if (acceptor) {
+        acceptor->retain_owner(acceptor->owner);
+    }
+    pthread_mutex_unlock(&h->lock);
+    return acceptor;
+}
+
+static void nw_shim_conn_detach(nw_conn_handle *h) {
+    pthread_mutex_lock(&h->lock);
+    nw_shim_acceptor *acceptor = h->acceptor;
+    h->acceptor = NULL;
+    pthread_mutex_unlock(&h->lock);
+    if (acceptor) {
+        acceptor->release_owner(acceptor->owner);
+    }
+}
+
+static bool nw_shim_acceptor_unlink(nw_shim_acceptor *acceptor, nw_conn_handle *h, bool pending_only) {
+    if (h->slot == NW_SHIM_SLOT_PENDING) {
+        nw_shim_conn_list_remove(&acceptor->pending_head, &acceptor->pending_tail, h);
+        acceptor->pending_count -= 1;
+    } else if (h->slot == NW_SHIM_SLOT_READY && !pending_only) {
+        nw_shim_conn_list_remove(&acceptor->ready_head, &acceptor->ready_tail, h);
+        acceptor->ready_count -= 1;
+    } else {
+        return false;
+    }
+    h->slot = NW_SHIM_SLOT_NONE;
+    return true;
+}
+
+static void nw_shim_acceptor_evict(nw_conn_handle *h, bool pending_only) {
+    nw_shim_acceptor *acceptor = nw_shim_conn_copy_acceptor(h);
+    if (!acceptor) {
+        return;
+    }
+    pthread_mutex_lock(&acceptor->lock);
+    bool evicted = nw_shim_acceptor_unlink(acceptor, h, pending_only);
+    pthread_mutex_unlock(&acceptor->lock);
+    if (evicted) {
+        nw_shim_conn_detach(h);
+        nw_shim_conn_close(h);
+    }
+    acceptor->release_owner(acceptor->owner);
+}
+
+static void nw_shim_acceptor_timeout(void *context) {
+    nw_conn_handle *h = (nw_conn_handle *)context;
+    nw_shim_acceptor_evict(h, true);
+    nw_shim_conn_release(h);
+}
+
+static void nw_shim_acceptor_dispatch(nw_shim_acceptor *acceptor) {
+    for (;;) {
+        nw_shim_snapshot snapshot;
+        nw_shim_subscriptions_snapshot(acceptor->subs, NW_SHIM_EVENT_NEW_CONNECTION, &snapshot);
+        if (snapshot.count == 0 && acceptor->keep_ready) {
+            nw_shim_snapshot_release(&snapshot);
+            return;
+        }
+        pthread_mutex_lock(&acceptor->lock);
+        nw_conn_handle *h = acceptor->ready_head;
+        if (h) {
+            nw_shim_acceptor_unlink(acceptor, h, false);
+        }
+        pthread_mutex_unlock(&acceptor->lock);
+        if (!h) {
+            nw_shim_snapshot_release(&snapshot);
+            return;
+        }
+        nw_shim_conn_detach(h);
+        if (snapshot.count > 0) {
+            ((ListenerNewConnectionCallback)snapshot.items[0].fn)(h, snapshot.items[0].context);
+        } else {
+            nw_shim_conn_close(h);
+        }
+        nw_shim_snapshot_release(&snapshot);
+    }
+}
+
+static void nw_shim_acceptor_on_state(nw_conn_handle *h, nw_connection_state_t state, bool has_error) {
+    if (state == nw_connection_state_ready) {
+        nw_shim_acceptor *acceptor = nw_shim_conn_copy_acceptor(h);
+        if (!acceptor) {
+            return;
+        }
+        bool promoted = false;
+        pthread_mutex_lock(&acceptor->lock);
+        if (h->slot == NW_SHIM_SLOT_PENDING && !acceptor->closed) {
+            nw_shim_acceptor_unlink(acceptor, h, true);
+            nw_shim_conn_list_append(&acceptor->ready_head, &acceptor->ready_tail, h);
+            acceptor->ready_count += 1;
+            h->slot = NW_SHIM_SLOT_READY;
+            promoted = true;
+            pthread_cond_broadcast(&acceptor->cond);
+        }
+        pthread_mutex_unlock(&acceptor->lock);
+        if (promoted) {
+            nw_shim_acceptor_dispatch(acceptor);
+        }
+        acceptor->release_owner(acceptor->owner);
+    } else if (state == nw_connection_state_failed
+               || state == nw_connection_state_cancelled
+               || (state == nw_connection_state_waiting && has_error)) {
+        nw_shim_acceptor_evict(h, false);
+    }
+}
+
+static void nw_shim_acceptor_offer(nw_shim_acceptor *acceptor, nw_connection_t connection, const char *label) {
+    if (!connection) {
+        return;
+    }
+    pthread_mutex_lock(&acceptor->lock);
+    bool admit = !acceptor->closed
+        && acceptor->pending_count + acceptor->ready_count < NW_SHIM_ACCEPT_BACKLOG;
+    pthread_mutex_unlock(&acceptor->lock);
+    if (!admit) {
+        nw_connection_cancel(connection);
+        return;
+    }
+    nw_conn_handle *h = nw_shim_conn_create(nw_retain(connection), label);
+    if (!h) {
+        return;
+    }
+    acceptor->retain_owner(acceptor->owner);
+    pthread_mutex_lock(&h->lock);
+    h->acceptor = acceptor;
+    pthread_mutex_unlock(&h->lock);
+
+    pthread_mutex_lock(&acceptor->lock);
+    bool closed = acceptor->closed;
+    if (!closed) {
+        nw_shim_conn_list_append(&acceptor->pending_head, &acceptor->pending_tail, h);
+        acceptor->pending_count += 1;
+        h->slot = NW_SHIM_SLOT_PENDING;
+    }
+    pthread_mutex_unlock(&acceptor->lock);
+    if (closed) {
+        nw_shim_conn_detach(h);
+        nw_shim_conn_close(h);
+        return;
+    }
+    nw_shim_conn_retain(h);
+    dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, NW_SHIM_ACCEPT_TIMEOUT_NS), h->queue, h, nw_shim_acceptor_timeout);
+    nw_connection_start(h->conn);
+}
+
+static void *nw_shim_acceptor_accept(nw_shim_acceptor *acceptor, int *out_status) {
+    pthread_mutex_lock(&acceptor->lock);
+    while (!acceptor->ready_head && !acceptor->closed && !acceptor->terminal) {
+        pthread_cond_wait(&acceptor->cond, &acceptor->lock);
+    }
+    nw_conn_handle *h = acceptor->ready_head;
+    if (h) {
+        nw_shim_acceptor_unlink(acceptor, h, false);
+    }
+    pthread_mutex_unlock(&acceptor->lock);
+    if (!h) {
+        if (out_status) *out_status = NW_CANCELLED;
+        return NULL;
+    }
+    nw_shim_conn_detach(h);
+    if (out_status) *out_status = NW_OK;
+    return h;
+}
+
+static void nw_shim_acceptor_mark_terminal(nw_shim_acceptor *acceptor) {
+    pthread_mutex_lock(&acceptor->lock);
+    acceptor->terminal = true;
+    pthread_cond_broadcast(&acceptor->cond);
+    pthread_mutex_unlock(&acceptor->lock);
+}
+
+static void nw_shim_acceptor_close_list(nw_conn_handle *h) {
+    while (h) {
+        nw_conn_handle *next = h->next;
+        h->prev = NULL;
+        h->next = NULL;
+        nw_shim_conn_detach(h);
+        nw_shim_conn_close(h);
+        h = next;
+    }
+}
+
+static void nw_shim_acceptor_close(nw_shim_acceptor *acceptor) {
+    pthread_mutex_lock(&acceptor->lock);
+    acceptor->closed = true;
+    nw_conn_handle *pending = acceptor->pending_head;
+    nw_conn_handle *ready = acceptor->ready_head;
+    acceptor->pending_head = NULL;
+    acceptor->pending_tail = NULL;
+    acceptor->ready_head = NULL;
+    acceptor->ready_tail = NULL;
+    acceptor->pending_count = 0;
+    acceptor->ready_count = 0;
+    for (nw_conn_handle *h = pending; h; h = h->next) {
+        h->slot = NW_SHIM_SLOT_NONE;
+    }
+    for (nw_conn_handle *h = ready; h; h = h->next) {
+        h->slot = NW_SHIM_SLOT_NONE;
+    }
+    pthread_cond_broadcast(&acceptor->cond);
+    pthread_mutex_unlock(&acceptor->lock);
+    nw_shim_acceptor_close_list(pending);
+    nw_shim_acceptor_close_list(ready);
 }
 
 void *nw_shim_tcp_connect(const char *host, uint16_t port, int use_tls, int *out_status) {
@@ -62,53 +782,18 @@ void *nw_shim_tcp_connect(const char *host, uint16_t port, int use_tls, int *out
     nw_parameters_t params = nw_parameters_create_secure_tcp(
         use_tls ? NW_PARAMETERS_DEFAULT_CONFIGURATION : NW_PARAMETERS_DISABLE_PROTOCOL,
         NW_PARAMETERS_DEFAULT_CONFIGURATION);
+    if (!params) {
+        nw_release(endpoint);
+        if (out_status) *out_status = NW_CONNECT_FAILED;
+        return NULL;
+    }
 
     nw_connection_t conn = nw_connection_create(endpoint, params);
     nw_release(endpoint);
     nw_release(params);
     if (!conn) { if (out_status) *out_status = NW_CONNECT_FAILED; return NULL; }
 
-    nw_conn_handle *h = (nw_conn_handle *)calloc(1, sizeof(nw_conn_handle));
-    h->conn = conn;
-    h->queue = dispatch_queue_create("networkframework-rs.conn", DISPATCH_QUEUE_SERIAL);
-    h->ready = dispatch_semaphore_create(0);
-    atomic_store(&h->state_code, 0);
-
-    nw_connection_set_queue(conn, h->queue);
-
-    nw_connection_set_state_changed_handler(conn, ^(nw_connection_state_t state, nw_error_t error) {
-        (void)error;
-        if (state == nw_connection_state_ready) {
-            atomic_store(&h->state_code, 1);
-            dispatch_semaphore_signal(h->ready);
-        } else if (state == nw_connection_state_cancelled) {
-            atomic_store(&h->state_code, 2);
-            dispatch_semaphore_signal(h->ready);
-        } else if (state == nw_connection_state_failed) {
-            atomic_store(&h->state_code, 3);
-            dispatch_semaphore_signal(h->ready);
-        }
-    });
-
-    nw_connection_start(conn);
-
-    // Wait up to 30 s for ready.
-    dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, 30LL * NSEC_PER_SEC);
-    if (dispatch_semaphore_wait(h->ready, deadline) != 0) {
-        cancel_and_destroy_handle(h);
-        if (out_status) *out_status = NW_TIMEOUT;
-        return NULL;
-    }
-
-    int code = atomic_load(&h->state_code);
-    if (code != 1) {
-        cancel_and_destroy_handle(h);
-        if (out_status) *out_status = NW_CONNECT_FAILED;
-        return NULL;
-    }
-
-    if (out_status) *out_status = NW_OK;
-    return h;
+    return nw_shim_conn_start_and_wait(conn, "networkframework-rs.conn", NW_SHIM_CONNECT_TIMEOUT_NS, out_status);
 }
 
 int nw_shim_tcp_send(void *handle, const uint8_t *data, size_t len) {
@@ -134,47 +819,36 @@ int nw_shim_tcp_send(void *handle, const uint8_t *data, size_t len) {
 }
 
 // Returns number of bytes written into `out_buf` (positive) or negative status code.
-ssize_t nw_shim_tcp_receive(void *handle, uint8_t *out_buf, size_t max_len) {
+ssize_t nw_shim_tcp_receive(void *handle, uint8_t *out_buf, size_t max_len, size_t *out_size) {
     nw_conn_handle *h = (nw_conn_handle *)handle;
+    if (out_size) *out_size = 0;
     if (!h || !out_buf || max_len == 0) return NW_INVALID_ARG;
 
     __block ssize_t result = 0;
-    __block size_t copied_out = 0;
+    __block size_t size = 0;
     dispatch_semaphore_t done = dispatch_semaphore_create(0);
 
-    nw_connection_receive(h->conn, 1, (uint32_t)max_len,
+    nw_connection_receive(h->conn, 1, nw_shim_clamp_receive_length(max_len),
         ^(dispatch_data_t content, nw_content_context_t ctx, bool is_complete, nw_error_t error) {
             (void)ctx; (void)is_complete;
             if (error) {
                 result = NW_RECV_FAILED;
-            } else if (content) {
-                __block size_t copied = 0;
-                dispatch_data_apply(content,
-                    ^bool(dispatch_data_t region, size_t offset, const void *buffer, size_t size) {
-                        (void)region; (void)offset;
-                        size_t can = max_len - copied;
-                        if (can == 0) return false;
-                        size_t take = size < can ? size : can;
-                        memcpy(out_buf + copied, buffer, take);
-                        copied += take;
-                        return true;
-                    });
-                copied_out = copied;
-                result = (ssize_t)copied;
+            } else {
+                result = nw_shim_copy_received(content, out_buf, max_len, &size);
             }
             dispatch_semaphore_signal(done);
         });
 
     dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
     dispatch_release(done);
-    (void)copied_out;
+    if (out_size) *out_size = size;
     return result;
 }
 
 void nw_shim_tcp_close(void *handle) {
     nw_conn_handle *h = (nw_conn_handle *)handle;
     if (!h) return;
-    cancel_and_destroy_handle(h);
+    nw_shim_conn_close(h);
 }
 
 // ---------------------------------------------------------------------
@@ -182,40 +856,139 @@ void nw_shim_tcp_close(void *handle) {
 // ---------------------------------------------------------------------
 
 typedef struct nw_listener_handle {
+    _Atomic long refs;
     nw_listener_t listener;
     dispatch_queue_t queue;
-    dispatch_semaphore_t ready;
-    dispatch_semaphore_t accept_sem;
-    nw_connection_t pending;       // protected by accept_sem
-    _Atomic int state_code;        // 0=setup,1=ready,2=cancelled,3=failed
+    pthread_mutex_t lock;
+    pthread_cond_t cond;
+    int state;
+    bool cancelled;
+    bool cancel_requested;
+    bool advertised_installed;
+    bool group_installed;
     _Atomic uint16_t bound_port;
+    nw_shim_subscriptions subs;
+    nw_shim_acceptor acceptor;
 } nw_listener_handle;
 
-static void destroy_listener_handle(nw_listener_handle *h) {
-    if (!h) return;
-    if (h->pending) {
-        nw_connection_cancel(h->pending);
-        nw_release(h->pending);
+static void nw_shim_listener_retain_owner(void *owner) {
+    atomic_fetch_add_explicit(&((nw_listener_handle *)owner)->refs, 1, memory_order_relaxed);
+}
+
+static void nw_shim_listener_release_owner(void *owner) {
+    nw_listener_handle *h = (nw_listener_handle *)owner;
+    if (atomic_fetch_sub_explicit(&h->refs, 1, memory_order_acq_rel) != 1) {
+        return;
     }
-    if (h->listener) nw_release(h->listener);
-    if (h->queue) dispatch_release(h->queue);
-    if (h->ready) dispatch_release(h->ready);
-    if (h->accept_sem) dispatch_release(h->accept_sem);
+    nw_shim_acceptor_destroy(&h->acceptor);
+    nw_shim_subscriptions_destroy(&h->subs);
+    nw_release(h->listener);
+    dispatch_release(h->queue);
+    pthread_cond_destroy(&h->cond);
+    pthread_mutex_destroy(&h->lock);
     free(h);
 }
 
-static void cancel_and_destroy_listener_handle(nw_listener_handle *h) {
-    if (!h) return;
-    if (h->listener) {
-        nw_listener_set_state_changed_handler(h->listener, NULL);
-        nw_listener_set_new_connection_handler(h->listener, NULL);
-        nw_listener_cancel(h->listener);
-        if (h->queue) {
-            dispatch_sync(h->queue, ^{});
-        }
-        atomic_store(&h->state_code, 2);
+static void nw_shim_listener_release_async(void *context) {
+    nw_shim_listener_release_owner(context);
+}
+
+static void nw_shim_listener_on_state(nw_listener_handle *h, nw_listener_state_t state, nw_error_t error) {
+    pthread_mutex_lock(&h->lock);
+    if (h->cancelled) {
+        pthread_mutex_unlock(&h->lock);
+        return;
     }
-    destroy_listener_handle(h);
+    h->state = (int)state;
+    if (state == nw_listener_state_ready) {
+        atomic_store(&h->bound_port, nw_listener_get_port(h->listener));
+    }
+    bool final_event = state == nw_listener_state_cancelled;
+    if (final_event) {
+        h->cancelled = true;
+    }
+    pthread_cond_broadcast(&h->cond);
+    pthread_mutex_unlock(&h->lock);
+
+    if (state == nw_listener_state_failed || final_event) {
+        nw_shim_acceptor_mark_terminal(&h->acceptor);
+    }
+
+    nw_shim_snapshot snapshot;
+    nw_shim_subscriptions_snapshot(&h->subs, NW_SHIM_EVENT_STATE, &snapshot);
+    for (size_t index = 0; index < snapshot.count; index++) {
+        ((ListenerStateCallback)snapshot.items[index].fn)(
+            (int)state,
+            error ? nw_retain(error) : NULL,
+            snapshot.items[index].context);
+    }
+    nw_shim_snapshot_release(&snapshot);
+
+    if (final_event) {
+        dispatch_async_f(h->queue, h, nw_shim_listener_release_async);
+    }
+}
+
+static void nw_shim_listener_cancel(nw_listener_handle *h) {
+    pthread_mutex_lock(&h->lock);
+    bool should_cancel = !h->cancel_requested && !h->cancelled;
+    h->cancel_requested = true;
+    pthread_mutex_unlock(&h->lock);
+    if (should_cancel) {
+        nw_listener_cancel(h->listener);
+    }
+}
+
+static void nw_shim_listener_close_handle(nw_listener_handle *h) {
+    nw_shim_acceptor_close(&h->acceptor);
+    nw_shim_listener_cancel(h);
+    nw_shim_listener_release_owner(h);
+}
+
+static void *nw_shim_listener_start(nw_listener_t listener, const char *label, int *out_status) {
+    if (!listener) {
+        if (out_status) *out_status = NW_LISTEN_FAILED;
+        return NULL;
+    }
+    nw_listener_handle *h = (nw_listener_handle *)calloc(1, sizeof(nw_listener_handle));
+    if (!h) {
+        nw_release(listener);
+        if (out_status) *out_status = NW_LISTEN_FAILED;
+        return NULL;
+    }
+    atomic_init(&h->refs, 2);
+    h->listener = listener;
+    h->queue = dispatch_queue_create(label ? label : "networkframework-rs.listener", DISPATCH_QUEUE_SERIAL);
+    pthread_mutex_init(&h->lock, NULL);
+    pthread_cond_init(&h->cond, NULL);
+    nw_shim_subscriptions_init(&h->subs);
+    nw_shim_acceptor_init(&h->acceptor, &h->subs, h, nw_shim_listener_retain_owner, nw_shim_listener_release_owner, true);
+
+    nw_listener_set_queue(listener, h->queue);
+    nw_listener_set_state_changed_handler(listener, ^(nw_listener_state_t state, nw_error_t error) {
+        nw_shim_listener_on_state(h, state, error);
+    });
+    nw_listener_set_new_connection_handler(listener, ^(nw_connection_t connection) {
+        nw_shim_acceptor_offer(&h->acceptor, connection, "networkframework-rs.accepted");
+    });
+    nw_listener_start(listener);
+
+    uint64_t deadline = nw_shim_deadline_after(NW_SHIM_START_TIMEOUT_NS);
+    pthread_mutex_lock(&h->lock);
+    while (h->state != nw_listener_state_ready && h->state != nw_listener_state_failed && !h->cancelled) {
+        if (!nw_shim_cond_wait_until(&h->cond, &h->lock, deadline)) {
+            break;
+        }
+    }
+    bool ready = h->state == nw_listener_state_ready && !h->cancelled;
+    pthread_mutex_unlock(&h->lock);
+    if (!ready) {
+        nw_shim_listener_close_handle(h);
+        if (out_status) *out_status = NW_LISTEN_FAILED;
+        return NULL;
+    }
+    if (out_status) *out_status = NW_OK;
+    return h;
 }
 
 void *nw_shim_listener_create(uint16_t port, int use_tls, int *out_status) {
@@ -225,64 +998,11 @@ void *nw_shim_listener_create(uint16_t port, int use_tls, int *out_status) {
     nw_parameters_t params = nw_parameters_create_secure_tcp(
         use_tls ? NW_PARAMETERS_DEFAULT_CONFIGURATION : NW_PARAMETERS_DISABLE_PROTOCOL,
         NW_PARAMETERS_DEFAULT_CONFIGURATION);
+    if (!params) { if (out_status) *out_status = NW_LISTEN_FAILED; return NULL; }
 
     nw_listener_t listener = nw_listener_create_with_port(port_str, params);
     nw_release(params);
-    if (!listener) { if (out_status) *out_status = NW_LISTEN_FAILED; return NULL; }
-
-    nw_listener_handle *h = (nw_listener_handle *)calloc(1, sizeof(nw_listener_handle));
-    h->listener = listener;
-    h->queue = dispatch_queue_create("networkframework-rs.listener", DISPATCH_QUEUE_SERIAL);
-    h->ready = dispatch_semaphore_create(0);
-    h->accept_sem = dispatch_semaphore_create(0);
-    atomic_store(&h->state_code, 0);
-
-    nw_listener_set_queue(listener, h->queue);
-
-    nw_listener_set_state_changed_handler(listener, ^(nw_listener_state_t state, nw_error_t error) {
-        (void)error;
-        if (state == nw_listener_state_ready) {
-            atomic_store(&h->bound_port, nw_listener_get_port(listener));
-            atomic_store(&h->state_code, 1);
-            dispatch_semaphore_signal(h->ready);
-        } else if (state == nw_listener_state_cancelled) {
-            atomic_store(&h->state_code, 2);
-            dispatch_semaphore_signal(h->ready);
-        } else if (state == nw_listener_state_failed) {
-            atomic_store(&h->state_code, 3);
-            dispatch_semaphore_signal(h->ready);
-        }
-    });
-
-    nw_listener_set_new_connection_handler(listener, ^(nw_connection_t conn) {
-        // Hold the most recent pending connection. Caller must accept
-        // promptly or older ones get dropped.
-        nw_retain(conn);
-        if (h->pending) {
-            nw_connection_cancel(h->pending);
-            nw_release(h->pending);
-        }
-        h->pending = conn;
-        dispatch_semaphore_signal(h->accept_sem);
-    });
-
-    nw_listener_start(listener);
-
-    dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, 10LL * NSEC_PER_SEC);
-    if (dispatch_semaphore_wait(h->ready, deadline) != 0) {
-        cancel_and_destroy_listener_handle(h);
-        if (out_status) *out_status = NW_LISTEN_FAILED;
-        return NULL;
-    }
-
-    if (atomic_load(&h->state_code) != 1) {
-        cancel_and_destroy_listener_handle(h);
-        if (out_status) *out_status = NW_LISTEN_FAILED;
-        return NULL;
-    }
-
-    if (out_status) *out_status = NW_OK;
-    return h;
+    return nw_shim_listener_start(listener, "networkframework-rs.listener", out_status);
 }
 
 uint16_t nw_shim_listener_port(void *handle) {
@@ -295,50 +1015,55 @@ uint16_t nw_shim_listener_port(void *handle) {
 void *nw_shim_listener_accept(void *handle, int *out_status) {
     nw_listener_handle *h = (nw_listener_handle *)handle;
     if (!h) { if (out_status) *out_status = NW_INVALID_ARG; return NULL; }
-
-    dispatch_semaphore_wait(h->accept_sem, DISPATCH_TIME_FOREVER);
-    nw_connection_t conn = h->pending;
-    h->pending = NULL;
-    if (!conn) { if (out_status) *out_status = NW_CANCELLED; return NULL; }
-
-    nw_conn_handle *ch = (nw_conn_handle *)calloc(1, sizeof(nw_conn_handle));
-    ch->conn = conn;  // already retained when stored
-    ch->queue = dispatch_queue_create("networkframework-rs.accepted", DISPATCH_QUEUE_SERIAL);
-    ch->ready = dispatch_semaphore_create(0);
-    atomic_store(&ch->state_code, 0);
-
-    nw_connection_set_queue(conn, ch->queue);
-    nw_connection_set_state_changed_handler(conn, ^(nw_connection_state_t state, nw_error_t error) {
-        (void)error;
-        if (state == nw_connection_state_ready) {
-            atomic_store(&ch->state_code, 1);
-            dispatch_semaphore_signal(ch->ready);
-        } else if (state == nw_connection_state_cancelled) {
-            atomic_store(&ch->state_code, 2);
-            dispatch_semaphore_signal(ch->ready);
-        } else if (state == nw_connection_state_failed) {
-            atomic_store(&ch->state_code, 3);
-            dispatch_semaphore_signal(ch->ready);
-        }
-    });
-    nw_connection_start(conn);
-
-    dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, 10LL * NSEC_PER_SEC);
-    if (dispatch_semaphore_wait(ch->ready, deadline) != 0
-        || atomic_load(&ch->state_code) != 1) {
-        cancel_and_destroy_handle(ch);
-        if (out_status) *out_status = NW_CONNECT_FAILED;
-        return NULL;
-    }
-
-    if (out_status) *out_status = NW_OK;
-    return ch;
+    return nw_shim_acceptor_accept(&h->acceptor, out_status);
 }
 
 void nw_shim_listener_close(void *handle) {
     nw_listener_handle *h = (nw_listener_handle *)handle;
     if (!h) return;
-    cancel_and_destroy_listener_handle(h);
+    nw_shim_listener_close_handle(h);
+}
+
+uint64_t nw_shim_listener_subscribe_state(
+    void *handle,
+    ListenerStateCallback callback,
+    void *context,
+    NwShimContextCallback retain,
+    NwShimContextCallback release
+) {
+    nw_listener_handle *h = (nw_listener_handle *)handle;
+    nw_shim_callback entry = nw_shim_make_callback((nw_shim_fn)callback, context, retain, release);
+    if (!h) {
+        nw_shim_callback_release(&entry);
+        return 0;
+    }
+    return nw_shim_subscriptions_add(&h->subs, NW_SHIM_EVENT_STATE, entry);
+}
+
+uint64_t nw_shim_listener_subscribe_new_connection(
+    void *handle,
+    ListenerNewConnectionCallback callback,
+    void *context,
+    NwShimContextCallback retain,
+    NwShimContextCallback release
+) {
+    nw_listener_handle *h = (nw_listener_handle *)handle;
+    nw_shim_callback entry = nw_shim_make_callback((nw_shim_fn)callback, context, retain, release);
+    if (!h) {
+        nw_shim_callback_release(&entry);
+        return 0;
+    }
+    uint64_t token = nw_shim_subscriptions_add(&h->subs, NW_SHIM_EVENT_NEW_CONNECTION, entry);
+    if (token) {
+        nw_shim_acceptor_dispatch(&h->acceptor);
+    }
+    return token;
+}
+
+void nw_shim_listener_unsubscribe(void *handle, uint64_t token) {
+    nw_listener_handle *h = (nw_listener_handle *)handle;
+    if (!h) return;
+    nw_shim_subscriptions_remove(&h->subs, token);
 }
 
 // ---------------------------------------------------------------------
@@ -356,110 +1081,251 @@ void *nw_shim_udp_connect(const char *host, uint16_t port, int *out_status) {
     nw_parameters_t params = nw_parameters_create_secure_udp(
         NW_PARAMETERS_DISABLE_PROTOCOL,
         NW_PARAMETERS_DEFAULT_CONFIGURATION);
+    if (!params) {
+        nw_release(endpoint);
+        if (out_status) *out_status = NW_CONNECT_FAILED;
+        return NULL;
+    }
 
     nw_connection_t conn = nw_connection_create(endpoint, params);
     nw_release(endpoint);
     nw_release(params);
     if (!conn) { if (out_status) *out_status = NW_CONNECT_FAILED; return NULL; }
 
-    nw_conn_handle *h = (nw_conn_handle *)calloc(1, sizeof(nw_conn_handle));
-    h->conn = conn;
-    h->queue = dispatch_queue_create("networkframework-rs.udp", DISPATCH_QUEUE_SERIAL);
-    h->ready = dispatch_semaphore_create(0);
-    atomic_store(&h->state_code, 0);
-
-    nw_connection_set_queue(conn, h->queue);
-
-    nw_connection_set_state_changed_handler(conn, ^(nw_connection_state_t state, nw_error_t error) {
-        (void)error;
-        if (state == nw_connection_state_ready) {
-            atomic_store(&h->state_code, 1);
-            dispatch_semaphore_signal(h->ready);
-        } else if (state == nw_connection_state_cancelled) {
-            atomic_store(&h->state_code, 2);
-            dispatch_semaphore_signal(h->ready);
-        } else if (state == nw_connection_state_failed) {
-            atomic_store(&h->state_code, 3);
-            dispatch_semaphore_signal(h->ready);
-        }
-    });
-
-    nw_connection_start(conn);
-
-    dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, 10LL * NSEC_PER_SEC);
-    if (dispatch_semaphore_wait(h->ready, deadline) != 0
-        || atomic_load(&h->state_code) != 1) {
-        cancel_and_destroy_handle(h);
-        if (out_status) *out_status = NW_CONNECT_FAILED;
-        return NULL;
-    }
-
-    if (out_status) *out_status = NW_OK;
-    return h;
+    return nw_shim_conn_start_and_wait(conn, "networkframework-rs.udp", NW_SHIM_START_TIMEOUT_NS, out_status);
 }
 
-// UDP send / receive / close all use the same TCP shim entrypoints
-// (nw_connection_send / nw_connection_receive), so callers can just use
-// nw_shim_tcp_send / nw_shim_tcp_receive / nw_shim_tcp_close with a UDP
-// handle.
+// UDP send and close use the TCP shim entrypoints (nw_shim_tcp_send /
+// nw_shim_tcp_close). Receives go through nw_shim_connection_receive_message
+// so that each call returns one whole datagram.
 
 // ---------------------------------------------------------------------
 // Path monitor (network reachability / interface changes)
 // ---------------------------------------------------------------------
 
 typedef struct nw_path_handle {
+    _Atomic long refs;
     nw_path_monitor_t monitor;
     dispatch_queue_t queue;
-    void (*callback)(int satisfied, int interface_type, void *user_info);
-    void *user_info;
+    pthread_mutex_t lock;
     nw_path_t latest_path;
+    bool cancelled;
+    bool cancel_requested;
+    nw_shim_subscriptions subs;
 } nw_path_handle;
 
-// interface_type matches nw_interface_type_t:
-//   0=other, 1=wifi, 2=cellular, 3=wired, 4=loopback
-void *nw_shim_path_monitor_start(
-    void (*callback)(int satisfied, int interface_type, void *user_info),
-    void *user_info
-) {
-    nw_path_handle *h = (nw_path_handle *)calloc(1, sizeof(nw_path_handle));
-    h->monitor = nw_path_monitor_create();
-    h->queue = dispatch_queue_create("networkframework-rs.path", DISPATCH_QUEUE_SERIAL);
-    h->callback = callback;
-    h->user_info = user_info;
-
-    nw_path_monitor_set_queue(h->monitor, h->queue);
-    nw_path_monitor_set_update_handler(h->monitor, ^(nw_path_t path) {
-        if (h->latest_path) {
-            nw_release(h->latest_path);
-            h->latest_path = NULL;
-        }
-        if (path) {
-            h->latest_path = nw_retain(path);
-        }
-        if (!h->callback) return;
-        int satisfied = (nw_path_get_status(path) == nw_path_status_satisfied) ? 1 : 0;
-        int iface = 0;
-        if (nw_path_uses_interface_type(path, nw_interface_type_wifi)) iface = 1;
-        else if (nw_path_uses_interface_type(path, nw_interface_type_cellular)) iface = 2;
-        else if (nw_path_uses_interface_type(path, nw_interface_type_wired)) iface = 3;
-        else if (nw_path_uses_interface_type(path, nw_interface_type_loopback)) iface = 4;
-        h->callback(satisfied, iface, h->user_info);
-    });
-    nw_path_monitor_start(h->monitor);
-    return h;
-}
-
-void nw_shim_path_monitor_stop(void *handle) {
-    nw_path_handle *h = (nw_path_handle *)handle;
-    if (!h) return;
-    nw_path_monitor_cancel(h->monitor);
-    dispatch_sync(h->queue, ^{});
+static void nw_shim_path_release(nw_path_handle *h) {
+    if (atomic_fetch_sub_explicit(&h->refs, 1, memory_order_acq_rel) != 1) {
+        return;
+    }
+    nw_shim_subscriptions_destroy(&h->subs);
     if (h->latest_path) {
         nw_release(h->latest_path);
     }
     nw_release(h->monitor);
     dispatch_release(h->queue);
+    pthread_mutex_destroy(&h->lock);
     free(h);
+}
+
+static void nw_shim_path_release_async(void *context) {
+    nw_shim_path_release((nw_path_handle *)context);
+}
+
+static int nw_shim_path_interface_summary(nw_path_t path) {
+    if (nw_path_uses_interface_type(path, nw_interface_type_wifi)) return 1;
+    if (nw_path_uses_interface_type(path, nw_interface_type_cellular)) return 2;
+    if (nw_path_uses_interface_type(path, nw_interface_type_wired)) return 3;
+    if (nw_path_uses_interface_type(path, nw_interface_type_loopback)) return 4;
+    return 0;
+}
+
+static void nw_shim_path_on_update(nw_path_handle *h, nw_path_t path) {
+    pthread_mutex_lock(&h->lock);
+    nw_path_t previous = h->latest_path;
+    h->latest_path = path ? nw_retain(path) : NULL;
+    pthread_mutex_unlock(&h->lock);
+    if (previous) {
+        nw_release(previous);
+    }
+    if (!path) {
+        return;
+    }
+
+    nw_shim_snapshot snapshot;
+    nw_shim_subscriptions_snapshot(&h->subs, NW_SHIM_EVENT_SUMMARY, &snapshot);
+    if (snapshot.count > 0) {
+        int satisfied = nw_path_get_status(path) == nw_path_status_satisfied ? 1 : 0;
+        int interface_type = nw_shim_path_interface_summary(path);
+        for (size_t index = 0; index < snapshot.count; index++) {
+            ((PathMonitorCallback)snapshot.items[index].fn)(satisfied, interface_type, snapshot.items[index].context);
+        }
+    }
+    nw_shim_snapshot_release(&snapshot);
+
+    nw_shim_subscriptions_snapshot(&h->subs, NW_SHIM_EVENT_PATH, &snapshot);
+    for (size_t index = 0; index < snapshot.count; index++) {
+        ((ConnectionPathCallback)snapshot.items[index].fn)(nw_retain(path), snapshot.items[index].context);
+    }
+    nw_shim_snapshot_release(&snapshot);
+}
+
+static void nw_shim_path_on_cancel(nw_path_handle *h) {
+    pthread_mutex_lock(&h->lock);
+    bool already = h->cancelled;
+    h->cancelled = true;
+    pthread_mutex_unlock(&h->lock);
+    if (already) {
+        return;
+    }
+    nw_shim_snapshot snapshot;
+    nw_shim_subscriptions_snapshot(&h->subs, NW_SHIM_EVENT_CANCEL, &snapshot);
+    for (size_t index = 0; index < snapshot.count; index++) {
+        ((PathMonitorCancelCallback)snapshot.items[index].fn)(snapshot.items[index].context);
+    }
+    nw_shim_snapshot_release(&snapshot);
+    dispatch_async_f(h->queue, h, nw_shim_path_release_async);
+}
+
+static void *nw_shim_path_start(
+    nw_path_monitor_t monitor,
+    const char *label,
+    PathMonitorCallback callback,
+    void *context,
+    NwShimContextCallback retain,
+    NwShimContextCallback release
+) {
+    nw_shim_callback entry = nw_shim_make_callback((nw_shim_fn)callback, context, retain, release);
+    if (!monitor) {
+        nw_shim_callback_release(&entry);
+        return NULL;
+    }
+    nw_path_handle *h = (nw_path_handle *)calloc(1, sizeof(nw_path_handle));
+    if (!h) {
+        nw_release(monitor);
+        nw_shim_callback_release(&entry);
+        return NULL;
+    }
+    atomic_init(&h->refs, 2);
+    h->monitor = monitor;
+    h->queue = dispatch_queue_create(label, DISPATCH_QUEUE_SERIAL);
+    pthread_mutex_init(&h->lock, NULL);
+    nw_shim_subscriptions_init(&h->subs);
+    nw_shim_subscriptions_add(&h->subs, NW_SHIM_EVENT_SUMMARY, entry);
+
+    nw_path_monitor_set_queue(monitor, h->queue);
+    nw_path_monitor_set_update_handler(monitor, ^(nw_path_t path) {
+        nw_shim_path_on_update(h, path);
+    });
+    nw_path_monitor_set_cancel_handler(monitor, ^{
+        nw_shim_path_on_cancel(h);
+    });
+    nw_path_monitor_start(monitor);
+    return h;
+}
+
+// interface_type matches nw_interface_type_t:
+//   0=other, 1=wifi, 2=cellular, 3=wired, 4=loopback
+void *nw_shim_path_monitor_start(
+    PathMonitorCallback callback,
+    void *context,
+    NwShimContextCallback retain,
+    NwShimContextCallback release
+) {
+    return nw_shim_path_start(nw_path_monitor_create(), "networkframework-rs.path", callback, context, retain, release);
+}
+
+void *nw_shim_path_monitor_start_with_type(
+    int interface_type,
+    PathMonitorCallback callback,
+    void *context,
+    NwShimContextCallback retain,
+    NwShimContextCallback release
+) {
+    return nw_shim_path_start(
+        nw_path_monitor_create_with_type((nw_interface_type_t)interface_type),
+        "networkframework-rs.path.type",
+        callback,
+        context,
+        retain,
+        release);
+}
+
+void *nw_shim_path_monitor_start_for_ethernet_channel(
+    PathMonitorCallback callback,
+    void *context,
+    NwShimContextCallback retain,
+    NwShimContextCallback release
+) {
+    return nw_shim_path_start(
+        nw_path_monitor_create_for_ethernet_channel(),
+        "networkframework-rs.path.ethernet",
+        callback,
+        context,
+        retain,
+        release);
+}
+
+void nw_shim_path_monitor_stop(void *handle) {
+    nw_path_handle *h = (nw_path_handle *)handle;
+    if (!h) return;
+    pthread_mutex_lock(&h->lock);
+    bool should_cancel = !h->cancel_requested && !h->cancelled;
+    h->cancel_requested = true;
+    pthread_mutex_unlock(&h->lock);
+    if (should_cancel) {
+        nw_path_monitor_cancel(h->monitor);
+    }
+    nw_shim_path_release(h);
+}
+
+void *nw_shim_path_monitor_copy_latest_path(void *handle) {
+    nw_path_handle *h = (nw_path_handle *)handle;
+    if (!h) {
+        return NULL;
+    }
+    pthread_mutex_lock(&h->lock);
+    nw_path_t snapshot = h->latest_path ? nw_retain(h->latest_path) : NULL;
+    pthread_mutex_unlock(&h->lock);
+    return snapshot;
+}
+
+uint64_t nw_shim_path_monitor_subscribe_update(
+    void *handle,
+    ConnectionPathCallback callback,
+    void *context,
+    NwShimContextCallback retain,
+    NwShimContextCallback release
+) {
+    nw_path_handle *h = (nw_path_handle *)handle;
+    nw_shim_callback entry = nw_shim_make_callback((nw_shim_fn)callback, context, retain, release);
+    if (!h) {
+        nw_shim_callback_release(&entry);
+        return 0;
+    }
+    return nw_shim_subscriptions_add(&h->subs, NW_SHIM_EVENT_PATH, entry);
+}
+
+uint64_t nw_shim_path_monitor_subscribe_cancel(
+    void *handle,
+    PathMonitorCancelCallback callback,
+    void *context,
+    NwShimContextCallback retain,
+    NwShimContextCallback release
+) {
+    nw_path_handle *h = (nw_path_handle *)handle;
+    nw_shim_callback entry = nw_shim_make_callback((nw_shim_fn)callback, context, retain, release);
+    if (!h) {
+        nw_shim_callback_release(&entry);
+        return 0;
+    }
+    return nw_shim_subscriptions_add(&h->subs, NW_SHIM_EVENT_CANCEL, entry);
+}
+
+void nw_shim_path_monitor_unsubscribe(void *handle, uint64_t token) {
+    nw_path_handle *h = (nw_path_handle *)handle;
+    if (!h) return;
+    nw_shim_subscriptions_remove(&h->subs, token);
 }
 
 // ---------------------------------------------------------------------
@@ -467,85 +1333,227 @@ void nw_shim_path_monitor_stop(void *handle) {
 // ---------------------------------------------------------------------
 
 typedef struct nw_browser_handle {
+    _Atomic long refs;
     nw_browser_t browser;
     dispatch_queue_t queue;
-    void (*found_callback)(const char *name, const char *service_type,
-                           const char *domain, void *user_info);
-    void (*lost_callback)(const char *name, const char *service_type,
-                          const char *domain, void *user_info);
-    void *user_info;
+    pthread_mutex_t lock;
+    bool cancelled;
+    bool cancel_requested;
+    nw_shim_subscriptions subs;
 } nw_browser_handle;
 
-void *nw_shim_browser_start(
-    const char *service_type,
-    const char *domain,
-    void (*found_callback)(const char *name, const char *service_type,
-                           const char *domain, void *user_info),
-    void (*lost_callback)(const char *name, const char *service_type,
-                          const char *domain, void *user_info),
-    void *user_info
-) {
-    if (!service_type) return NULL;
-    nw_browse_descriptor_t desc = nw_browse_descriptor_create_bonjour_service(
-        service_type, domain);
-    if (!desc) return NULL;
-    nw_parameters_t params = nw_parameters_create();
-    nw_browser_t browser = nw_browser_create(desc, params);
-    nw_release(desc);
-    nw_release(params);
-    if (!browser) return NULL;
+static void nw_shim_browser_release(nw_browser_handle *h) {
+    if (atomic_fetch_sub_explicit(&h->refs, 1, memory_order_acq_rel) != 1) {
+        return;
+    }
+    nw_shim_subscriptions_destroy(&h->subs);
+    nw_release(h->browser);
+    dispatch_release(h->queue);
+    pthread_mutex_destroy(&h->lock);
+    free(h);
+}
 
+static void nw_shim_browser_release_async(void *context) {
+    nw_shim_browser_release((nw_browser_handle *)context);
+}
+
+static void nw_shim_browser_on_state(nw_browser_handle *h, nw_browser_state_t state, nw_error_t error) {
+    pthread_mutex_lock(&h->lock);
+    if (h->cancelled) {
+        pthread_mutex_unlock(&h->lock);
+        return;
+    }
+    bool final_event = state == nw_browser_state_cancelled;
+    if (final_event) {
+        h->cancelled = true;
+    }
+    pthread_mutex_unlock(&h->lock);
+
+    nw_shim_snapshot snapshot;
+    nw_shim_subscriptions_snapshot(&h->subs, NW_SHIM_EVENT_STATE, &snapshot);
+    for (size_t index = 0; index < snapshot.count; index++) {
+        ((BrowserStateChangedCallback)snapshot.items[index].fn)(
+            (int)state,
+            error ? nw_retain(error) : NULL,
+            snapshot.items[index].context);
+    }
+    nw_shim_snapshot_release(&snapshot);
+
+    if (final_event) {
+        dispatch_async_f(h->queue, h, nw_shim_browser_release_async);
+    }
+}
+
+static void nw_shim_browser_on_results(
+    nw_browser_handle *h,
+    nw_browse_result_t old_result,
+    nw_browse_result_t new_result,
+    bool batch_complete
+) {
+    nw_shim_snapshot snapshot;
+    nw_shim_subscriptions_snapshot(&h->subs, NW_SHIM_EVENT_RESULTS, &snapshot);
+    if (snapshot.count > 0) {
+        uint64_t changes = nw_browse_result_get_changes(old_result, new_result);
+        for (size_t index = 0; index < snapshot.count; index++) {
+            ((BrowseResultChangedCallback)snapshot.items[index].fn)(
+                old_result ? nw_retain(old_result) : NULL,
+                new_result ? nw_retain(new_result) : NULL,
+                changes,
+                batch_complete ? 1 : 0,
+                snapshot.items[index].context);
+        }
+    }
+    nw_shim_snapshot_release(&snapshot);
+
+    if ((old_result == NULL) == (new_result == NULL)) {
+        return;
+    }
+    nw_shim_subscriptions_snapshot(&h->subs, NW_SHIM_EVENT_SERVICE, &snapshot);
+    if (snapshot.count > 0) {
+        nw_endpoint_t ep = nw_browse_result_copy_endpoint(new_result ? new_result : old_result);
+        if (ep) {
+            const char *name = nw_endpoint_get_bonjour_service_name(ep);
+            const char *type = nw_endpoint_get_bonjour_service_type(ep);
+            const char *dom = nw_endpoint_get_bonjour_service_domain(ep);
+            if (!name || !name[0]) {
+                name = nw_endpoint_get_hostname(ep);
+            }
+            for (size_t index = 0; index < snapshot.count; index++) {
+                ((BrowserServiceEventCallback)snapshot.items[index].fn)(
+                    new_result ? 1 : 0,
+                    name ? name : "",
+                    type ? type : "",
+                    dom ? dom : "",
+                    snapshot.items[index].context);
+            }
+            nw_release(ep);
+        }
+    }
+    nw_shim_snapshot_release(&snapshot);
+}
+
+static void *nw_shim_browser_start_common(void *descriptor, void *parameters, int kind, nw_shim_callback entry, const char *label) {
+    if (!descriptor) {
+        nw_shim_callback_release(&entry);
+        return NULL;
+    }
+    nw_parameters_t params = parameters ? nw_parameters_copy((nw_parameters_t)parameters) : nw_parameters_create();
+    if (!params) {
+        nw_shim_callback_release(&entry);
+        return NULL;
+    }
+    nw_browser_t browser = nw_browser_create((nw_browse_descriptor_t)descriptor, params);
+    nw_release(params);
+    if (!browser) {
+        nw_shim_callback_release(&entry);
+        return NULL;
+    }
     nw_browser_handle *h = (nw_browser_handle *)calloc(1, sizeof(nw_browser_handle));
+    if (!h) {
+        nw_release(browser);
+        nw_shim_callback_release(&entry);
+        return NULL;
+    }
+    atomic_init(&h->refs, 2);
     h->browser = browser;
-    h->queue = dispatch_queue_create("networkframework-rs.browser", DISPATCH_QUEUE_SERIAL);
-    h->found_callback = found_callback;
-    h->lost_callback = lost_callback;
-    h->user_info = user_info;
+    h->queue = dispatch_queue_create(label, DISPATCH_QUEUE_SERIAL);
+    pthread_mutex_init(&h->lock, NULL);
+    nw_shim_subscriptions_init(&h->subs);
+    nw_shim_subscriptions_add(&h->subs, kind, entry);
 
     nw_browser_set_queue(browser, h->queue);
-
+    nw_browser_set_state_changed_handler(browser, ^(nw_browser_state_t state, nw_error_t error) {
+        nw_shim_browser_on_state(h, state, error);
+    });
     nw_browser_set_browse_results_changed_handler(browser,
         ^(nw_browse_result_t old_result, nw_browse_result_t new_result, bool batch_complete) {
-            (void)batch_complete;
-            if (!old_result && new_result) {
-                // added
-                nw_endpoint_t ep = nw_browse_result_copy_endpoint(new_result);
-                if (ep && h->found_callback) {
-                    const char *name = nw_endpoint_get_bonjour_service_name(ep);
-                    const char *type = nw_endpoint_get_bonjour_service_type(ep);
-                    const char *dom = nw_endpoint_get_bonjour_service_domain(ep);
-                    h->found_callback(
-                        name ? name : "", type ? type : "", dom ? dom : "",
-                        h->user_info);
-                }
-                if (ep) nw_release(ep);
-            } else if (old_result && !new_result) {
-                // removed
-                nw_endpoint_t ep = nw_browse_result_copy_endpoint(old_result);
-                if (ep && h->lost_callback) {
-                    const char *name = nw_endpoint_get_bonjour_service_name(ep);
-                    const char *type = nw_endpoint_get_bonjour_service_type(ep);
-                    const char *dom = nw_endpoint_get_bonjour_service_domain(ep);
-                    h->lost_callback(
-                        name ? name : "", type ? type : "", dom ? dom : "",
-                        h->user_info);
-                }
-                if (ep) nw_release(ep);
-            }
+            nw_shim_browser_on_results(h, old_result, new_result, batch_complete);
         });
-
     nw_browser_start(browser);
     return h;
+}
+
+void *nw_shim_browser_start_with_descriptor(
+    void *descriptor,
+    void *parameters,
+    BrowserServiceEventCallback callback,
+    void *context,
+    NwShimContextCallback retain,
+    NwShimContextCallback release
+) {
+    return nw_shim_browser_start_common(
+        descriptor,
+        parameters,
+        NW_SHIM_EVENT_SERVICE,
+        nw_shim_make_callback((nw_shim_fn)callback, context, retain, release),
+        "networkframework-rs.browser");
+}
+
+void *nw_shim_browser_start_results_with_descriptor(
+    void *descriptor,
+    void *parameters,
+    BrowseResultChangedCallback callback,
+    void *context,
+    NwShimContextCallback retain,
+    NwShimContextCallback release
+) {
+    return nw_shim_browser_start_common(
+        descriptor,
+        parameters,
+        NW_SHIM_EVENT_RESULTS,
+        nw_shim_make_callback((nw_shim_fn)callback, context, retain, release),
+        "networkframework-rs.browser.results");
+}
+
+uint64_t nw_shim_browser_subscribe_state(
+    void *handle,
+    BrowserStateChangedCallback callback,
+    void *context,
+    NwShimContextCallback retain,
+    NwShimContextCallback release
+) {
+    nw_browser_handle *h = (nw_browser_handle *)handle;
+    nw_shim_callback entry = nw_shim_make_callback((nw_shim_fn)callback, context, retain, release);
+    if (!h) {
+        nw_shim_callback_release(&entry);
+        return 0;
+    }
+    return nw_shim_subscriptions_add(&h->subs, NW_SHIM_EVENT_STATE, entry);
+}
+
+uint64_t nw_shim_browser_subscribe_results(
+    void *handle,
+    BrowseResultChangedCallback callback,
+    void *context,
+    NwShimContextCallback retain,
+    NwShimContextCallback release
+) {
+    nw_browser_handle *h = (nw_browser_handle *)handle;
+    nw_shim_callback entry = nw_shim_make_callback((nw_shim_fn)callback, context, retain, release);
+    if (!h) {
+        nw_shim_callback_release(&entry);
+        return 0;
+    }
+    return nw_shim_subscriptions_add(&h->subs, NW_SHIM_EVENT_RESULTS, entry);
+}
+
+void nw_shim_browser_unsubscribe(void *handle, uint64_t token) {
+    nw_browser_handle *h = (nw_browser_handle *)handle;
+    if (!h) return;
+    nw_shim_subscriptions_remove(&h->subs, token);
 }
 
 void nw_shim_browser_stop(void *handle) {
     nw_browser_handle *h = (nw_browser_handle *)handle;
     if (!h) return;
-    nw_browser_cancel(h->browser);
-    dispatch_sync(h->queue, ^{});
-    nw_release(h->browser);
-    dispatch_release(h->queue);
-    free(h);
+    pthread_mutex_lock(&h->lock);
+    bool should_cancel = !h->cancel_requested && !h->cancelled;
+    h->cancel_requested = true;
+    pthread_mutex_unlock(&h->lock);
+    if (should_cancel) {
+        nw_browser_cancel(h->browser);
+    }
+    nw_shim_browser_release(h);
 }
 
 // ---------------------------------------------------------------------
@@ -554,26 +1562,24 @@ void nw_shim_browser_stop(void *handle) {
 // Builds a websocket connection by chaining ws -> tcp / tls protocols
 // into a custom nw_parameters_t.
 
-void *nw_shim_ws_connect(const char *host, uint16_t port, const char *path, int use_tls, int *out_status) {
-    if (!host) { if (out_status) *out_status = NW_INVALID_ARG; return NULL; }
-    (void)path; // path is encoded in the URL endpoint below.
+void *nw_shim_ws_connect(const char *url, int use_tls, int *out_status) {
+    if (!url) { if (out_status) *out_status = NW_INVALID_ARG; return NULL; }
 
     nw_parameters_t params = nw_parameters_create_secure_tcp(
         use_tls ? NW_PARAMETERS_DEFAULT_CONFIGURATION : NW_PARAMETERS_DISABLE_PROTOCOL,
         NW_PARAMETERS_DEFAULT_CONFIGURATION);
+    if (!params) { if (out_status) *out_status = NW_CONNECT_FAILED; return NULL; }
 
     // Insert WebSocket framing on top of (TLS)TCP.
     nw_protocol_options_t ws_opts = nw_ws_create_options(nw_ws_version_13);
     nw_protocol_stack_t stack = nw_parameters_copy_default_protocol_stack(params);
-    nw_protocol_stack_prepend_application_protocol(stack, ws_opts);
-    nw_release(ws_opts);
-    nw_release(stack);
+    if (stack && ws_opts) {
+        nw_protocol_stack_prepend_application_protocol(stack, ws_opts);
+    }
+    if (ws_opts) nw_release(ws_opts);
+    if (stack) nw_release(stack);
 
     // URL endpoint encodes ws:// or wss:// + host + port + path.
-    char url[2048];
-    snprintf(url, sizeof(url), "%s://%s:%u%s",
-             use_tls ? "wss" : "ws", host, (unsigned)port,
-             (path && path[0]) ? path : "/");
     nw_endpoint_t endpoint = nw_endpoint_create_url(url);
     if (!endpoint) {
         nw_release(params);
@@ -586,38 +1592,7 @@ void *nw_shim_ws_connect(const char *host, uint16_t port, const char *path, int 
     nw_release(params);
     if (!conn) { if (out_status) *out_status = NW_CONNECT_FAILED; return NULL; }
 
-    nw_conn_handle *h = (nw_conn_handle *)calloc(1, sizeof(nw_conn_handle));
-    h->conn = conn;
-    h->queue = dispatch_queue_create("networkframework-rs.ws", DISPATCH_QUEUE_SERIAL);
-    h->ready = dispatch_semaphore_create(0);
-    atomic_store(&h->state_code, 0);
-
-    nw_connection_set_queue(conn, h->queue);
-    nw_connection_set_state_changed_handler(conn, ^(nw_connection_state_t state, nw_error_t error) {
-        (void)error;
-        if (state == nw_connection_state_ready) {
-            atomic_store(&h->state_code, 1);
-            dispatch_semaphore_signal(h->ready);
-        } else if (state == nw_connection_state_cancelled) {
-            atomic_store(&h->state_code, 2);
-            dispatch_semaphore_signal(h->ready);
-        } else if (state == nw_connection_state_failed) {
-            atomic_store(&h->state_code, 3);
-            dispatch_semaphore_signal(h->ready);
-        }
-    });
-    nw_connection_start(conn);
-
-    dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, 30LL * NSEC_PER_SEC);
-    if (dispatch_semaphore_wait(h->ready, deadline) != 0
-        || atomic_load(&h->state_code) != 1) {
-        cancel_and_destroy_handle(h);
-        if (out_status) *out_status = NW_CONNECT_FAILED;
-        return NULL;
-    }
-
-    if (out_status) *out_status = NW_OK;
-    return h;
+    return nw_shim_conn_start_and_wait(conn, "networkframework-rs.ws", NW_SHIM_CONNECT_TIMEOUT_NS, out_status);
 }
 
 // Send a text or binary websocket message. opcode:
@@ -650,12 +1625,16 @@ int nw_shim_ws_send(void *handle, const uint8_t *data, size_t len, int opcode) {
     return result;
 }
 
-ssize_t nw_shim_ws_receive(void *handle, uint8_t *out_buf, size_t max_len, int *out_opcode) {
+ssize_t nw_shim_ws_receive(void *handle, uint8_t *out_buf, size_t max_len, int *out_opcode, size_t *out_size) {
     nw_conn_handle *h = (nw_conn_handle *)handle;
+    if (out_size) *out_size = 0;
+    if (out_opcode) *out_opcode = 0;
     if (!h || !out_buf || max_len == 0) return NW_INVALID_ARG;
 
     __block ssize_t result = 0;
     __block int op = 0;
+    __block size_t size = 0;
+    nw_protocol_definition_t definition = nw_protocol_copy_ws_definition();
     dispatch_semaphore_t done = dispatch_semaphore_create(0);
 
     nw_connection_receive_message(h->conn,
@@ -664,72 +1643,46 @@ ssize_t nw_shim_ws_receive(void *handle, uint8_t *out_buf, size_t max_len, int *
             if (error) {
                 result = NW_RECV_FAILED;
             } else {
-                if (ctx) {
-                    nw_protocol_metadata_t md = nw_content_context_copy_protocol_metadata(
-                        ctx, nw_protocol_copy_ws_definition());
+                if (ctx && definition) {
+                    nw_protocol_metadata_t md = nw_content_context_copy_protocol_metadata(ctx, definition);
                     if (md) {
                         op = (int)nw_ws_metadata_get_opcode(md);
                         nw_release(md);
                     }
                 }
-                if (content) {
-                    __block size_t copied = 0;
-                    dispatch_data_apply(content,
-                        ^bool(dispatch_data_t region, size_t offset, const void *buffer, size_t size) {
-                            (void)region; (void)offset;
-                            size_t can = max_len - copied;
-                            if (can == 0) return false;
-                            size_t take = size < can ? size : can;
-                            memcpy(out_buf + copied, buffer, take);
-                            copied += take;
-                            return true;
-                        });
-                    result = (ssize_t)copied;
-                }
+                result = nw_shim_copy_received(content, out_buf, max_len, &size);
             }
             dispatch_semaphore_signal(done);
         });
 
     dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
     dispatch_release(done);
+    if (definition) nw_release(definition);
     if (out_opcode) *out_opcode = op;
+    if (out_size) *out_size = size;
     return result;
 }
 
 // ---------------------------------------------------------------------
 // QUIC (single-stream) — v0.6
 // ---------------------------------------------------------------------
-// Builds a QUIC connection with one bidirectional stream by chaining
-// quic + IP into a custom nw_parameters_t. send/receive on the returned
-// handle work the same as the TCP variant.
+// Builds a QUIC connection with one bidirectional stream from
+// nw_parameters_create_quic. send/receive on the returned handle work the
+// same as the TCP variant.
+
+static nw_endpoint_t nw_shim_create_host_endpoint(const char *host, uint16_t port);
+static nw_parameters_t nw_shim_create_quic_parameters(const char *alpn);
 
 void *nw_shim_quic_connect(const char *host, uint16_t port, const char *alpn, int *out_status) {
     if (!host) { if (out_status) *out_status = NW_INVALID_ARG; return NULL; }
 
-    nw_protocol_options_t quic_opts = nw_quic_create_options();
-    if (alpn && alpn[0]) {
-        nw_quic_add_tls_application_protocol(quic_opts, alpn);
-    }
+    nw_endpoint_t endpoint = nw_shim_create_host_endpoint(host, port);
+    if (!endpoint) { if (out_status) *out_status = NW_INVALID_ARG; return NULL; }
 
-    nw_parameters_configure_protocol_block_t cfg_protocols =
-        ^(nw_protocol_options_t opts) {
-            (void)opts;
-        };
-    nw_parameters_t params = nw_parameters_create_secure_udp(
-        cfg_protocols,
-        NW_PARAMETERS_DEFAULT_CONFIGURATION);
-
-    nw_protocol_stack_t stack = nw_parameters_copy_default_protocol_stack(params);
-    nw_protocol_stack_prepend_application_protocol(stack, quic_opts);
-    nw_release(quic_opts);
-    nw_release(stack);
-
-    char port_str[8];
-    snprintf(port_str, sizeof(port_str), "%u", (unsigned)port);
-    nw_endpoint_t endpoint = nw_endpoint_create_host(host, port_str);
-    if (!endpoint) {
-        nw_release(params);
-        if (out_status) *out_status = NW_INVALID_ARG;
+    nw_parameters_t params = nw_shim_create_quic_parameters(alpn);
+    if (!params) {
+        nw_release(endpoint);
+        if (out_status) *out_status = NW_CONNECT_FAILED;
         return NULL;
     }
 
@@ -738,38 +1691,7 @@ void *nw_shim_quic_connect(const char *host, uint16_t port, const char *alpn, in
     nw_release(params);
     if (!conn) { if (out_status) *out_status = NW_CONNECT_FAILED; return NULL; }
 
-    nw_conn_handle *h = (nw_conn_handle *)calloc(1, sizeof(nw_conn_handle));
-    h->conn = conn;
-    h->queue = dispatch_queue_create("networkframework-rs.quic", DISPATCH_QUEUE_SERIAL);
-    h->ready = dispatch_semaphore_create(0);
-    atomic_store(&h->state_code, 0);
-
-    nw_connection_set_queue(conn, h->queue);
-    nw_connection_set_state_changed_handler(conn, ^(nw_connection_state_t state, nw_error_t error) {
-        (void)error;
-        if (state == nw_connection_state_ready) {
-            atomic_store(&h->state_code, 1);
-            dispatch_semaphore_signal(h->ready);
-        } else if (state == nw_connection_state_cancelled) {
-            atomic_store(&h->state_code, 2);
-            dispatch_semaphore_signal(h->ready);
-        } else if (state == nw_connection_state_failed) {
-            atomic_store(&h->state_code, 3);
-            dispatch_semaphore_signal(h->ready);
-        }
-    });
-    nw_connection_start(conn);
-
-    dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, 30LL * NSEC_PER_SEC);
-    if (dispatch_semaphore_wait(h->ready, deadline) != 0
-        || atomic_load(&h->state_code) != 1) {
-        cancel_and_destroy_handle(h);
-        if (out_status) *out_status = NW_CONNECT_FAILED;
-        return NULL;
-    }
-
-    if (out_status) *out_status = NW_OK;
-    return h;
+    return nw_shim_conn_start_and_wait(conn, "networkframework-rs.quic", NW_SHIM_CONNECT_TIMEOUT_NS, out_status);
 }
 
 // ---------------------------------------------------------------------
@@ -777,11 +1699,122 @@ void *nw_shim_quic_connect(const char *host, uint16_t port, const char *alpn, in
 // ---------------------------------------------------------------------
 
 typedef struct nw_bonjour_advertise_handle {
+    _Atomic long refs;
     nw_listener_t listener;
     dispatch_queue_t queue;
-    dispatch_semaphore_t ready;
-    _Atomic int state_code;
+    pthread_mutex_t lock;
+    pthread_cond_t cond;
+    int state;
+    bool cancelled;
+    bool cancel_requested;
 } nw_bonjour_advertise_handle;
+
+static void nw_shim_advertise_release(nw_bonjour_advertise_handle *h) {
+    if (atomic_fetch_sub_explicit(&h->refs, 1, memory_order_acq_rel) != 1) {
+        return;
+    }
+    nw_release(h->listener);
+    dispatch_release(h->queue);
+    pthread_cond_destroy(&h->cond);
+    pthread_mutex_destroy(&h->lock);
+    free(h);
+}
+
+static void nw_shim_advertise_release_async(void *context) {
+    nw_shim_advertise_release((nw_bonjour_advertise_handle *)context);
+}
+
+static void nw_shim_advertise_on_state(nw_bonjour_advertise_handle *h, nw_listener_state_t state) {
+    pthread_mutex_lock(&h->lock);
+    if (h->cancelled) {
+        pthread_mutex_unlock(&h->lock);
+        return;
+    }
+    h->state = (int)state;
+    bool final_event = state == nw_listener_state_cancelled;
+    if (final_event) {
+        h->cancelled = true;
+    }
+    pthread_cond_broadcast(&h->cond);
+    pthread_mutex_unlock(&h->lock);
+    if (final_event) {
+        dispatch_async_f(h->queue, h, nw_shim_advertise_release_async);
+    }
+}
+
+static void nw_shim_advertise_close(nw_bonjour_advertise_handle *h) {
+    pthread_mutex_lock(&h->lock);
+    bool should_cancel = !h->cancel_requested && !h->cancelled;
+    h->cancel_requested = true;
+    pthread_mutex_unlock(&h->lock);
+    if (should_cancel) {
+        nw_listener_cancel(h->listener);
+    }
+    nw_shim_advertise_release(h);
+}
+
+static void *nw_shim_advertise_start(nw_listener_t listener, const char *label, int *out_status) {
+    if (!listener) {
+        if (out_status) *out_status = NW_LISTEN_FAILED;
+        return NULL;
+    }
+    nw_bonjour_advertise_handle *h = (nw_bonjour_advertise_handle *)calloc(1, sizeof(nw_bonjour_advertise_handle));
+    if (!h) {
+        nw_release(listener);
+        if (out_status) *out_status = NW_LISTEN_FAILED;
+        return NULL;
+    }
+    atomic_init(&h->refs, 2);
+    h->listener = listener;
+    h->queue = dispatch_queue_create(label, DISPATCH_QUEUE_SERIAL);
+    pthread_mutex_init(&h->lock, NULL);
+    pthread_cond_init(&h->cond, NULL);
+
+    nw_listener_set_queue(listener, h->queue);
+    nw_listener_set_state_changed_handler(listener, ^(nw_listener_state_t state, nw_error_t error) {
+        (void)error;
+        nw_shim_advertise_on_state(h, state);
+    });
+    nw_listener_set_new_connection_handler(listener, ^(nw_connection_t conn) {
+        // Drop inbound connections — we're advertising only.
+        nw_connection_cancel(conn);
+    });
+    nw_listener_start(listener);
+
+    uint64_t deadline = nw_shim_deadline_after(NW_SHIM_START_TIMEOUT_NS);
+    pthread_mutex_lock(&h->lock);
+    while (h->state != nw_listener_state_ready && h->state != nw_listener_state_failed && !h->cancelled) {
+        if (!nw_shim_cond_wait_until(&h->cond, &h->lock, deadline)) {
+            break;
+        }
+    }
+    bool ready = h->state == nw_listener_state_ready && !h->cancelled;
+    pthread_mutex_unlock(&h->lock);
+    if (!ready) {
+        nw_shim_advertise_close(h);
+        if (out_status) *out_status = NW_LISTEN_FAILED;
+        return NULL;
+    }
+    if (out_status) *out_status = NW_OK;
+    return h;
+}
+
+static nw_listener_t nw_shim_advertise_listener(uint16_t port, nw_advertise_descriptor_t descriptor) {
+    nw_parameters_t params = nw_parameters_create_secure_tcp(
+        NW_PARAMETERS_DISABLE_PROTOCOL,
+        NW_PARAMETERS_DEFAULT_CONFIGURATION);
+    if (!params) {
+        return NULL;
+    }
+    char port_str[8];
+    snprintf(port_str, sizeof(port_str), "%u", (unsigned)port);
+    nw_listener_t listener = nw_listener_create_with_port(port_str, params);
+    nw_release(params);
+    if (listener) {
+        nw_listener_set_advertise_descriptor(listener, descriptor);
+    }
+    return listener;
+}
 
 void *nw_shim_bonjour_advertise_start(
     const char *service_type,
@@ -794,95 +1827,32 @@ void *nw_shim_bonjour_advertise_start(
         if (out_status) *out_status = NW_INVALID_ARG;
         return NULL;
     }
-
-    nw_parameters_t params = nw_parameters_create_secure_tcp(
-        NW_PARAMETERS_DISABLE_PROTOCOL,
-        NW_PARAMETERS_DEFAULT_CONFIGURATION);
-
-    char port_str[8];
-    snprintf(port_str, sizeof(port_str), "%u", (unsigned)port);
-    nw_listener_t listener = nw_listener_create_with_port(port_str, params);
-    nw_release(params);
-    if (!listener) {
-        if (out_status) *out_status = NW_LISTEN_FAILED;
-        return NULL;
-    }
-
     nw_advertise_descriptor_t adv = nw_advertise_descriptor_create_bonjour_service(
         service_name,
         service_type,
         (domain && domain[0]) ? domain : NULL);
     if (!adv) {
-        nw_release(listener);
         if (out_status) *out_status = NW_INVALID_ARG;
         return NULL;
     }
-    nw_listener_set_advertise_descriptor(listener, adv);
+    nw_listener_t listener = nw_shim_advertise_listener(port, adv);
     nw_release(adv);
+    return nw_shim_advertise_start(listener, "networkframework-rs.bonjour-adv", out_status);
+}
 
-    nw_bonjour_advertise_handle *h = (nw_bonjour_advertise_handle *)calloc(
-        1, sizeof(nw_bonjour_advertise_handle));
-    h->listener = listener;
-    h->queue = dispatch_queue_create("networkframework-rs.bonjour-adv", DISPATCH_QUEUE_SERIAL);
-    h->ready = dispatch_semaphore_create(0);
-    atomic_store(&h->state_code, 0);
-
-    nw_listener_set_queue(listener, h->queue);
-    nw_listener_set_state_changed_handler(listener, ^(nw_listener_state_t state, nw_error_t error) {
-        (void)error;
-        if (state == nw_listener_state_ready) {
-            atomic_store(&h->state_code, 1);
-            dispatch_semaphore_signal(h->ready);
-        } else if (state == nw_listener_state_cancelled) {
-            atomic_store(&h->state_code, 2);
-            dispatch_semaphore_signal(h->ready);
-        } else if (state == nw_listener_state_failed) {
-            atomic_store(&h->state_code, 3);
-            dispatch_semaphore_signal(h->ready);
-        }
-    });
-    nw_listener_set_new_connection_handler(listener, ^(nw_connection_t conn) {
-        // Drop inbound connections — we're advertising only.
-        nw_connection_cancel(conn);
-    });
-    nw_listener_start(listener);
-
-    dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, 10LL * NSEC_PER_SEC);
-    if (dispatch_semaphore_wait(h->ready, deadline) != 0
-        || atomic_load(&h->state_code) != 1) {
-        nw_listener_cancel(listener);
-        dispatch_time_t cancel_deadline = dispatch_time(DISPATCH_TIME_NOW, 5LL * NSEC_PER_SEC);
-        while (atomic_load(&h->state_code) != 2 && atomic_load(&h->state_code) != 3) {
-            if (dispatch_semaphore_wait(h->ready, cancel_deadline) != 0) {
-                break;
-            }
-        }
-        nw_release(h->listener);
-        dispatch_release(h->queue);
-        dispatch_release(h->ready);
-        free(h);
-        if (out_status) *out_status = NW_LISTEN_FAILED;
+void *nw_shim_bonjour_advertise_start_with_descriptor(void *descriptor, uint16_t port, int *out_status) {
+    if (!descriptor) {
+        if (out_status) *out_status = NW_INVALID_ARG;
         return NULL;
     }
-
-    if (out_status) *out_status = NW_OK;
-    return h;
+    nw_listener_t listener = nw_shim_advertise_listener(port, (nw_advertise_descriptor_t)descriptor);
+    return nw_shim_advertise_start(listener, "networkframework-rs.advertise-descriptor", out_status);
 }
 
 void nw_shim_bonjour_advertise_stop(void *handle) {
     nw_bonjour_advertise_handle *h = (nw_bonjour_advertise_handle *)handle;
     if (!h) return;
-    nw_listener_cancel(h->listener);
-    dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, 5LL * NSEC_PER_SEC);
-    while (atomic_load(&h->state_code) != 2 && atomic_load(&h->state_code) != 3) {
-        if (dispatch_semaphore_wait(h->ready, deadline) != 0) {
-            break;
-        }
-    }
-    nw_release(h->listener);
-    dispatch_release(h->queue);
-    dispatch_release(h->ready);
-    free(h);
+    nw_shim_advertise_close(h);
 }
 
 // ---------------------------------------------------------------------
@@ -974,29 +1944,11 @@ void nw_shim_release_object(void *handle) {
 // ---------------------------------------------------------------------
 
 static nw_parameters_t nw_shim_create_quic_parameters(const char *alpn) {
-    nw_protocol_options_t quic_opts = nw_quic_create_options();
-    if (!quic_opts) {
-        return NULL;
-    }
-    if (alpn && alpn[0]) {
-        nw_quic_add_tls_application_protocol(quic_opts, alpn);
-    }
-
-    nw_parameters_t params = nw_parameters_create_secure_udp(
-        NW_PARAMETERS_DISABLE_PROTOCOL,
-        NW_PARAMETERS_DEFAULT_CONFIGURATION);
-    if (!params) {
-        nw_release(quic_opts);
-        return NULL;
-    }
-
-    nw_protocol_stack_t stack = nw_parameters_copy_default_protocol_stack(params);
-    if (stack) {
-        nw_protocol_stack_prepend_application_protocol(stack, quic_opts);
-        nw_release(stack);
-    }
-    nw_release(quic_opts);
-    return params;
+    return nw_parameters_create_quic(^(nw_protocol_options_t options) {
+        if (alpn && alpn[0]) {
+            nw_quic_add_tls_application_protocol(options, alpn);
+        }
+    });
 }
 
 void *nw_shim_parameters_create_tcp(int use_tls) {
@@ -1080,44 +2032,7 @@ void *nw_shim_connection_create_with_parameters(
         return NULL;
     }
 
-    nw_conn_handle *h = (nw_conn_handle *)calloc(1, sizeof(nw_conn_handle));
-    h->conn = conn;
-    h->queue = dispatch_queue_create("networkframework-rs.conn.params", DISPATCH_QUEUE_SERIAL);
-    h->ready = dispatch_semaphore_create(0);
-    atomic_store(&h->state_code, 0);
-
-    nw_connection_set_queue(conn, h->queue);
-    nw_connection_set_state_changed_handler(conn, ^(nw_connection_state_t state, nw_error_t error) {
-        (void)error;
-        if (state == nw_connection_state_ready) {
-            atomic_store(&h->state_code, 1);
-            dispatch_semaphore_signal(h->ready);
-        } else if (state == nw_connection_state_cancelled) {
-            atomic_store(&h->state_code, 2);
-            dispatch_semaphore_signal(h->ready);
-        } else if (state == nw_connection_state_failed) {
-            atomic_store(&h->state_code, 3);
-            dispatch_semaphore_signal(h->ready);
-        }
-    });
-
-    nw_connection_start(conn);
-
-    dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, 30LL * NSEC_PER_SEC);
-    if (dispatch_semaphore_wait(h->ready, deadline) != 0) {
-        cancel_and_destroy_handle(h);
-        if (out_status) *out_status = NW_TIMEOUT;
-        return NULL;
-    }
-
-    if (atomic_load(&h->state_code) != 1) {
-        cancel_and_destroy_handle(h);
-        if (out_status) *out_status = NW_CONNECT_FAILED;
-        return NULL;
-    }
-
-    if (out_status) *out_status = NW_OK;
-    return h;
+    return nw_shim_conn_start_and_wait(conn, "networkframework-rs.conn.params", NW_SHIM_CONNECT_TIMEOUT_NS, out_status);
 }
 
 void *nw_shim_test_copy_failed_connection_error(const char *host, uint16_t port, int use_tls) {
@@ -1145,34 +2060,33 @@ void *nw_shim_test_copy_failed_connection_error(const char *host, uint16_t port,
         return NULL;
     }
 
-    dispatch_queue_t queue = dispatch_queue_create("networkframework-rs.test.error", DISPATCH_QUEUE_SERIAL);
-    dispatch_semaphore_t ready = dispatch_semaphore_create(0);
-    __block void *retained_error = NULL;
-    __block int finished = 0;
+    nw_shim_waiter *waiter = nw_shim_waiter_create(2);
+    if (!waiter) {
+        nw_release(connection);
+        return NULL;
+    }
 
+    dispatch_queue_t queue = dispatch_queue_create("networkframework-rs.test.error", DISPATCH_QUEUE_SERIAL);
     nw_connection_set_queue(connection, queue);
     nw_connection_set_state_changed_handler(connection, ^(nw_connection_state_t state, nw_error_t error) {
-        if (!retained_error && error) {
-            retained_error = nw_retain(error);
+        if (error
+            || state == nw_connection_state_ready
+            || state == nw_connection_state_failed
+            || state == nw_connection_state_waiting
+            || state == nw_connection_state_cancelled) {
+            nw_shim_waiter_complete(waiter, error ? nw_retain(error) : NULL);
         }
-        if (finished) {
-            return;
-        }
-        if (retained_error || state == nw_connection_state_ready || state == nw_connection_state_cancelled || state == nw_connection_state_failed || state == nw_connection_state_waiting) {
-            finished = 1;
-            dispatch_semaphore_signal(ready);
+        if (state == nw_connection_state_cancelled) {
+            nw_shim_waiter_release(waiter);
         }
     });
     nw_connection_start(connection);
 
-    dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, 10LL * NSEC_PER_SEC);
-    if (dispatch_semaphore_wait(ready, deadline) != 0) {
-        nw_connection_cancel(connection);
-    }
-    dispatch_sync(queue, ^{});
+    void *retained_error = nw_shim_waiter_wait_take(waiter, 10LL * (int64_t)NSEC_PER_SEC, NULL);
+    nw_connection_cancel(connection);
     nw_release(connection);
-    dispatch_release(ready);
     dispatch_release(queue);
+    nw_shim_waiter_release(waiter);
     return retained_error;
 }
 
@@ -1186,55 +2100,7 @@ void *nw_shim_listener_create_with_parameters(void *parameters, uint16_t port, i
     snprintf(port_str, sizeof(port_str), "%u", (unsigned)port);
 
     nw_listener_t listener = nw_listener_create_with_port(port_str, (nw_parameters_t)parameters);
-    if (!listener) {
-        if (out_status) *out_status = NW_LISTEN_FAILED;
-        return NULL;
-    }
-
-    nw_listener_handle *h = (nw_listener_handle *)calloc(1, sizeof(nw_listener_handle));
-    h->listener = listener;
-    h->queue = dispatch_queue_create("networkframework-rs.listener.params", DISPATCH_QUEUE_SERIAL);
-    h->ready = dispatch_semaphore_create(0);
-    h->accept_sem = dispatch_semaphore_create(0);
-    atomic_store(&h->state_code, 0);
-
-    nw_listener_set_queue(listener, h->queue);
-    nw_listener_set_state_changed_handler(listener, ^(nw_listener_state_t state, nw_error_t error) {
-        (void)error;
-        if (state == nw_listener_state_ready) {
-            atomic_store(&h->bound_port, nw_listener_get_port(listener));
-            atomic_store(&h->state_code, 1);
-            dispatch_semaphore_signal(h->ready);
-        } else if (state == nw_listener_state_cancelled) {
-            atomic_store(&h->state_code, 2);
-            dispatch_semaphore_signal(h->ready);
-        } else if (state == nw_listener_state_failed) {
-            atomic_store(&h->state_code, 3);
-            dispatch_semaphore_signal(h->ready);
-        }
-    });
-
-    nw_listener_set_new_connection_handler(listener, ^(nw_connection_t conn) {
-        nw_retain(conn);
-        if (h->pending) {
-            nw_connection_cancel(h->pending);
-            nw_release(h->pending);
-        }
-        h->pending = conn;
-        dispatch_semaphore_signal(h->accept_sem);
-    });
-
-    nw_listener_start(listener);
-
-    dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, 10LL * NSEC_PER_SEC);
-    if (dispatch_semaphore_wait(h->ready, deadline) != 0 || atomic_load(&h->state_code) != 1) {
-        cancel_and_destroy_listener_handle(h);
-        if (out_status) *out_status = NW_LISTEN_FAILED;
-        return NULL;
-    }
-
-    if (out_status) *out_status = NW_OK;
-    return h;
+    return nw_shim_listener_start(listener, "networkframework-rs.listener.params", out_status);
 }
 
 // ---------------------------------------------------------------------
@@ -1345,30 +2211,29 @@ int nw_shim_connection_send_with_context(void *handle, const uint8_t *data, size
     return result;
 }
 
-ssize_t nw_shim_connection_receive_with_context(
-    void *handle,
+static ssize_t nw_shim_connection_receive_common(
+    nw_conn_handle *h,
+    bool whole_message,
     uint8_t *out_buf,
     size_t max_len,
+    size_t *out_size,
     void **out_context,
     int *out_is_complete
 ) {
-    nw_conn_handle *h = (nw_conn_handle *)handle;
+    if (out_size) *out_size = 0;
+    if (out_context) *out_context = NULL;
+    if (out_is_complete) *out_is_complete = 0;
     if (!h || !out_buf || max_len == 0) {
         return NW_INVALID_ARG;
     }
-    if (out_context) {
-        *out_context = NULL;
-    }
-    if (out_is_complete) {
-        *out_is_complete = 0;
-    }
 
     __block ssize_t result = 0;
+    __block size_t size = 0;
     __block void *retained_context = NULL;
     __block int is_complete_result = 0;
     dispatch_semaphore_t done = dispatch_semaphore_create(0);
 
-    nw_connection_receive(h->conn, 1, (uint32_t)max_len,
+    nw_connection_receive_completion_t completion =
         ^(dispatch_data_t content, nw_content_context_t ctx, bool is_complete, nw_error_t error) {
             if (error) {
                 result = NW_RECV_FAILED;
@@ -1377,43 +2242,57 @@ ssize_t nw_shim_connection_receive_with_context(
                 if (ctx) {
                     retained_context = nw_retain(ctx);
                 }
-                if (content) {
-                    __block size_t copied = 0;
-                    dispatch_data_apply(content,
-                        ^bool(dispatch_data_t region, size_t offset, const void *buffer, size_t size) {
-                            (void)region;
-                            (void)offset;
-                            size_t can = max_len - copied;
-                            if (can == 0) return false;
-                            size_t take = size < can ? size : can;
-                            memcpy(out_buf + copied, buffer, take);
-                            copied += take;
-                            return true;
-                        });
-                    result = (ssize_t)copied;
-                }
+                result = nw_shim_copy_received(content, out_buf, max_len, &size);
             }
             dispatch_semaphore_signal(done);
-        });
+        };
+    if (whole_message) {
+        nw_connection_receive_message(h->conn, completion);
+    } else {
+        nw_connection_receive(h->conn, 1, nw_shim_clamp_receive_length(max_len), completion);
+    }
 
     dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
     dispatch_release(done);
 
+    if (out_size) *out_size = size;
     if (result >= 0) {
         if (out_context) {
             *out_context = retained_context;
             retained_context = NULL;
-        } else if (retained_context) {
-            nw_release((nw_content_context_t)retained_context);
         }
         if (out_is_complete) {
             *out_is_complete = is_complete_result;
         }
-    } else if (retained_context) {
+    }
+    if (retained_context) {
         nw_release((nw_content_context_t)retained_context);
     }
-
     return result;
+}
+
+ssize_t nw_shim_connection_receive_with_context(
+    void *handle,
+    uint8_t *out_buf,
+    size_t max_len,
+    size_t *out_size,
+    void **out_context,
+    int *out_is_complete
+) {
+    return nw_shim_connection_receive_common(
+        (nw_conn_handle *)handle, false, out_buf, max_len, out_size, out_context, out_is_complete);
+}
+
+ssize_t nw_shim_connection_receive_message(
+    void *handle,
+    uint8_t *out_buf,
+    size_t max_len,
+    size_t *out_size,
+    void **out_context,
+    int *out_is_complete
+) {
+    return nw_shim_connection_receive_common(
+        (nw_conn_handle *)handle, true, out_buf, max_len, out_size, out_context, out_is_complete);
 }
 
 // ---------------------------------------------------------------------
@@ -1448,23 +2327,46 @@ int nw_shim_path_monitor_enumerate_interfaces(
     int (*callback)(const char *name, int interface_type, uint32_t index, void *user_info),
     void *user_info
 ) {
-    nw_path_handle *h = (nw_path_handle *)handle;
-    if (!h || !callback) {
+    if (!handle || !callback) {
         return 0;
     }
-
-    __block nw_path_t snapshot = NULL;
-    dispatch_sync(h->queue, ^{
-        if (h->latest_path) {
-            snapshot = nw_retain(h->latest_path);
-        }
-    });
-
+    nw_path_t snapshot = (nw_path_t)nw_shim_path_monitor_copy_latest_path(handle);
     int count = nw_shim_enumerate_path_interfaces(snapshot, callback, user_info);
     if (snapshot) {
         nw_release(snapshot);
     }
     return count;
+}
+
+static nw_path_t nw_shim_copy_current_path(const char *label) {
+    nw_shim_waiter *waiter = nw_shim_waiter_create(2);
+    if (!waiter) {
+        return NULL;
+    }
+    nw_path_monitor_t monitor = nw_path_monitor_create();
+    if (!monitor) {
+        nw_shim_waiter_release(waiter);
+        nw_shim_waiter_release(waiter);
+        return NULL;
+    }
+    dispatch_queue_t queue = dispatch_queue_create(label, DISPATCH_QUEUE_SERIAL);
+    nw_path_monitor_set_queue(monitor, queue);
+    nw_path_monitor_set_update_handler(monitor, ^(nw_path_t path) {
+        if (path) {
+            nw_shim_waiter_complete(waiter, nw_retain(path));
+        }
+    });
+    nw_path_monitor_set_cancel_handler(monitor, ^{
+        nw_shim_waiter_release(waiter);
+    });
+    nw_path_monitor_start(monitor);
+
+    nw_path_t path = (nw_path_t)nw_shim_waiter_wait_take(waiter, 5LL * (int64_t)NSEC_PER_SEC, NULL);
+    nw_path_monitor_cancel(monitor);
+    nw_release(monitor);
+    dispatch_release(queue);
+    nw_shim_waiter_release(waiter);
+    return path;
 }
 
 int nw_shim_list_interfaces(
@@ -1474,44 +2376,12 @@ int nw_shim_list_interfaces(
     if (!callback) {
         return 0;
     }
-
-    __block nw_path_t captured_path = NULL;
-    dispatch_queue_t queue = dispatch_queue_create("networkframework-rs.interface-list", DISPATCH_QUEUE_SERIAL);
-    dispatch_semaphore_t ready = dispatch_semaphore_create(0);
-    nw_path_monitor_t monitor = nw_path_monitor_create();
-    if (!monitor) {
-        dispatch_release(queue);
-        dispatch_release(ready);
+    nw_path_t path = nw_shim_copy_current_path("networkframework-rs.interface-list");
+    if (!path) {
         return 0;
     }
-
-    nw_path_monitor_set_queue(monitor, queue);
-    nw_path_monitor_set_update_handler(monitor, ^(nw_path_t path) {
-        if (!captured_path && path) {
-            captured_path = nw_retain(path);
-            dispatch_semaphore_signal(ready);
-        }
-    });
-    nw_path_monitor_start(monitor);
-
-    dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, 5LL * NSEC_PER_SEC);
-    if (dispatch_semaphore_wait(ready, deadline) != 0) {
-        nw_path_monitor_cancel(monitor);
-        nw_release(monitor);
-        dispatch_release(queue);
-        dispatch_release(ready);
-        return 0;
-    }
-
-    int count = nw_shim_enumerate_path_interfaces(captured_path, callback, user_info);
-
-    nw_path_monitor_cancel(monitor);
-    if (captured_path) {
-        nw_release(captured_path);
-    }
-    nw_release(monitor);
-    dispatch_release(queue);
-    dispatch_release(ready);
+    int count = nw_shim_enumerate_path_interfaces(path, callback, user_info);
+    nw_release(path);
     return count;
 }
 
@@ -1736,89 +2606,12 @@ void nw_shim_proxy_config_clear_excluded_domains(void *proxy_config) {
 // Framer definitions, messages, and actions
 // ---------------------------------------------------------------------
 
-typedef void *(*nw_shim_framer_create_instance_fn)(void *user_info);
-typedef void (*nw_shim_framer_drop_instance_fn)(void *instance);
-typedef int (*nw_shim_framer_start_fn)(void *instance, void *framer);
-typedef size_t (*nw_shim_framer_input_fn)(void *instance, void *framer);
-typedef void (*nw_shim_framer_output_fn)(
-    void *instance,
-    void *framer,
-    void *message,
-    size_t message_length,
-    int is_complete);
-typedef void (*nw_shim_framer_wakeup_fn)(void *instance, void *framer);
-typedef int (*nw_shim_framer_stop_fn)(void *instance, void *framer);
-typedef void (*nw_shim_framer_cleanup_fn)(void *instance, void *framer);
 typedef size_t (*nw_shim_framer_parse_fn)(
     const uint8_t *buffer,
     size_t buffer_length,
     int is_complete,
     void *user_info);
 typedef void (*nw_shim_framer_async_fn)(void *framer, void *user_info);
-
-void *nw_shim_framer_definition_create(
-    const char *identifier,
-    uint32_t flags,
-    nw_shim_framer_create_instance_fn create_instance,
-    nw_shim_framer_drop_instance_fn drop_instance,
-    nw_shim_framer_start_fn start_callback,
-    nw_shim_framer_input_fn input_callback,
-    nw_shim_framer_output_fn output_callback,
-    nw_shim_framer_wakeup_fn wakeup_callback,
-    nw_shim_framer_stop_fn stop_callback,
-    nw_shim_framer_cleanup_fn cleanup_callback,
-    void *user_info
-) {
-    if (!identifier || !create_instance || !start_callback || !input_callback || !output_callback) {
-        return NULL;
-    }
-    if (__builtin_available(macOS 10.15, *)) {
-        nw_protocol_definition_t definition = nw_framer_create_definition(
-            identifier,
-            flags,
-            ^nw_framer_start_result_t(nw_framer_t framer) {
-                void *instance = create_instance(user_info);
-                nw_framer_set_input_handler(framer, ^size_t(nw_framer_t inner_framer) {
-                    return input_callback(instance, inner_framer);
-                });
-                nw_framer_set_output_handler(
-                    framer,
-                    ^(nw_framer_t inner_framer, nw_framer_message_t message, size_t message_length, bool is_complete) {
-                        output_callback(
-                            instance,
-                            inner_framer,
-                            message,
-                            message_length,
-                            is_complete ? 1 : 0);
-                    });
-                if (wakeup_callback) {
-                    nw_framer_set_wakeup_handler(framer, ^(nw_framer_t inner_framer) {
-                        wakeup_callback(instance, inner_framer);
-                    });
-                }
-                if (stop_callback) {
-                    nw_framer_set_stop_handler(framer, ^bool(nw_framer_t inner_framer) {
-                        return stop_callback(instance, inner_framer) != 0;
-                    });
-                }
-                nw_framer_set_cleanup_handler(framer, ^(nw_framer_t inner_framer) {
-                    if (cleanup_callback) {
-                        cleanup_callback(instance, inner_framer);
-                    }
-                    if (drop_instance) {
-                        drop_instance(instance);
-                    }
-                });
-
-                int start_result = start_callback(instance, framer);
-                return start_result == (int)nw_framer_start_result_will_mark_ready
-                    ? nw_framer_start_result_will_mark_ready
-                    : nw_framer_start_result_ready;
-            });
-        return definition;
-    }
-    return NULL;
-}
 
 void *nw_shim_framer_create_options(void *definition) {
     if (!definition) {
@@ -1977,14 +2770,10 @@ int nw_shim_framer_pass_input_data(void *framer, size_t input_length, void *mess
         return 0;
     }
     if (__builtin_available(macOS 10.15, *)) {
-        nw_framer_message_t delivered_message = NULL;
-        if (message) {
-            delivered_message = nw_retain((nw_framer_message_t)message);
-        }
         return nw_framer_deliver_input_no_copy(
             (nw_framer_t)framer,
             input_length,
-            delivered_message,
+            (nw_framer_message_t)message,
             is_complete != 0) ? 1 : 0;
     }
     return 0;
@@ -2001,19 +2790,15 @@ void nw_shim_framer_deliver_input_data(
         return;
     }
     if (__builtin_available(macOS 10.15, *)) {
-        nw_framer_message_t delivered_message = NULL;
-        if (message) {
-            delivered_message = nw_retain((nw_framer_message_t)message);
-        }
         if (input_length == 0) {
-            nw_framer_deliver_input_no_copy((nw_framer_t)framer, 0, delivered_message, is_complete != 0);
+            nw_framer_deliver_input_no_copy((nw_framer_t)framer, 0, (nw_framer_message_t)message, is_complete != 0);
             return;
         }
         nw_framer_deliver_input(
             (nw_framer_t)framer,
             input_buffer,
             input_length,
-            delivered_message,
+            (nw_framer_message_t)message,
             is_complete != 0);
     }
 }
@@ -2083,54 +2868,164 @@ void nw_shim_framer_async(void *framer, nw_shim_framer_async_fn async_callback, 
 // ---------------------------------------------------------------------
 
 typedef void (*nw_shim_connection_group_state_fn)(int state, void *user_info);
-typedef void (*nw_shim_connection_group_receive_fn)(
-    const uint8_t *data,
-    size_t len,
-    void *context,
-    int is_complete,
-    void *user_info);
-
 typedef struct nw_connection_group_handle {
+    _Atomic long refs;
     nw_connection_group_t group;
     dispatch_queue_t queue;
-    dispatch_semaphore_t state_sem;
-    _Atomic int state_code;
-    nw_shim_connection_group_state_fn state_callback;
-    void *state_user_info;
-    nw_shim_connection_group_receive_fn receive_callback;
-    void *receive_user_info;
+    pthread_mutex_t lock;
+    pthread_cond_t cond;
+    int state;
+    bool cancelled;
+    bool cancel_requested;
+    bool started;
+    bool new_connection_installed;
+    nw_shim_subscriptions subs;
+    nw_shim_acceptor acceptor;
 } nw_connection_group_handle;
+
+static void nw_shim_group_retain_owner(void *owner) {
+    atomic_fetch_add_explicit(&((nw_connection_group_handle *)owner)->refs, 1, memory_order_relaxed);
+}
+
+static void nw_shim_group_release_owner(void *owner) {
+    nw_connection_group_handle *h = (nw_connection_group_handle *)owner;
+    if (atomic_fetch_sub_explicit(&h->refs, 1, memory_order_acq_rel) != 1) {
+        return;
+    }
+    nw_shim_acceptor_destroy(&h->acceptor);
+    nw_shim_subscriptions_destroy(&h->subs);
+    nw_release(h->group);
+    dispatch_release(h->queue);
+    pthread_cond_destroy(&h->cond);
+    pthread_mutex_destroy(&h->lock);
+    free(h);
+}
+
+static void nw_shim_group_release_async(void *context) {
+    nw_shim_group_release_owner(context);
+}
+
+static void nw_shim_group_on_state(nw_connection_group_handle *h, nw_connection_group_state_t state) {
+    pthread_mutex_lock(&h->lock);
+    if (h->cancelled) {
+        pthread_mutex_unlock(&h->lock);
+        return;
+    }
+    h->state = (int)state;
+    bool final_event = state == nw_connection_group_state_cancelled;
+    if (final_event) {
+        h->cancelled = true;
+    }
+    pthread_cond_broadcast(&h->cond);
+    pthread_mutex_unlock(&h->lock);
+
+    if (state == nw_connection_group_state_failed || final_event) {
+        nw_shim_acceptor_mark_terminal(&h->acceptor);
+    }
+
+    nw_shim_snapshot snapshot;
+    nw_shim_subscriptions_snapshot(&h->subs, NW_SHIM_EVENT_STATE, &snapshot);
+    for (size_t index = 0; index < snapshot.count; index++) {
+        ((ConnectionGroupStateCallback)snapshot.items[index].fn)((int)state, snapshot.items[index].context);
+    }
+    nw_shim_snapshot_release(&snapshot);
+
+    if (final_event) {
+        dispatch_async_f(h->queue, h, nw_shim_group_release_async);
+    }
+}
+
+static void nw_shim_group_on_receive(
+    nw_connection_group_handle *h,
+    dispatch_data_t content,
+    nw_content_context_t context,
+    bool is_complete
+) {
+    nw_shim_snapshot snapshot;
+    nw_shim_subscriptions_snapshot(&h->subs, NW_SHIM_EVENT_RECEIVE, &snapshot);
+    if (snapshot.count > 0) {
+        uint8_t *bytes = NULL;
+        size_t length = nw_shim_copy_dispatch_data(content, &bytes);
+        for (size_t index = 0; index < snapshot.count; index++) {
+            ((ConnectionGroupReceiveCallback)snapshot.items[index].fn)(
+                bytes,
+                length,
+                context ? nw_retain(context) : NULL,
+                is_complete ? 1 : 0,
+                snapshot.items[index].context);
+        }
+        free(bytes);
+    }
+    nw_shim_snapshot_release(&snapshot);
+}
+
+static nw_connection_group_handle *nw_shim_group_create_handle(nw_connection_group_t group, const char *label) {
+    if (!group) {
+        return NULL;
+    }
+    nw_connection_group_handle *h = (nw_connection_group_handle *)calloc(1, sizeof(nw_connection_group_handle));
+    if (!h) {
+        nw_connection_group_cancel(group);
+        nw_release(group);
+        return NULL;
+    }
+    atomic_init(&h->refs, 2);
+    h->group = group;
+    h->queue = dispatch_queue_create(label, DISPATCH_QUEUE_SERIAL);
+    pthread_mutex_init(&h->lock, NULL);
+    pthread_cond_init(&h->cond, NULL);
+    nw_shim_subscriptions_init(&h->subs);
+    nw_shim_acceptor_init(&h->acceptor, &h->subs, h, nw_shim_group_retain_owner, nw_shim_group_release_owner, false);
+
+    nw_connection_group_set_queue(group, h->queue);
+    nw_connection_group_set_state_changed_handler(group, ^(nw_connection_group_state_t state, nw_error_t error) {
+        (void)error;
+        nw_shim_group_on_state(h, state);
+    });
+    return h;
+}
+
+static void nw_shim_group_cancel(nw_connection_group_handle *h) {
+    pthread_mutex_lock(&h->lock);
+    bool should_cancel = !h->cancel_requested && !h->cancelled;
+    h->cancel_requested = true;
+    pthread_mutex_unlock(&h->lock);
+    if (should_cancel) {
+        nw_connection_group_cancel(h->group);
+    }
+}
+
+static bool nw_shim_group_started(nw_connection_group_handle *h) {
+    pthread_mutex_lock(&h->lock);
+    bool started = h->started;
+    pthread_mutex_unlock(&h->lock);
+    return started;
+}
 
 void *nw_shim_group_descriptor_create_multiplex(const char *host, uint16_t port) {
     if (!host) {
         return NULL;
     }
-    if (__builtin_available(macOS 12.0, *)) {
-        nw_endpoint_t endpoint = nw_shim_create_host_endpoint(host, port);
-        if (!endpoint) {
-            return NULL;
-        }
-        nw_group_descriptor_t descriptor = nw_group_descriptor_create_multiplex(endpoint);
-        nw_release(endpoint);
-        return descriptor;
+    nw_endpoint_t endpoint = nw_shim_create_host_endpoint(host, port);
+    if (!endpoint) {
+        return NULL;
     }
-    return NULL;
+    nw_group_descriptor_t descriptor = nw_group_descriptor_create_multiplex(endpoint);
+    nw_release(endpoint);
+    return descriptor;
 }
 
 void *nw_shim_group_descriptor_create_multicast(const char *group_address, uint16_t port) {
     if (!group_address) {
         return NULL;
     }
-    if (__builtin_available(macOS 11.0, *)) {
-        nw_endpoint_t endpoint = nw_shim_create_address_endpoint(group_address, port);
-        if (!endpoint) {
-            return NULL;
-        }
-        nw_group_descriptor_t descriptor = nw_group_descriptor_create_multicast(endpoint);
-        nw_release(endpoint);
-        return descriptor;
+    nw_endpoint_t endpoint = nw_shim_create_address_endpoint(group_address, port);
+    if (!endpoint) {
+        return NULL;
     }
-    return NULL;
+    nw_group_descriptor_t descriptor = nw_group_descriptor_create_multicast(endpoint);
+    nw_release(endpoint);
+    return descriptor;
 }
 
 int nw_shim_group_descriptor_add_endpoint(void *descriptor, const char *host, uint16_t port) {
@@ -2152,80 +3047,88 @@ void *nw_shim_connection_group_create(void *descriptor, void *parameters) {
     if (!descriptor || !parameters) {
         return NULL;
     }
-    if (__builtin_available(macOS 11.0, *)) {
-        nw_connection_group_t group = nw_connection_group_create(
-            (nw_group_descriptor_t)descriptor,
-            (nw_parameters_t)parameters);
-        if (!group) {
-            return NULL;
-        }
-
-        nw_connection_group_handle *h = (nw_connection_group_handle *)calloc(1, sizeof(nw_connection_group_handle));
-        h->group = group;
-        h->queue = dispatch_queue_create("networkframework-rs.connection-group", DISPATCH_QUEUE_SERIAL);
-        h->state_sem = dispatch_semaphore_create(0);
-        atomic_store(&h->state_code, (int)nw_connection_group_state_invalid);
-
-        nw_connection_group_set_queue(group, h->queue);
-        nw_connection_group_set_state_changed_handler(group, ^(nw_connection_group_state_t state, nw_error_t error) {
-            (void)error;
-            atomic_store(&h->state_code, (int)state);
-            dispatch_semaphore_signal(h->state_sem);
-            if (h->state_callback) {
-                h->state_callback((int)state, h->state_user_info);
-            }
-        });
-
-        return h;
-    }
-    return NULL;
+    nw_connection_group_t group = nw_connection_group_create(
+        (nw_group_descriptor_t)descriptor,
+        (nw_parameters_t)parameters);
+    return nw_shim_group_create_handle(group, "networkframework-rs.connection-group");
 }
 
-void nw_shim_connection_group_set_state_changed_handler(
+uint64_t nw_shim_connection_group_subscribe_state(
     void *handle,
-    nw_shim_connection_group_state_fn state_callback,
-    void *user_info
+    ConnectionGroupStateCallback callback,
+    void *context,
+    NwShimContextCallback retain,
+    NwShimContextCallback release
 ) {
     nw_connection_group_handle *h = (nw_connection_group_handle *)handle;
+    nw_shim_callback entry = nw_shim_make_callback((nw_shim_fn)callback, context, retain, release);
     if (!h) {
-        return;
+        nw_shim_callback_release(&entry);
+        return 0;
     }
-    h->state_callback = state_callback;
-    h->state_user_info = user_info;
+    return nw_shim_subscriptions_add(&h->subs, NW_SHIM_EVENT_STATE, entry);
 }
 
-void nw_shim_connection_group_set_receive_handler(
+uint64_t nw_shim_connection_group_subscribe_receive(
     void *handle,
     uint32_t maximum_message_size,
     int reject_oversized_messages,
-    nw_shim_connection_group_receive_fn receive_callback,
-    void *user_info
+    ConnectionGroupReceiveCallback callback,
+    void *context,
+    NwShimContextCallback retain,
+    NwShimContextCallback release
 ) {
     nw_connection_group_handle *h = (nw_connection_group_handle *)handle;
-    if (!h) {
-        return;
+    nw_shim_callback entry = nw_shim_make_callback((nw_shim_fn)callback, context, retain, release);
+    if (!h || nw_shim_group_started(h)) {
+        nw_shim_callback_release(&entry);
+        return 0;
     }
-    h->receive_callback = receive_callback;
-    h->receive_user_info = user_info;
-
-    if (!receive_callback) {
-        nw_connection_group_set_receive_handler(h->group, maximum_message_size, reject_oversized_messages != 0, NULL);
-        return;
+    uint64_t token = nw_shim_subscriptions_add(&h->subs, NW_SHIM_EVENT_RECEIVE, entry);
+    if (token) {
+        nw_connection_group_set_receive_handler(
+            h->group,
+            maximum_message_size,
+            reject_oversized_messages != 0,
+            ^(dispatch_data_t content, nw_content_context_t message_context, bool is_complete) {
+                nw_shim_group_on_receive(h, content, message_context, is_complete);
+            });
     }
+    return token;
+}
 
-    nw_connection_group_set_receive_handler(
-        h->group,
-        maximum_message_size,
-        reject_oversized_messages != 0,
-        ^(dispatch_data_t content, nw_content_context_t context, bool is_complete) {
-            uint8_t *bytes = NULL;
-            size_t length = nw_shim_copy_dispatch_data(content, &bytes);
-            void *retained_context = context ? nw_retain(context) : NULL;
-            receive_callback(bytes, length, retained_context, is_complete ? 1 : 0, h->receive_user_info);
-            if (bytes) {
-                free(bytes);
-            }
-        });
+uint64_t nw_shim_connection_group_subscribe_new_connection(
+    void *handle,
+    ConnectionGroupNewConnectionCallback callback,
+    void *context,
+    NwShimContextCallback retain,
+    NwShimContextCallback release
+) {
+    nw_connection_group_handle *h = (nw_connection_group_handle *)handle;
+    nw_shim_callback entry = nw_shim_make_callback((nw_shim_fn)callback, context, retain, release);
+    if (!h || nw_shim_group_started(h)) {
+        nw_shim_callback_release(&entry);
+        return 0;
+    }
+    uint64_t token = nw_shim_subscriptions_add(&h->subs, NW_SHIM_EVENT_NEW_CONNECTION, entry);
+    if (token) {
+        pthread_mutex_lock(&h->lock);
+        bool install = !h->new_connection_installed;
+        h->new_connection_installed = true;
+        pthread_mutex_unlock(&h->lock);
+        if (install) {
+            nw_connection_group_set_new_connection_handler(h->group, ^(nw_connection_t connection) {
+                nw_shim_acceptor_offer(&h->acceptor, connection, "networkframework-rs.connection-group.connection");
+            });
+        }
+    }
+    return token;
+}
+
+void nw_shim_connection_group_unsubscribe(void *handle, uint64_t token) {
+    nw_connection_group_handle *h = (nw_connection_group_handle *)handle;
+    if (!h) return;
+    nw_shim_subscriptions_remove(&h->subs, token);
 }
 
 int nw_shim_connection_group_start(void *handle) {
@@ -2233,19 +3136,32 @@ int nw_shim_connection_group_start(void *handle) {
     if (!h) {
         return NW_INVALID_ARG;
     }
+    pthread_mutex_lock(&h->lock);
+    bool already = h->started;
+    h->started = true;
+    pthread_mutex_unlock(&h->lock);
+    if (already) {
+        return NW_INVALID_ARG;
+    }
 
     nw_connection_group_start(h->group);
 
-    if (atomic_load(&h->state_code) == (int)nw_connection_group_state_invalid) {
-        dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, 10LL * NSEC_PER_SEC);
-        if (dispatch_semaphore_wait(h->state_sem, deadline) != 0) {
-            return NW_TIMEOUT;
+    uint64_t deadline = nw_shim_deadline_after(NW_SHIM_START_TIMEOUT_NS);
+    pthread_mutex_lock(&h->lock);
+    while (h->state == (int)nw_connection_group_state_invalid && !h->cancelled) {
+        if (!nw_shim_cond_wait_until(&h->cond, &h->lock, deadline)) {
+            break;
         }
     }
+    int state = h->state;
+    bool cancelled = h->cancelled;
+    pthread_mutex_unlock(&h->lock);
 
-    int state = atomic_load(&h->state_code);
-    if (state == (int)nw_connection_group_state_failed || state == (int)nw_connection_group_state_cancelled) {
+    if (cancelled || state == (int)nw_connection_group_state_failed || state == (int)nw_connection_group_state_cancelled) {
         return NW_CONNECT_FAILED;
+    }
+    if (state == (int)nw_connection_group_state_invalid) {
+        return NW_TIMEOUT;
     }
     return NW_OK;
 }
@@ -2255,7 +3171,17 @@ void nw_shim_connection_group_cancel(void *handle) {
     if (!h) {
         return;
     }
-    nw_connection_group_cancel(h->group);
+    nw_shim_group_cancel(h);
+}
+
+void nw_shim_connection_group_release(void *handle) {
+    nw_connection_group_handle *h = (nw_connection_group_handle *)handle;
+    if (!h) {
+        return;
+    }
+    nw_shim_acceptor_close(&h->acceptor);
+    nw_shim_group_cancel(h);
+    nw_shim_group_release_owner(h);
 }
 
 int nw_shim_connection_group_send(
@@ -2310,24 +3236,6 @@ int nw_shim_connection_group_send(
         nw_release(endpoint);
     }
     return result;
-}
-
-void nw_shim_connection_group_release(void *handle) {
-    nw_connection_group_handle *h = (nw_connection_group_handle *)handle;
-    if (!h) {
-        return;
-    }
-
-    nw_connection_group_cancel(h->group);
-    if (atomic_load(&h->state_code) != (int)nw_connection_group_state_cancelled) {
-        dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, 5LL * NSEC_PER_SEC);
-        (void)dispatch_semaphore_wait(h->state_sem, deadline);
-    }
-
-    nw_release(h->group);
-    dispatch_release(h->queue);
-    dispatch_release(h->state_sem);
-    free(h);
 }
 
 void nw_shim_free_buffer(void *buffer) {
@@ -2442,145 +3350,6 @@ void *nw_shim_connection_copy_current_path(void *handle) {
         return NULL;
     }
     return nw_connection_copy_current_path(h->conn);
-}
-
-void *nw_shim_path_monitor_copy_latest_path(void *handle) {
-    nw_path_handle *h = (nw_path_handle *)handle;
-    if (!h) {
-        return NULL;
-    }
-
-    __block nw_path_t snapshot = NULL;
-    dispatch_sync(h->queue, ^{
-        if (h->latest_path) {
-            snapshot = nw_retain(h->latest_path);
-        }
-    });
-    return snapshot;
-}
-
-void *nw_shim_browser_start_with_descriptor(
-    void *descriptor,
-    void *parameters,
-    void (*found_callback)(const char *name, const char *service_type, const char *domain, void *user_info),
-    void (*lost_callback)(const char *name, const char *service_type, const char *domain, void *user_info),
-    void *user_info
-) {
-    if (!descriptor) {
-        return NULL;
-    }
-
-    nw_browse_descriptor_t desc = nw_retain((nw_browse_descriptor_t)descriptor);
-    nw_parameters_t params = parameters ? nw_parameters_copy((nw_parameters_t)parameters) : nw_parameters_create();
-    if (!params) {
-        nw_release(desc);
-        return NULL;
-    }
-
-    nw_browser_t browser = nw_browser_create(desc, params);
-    nw_release(desc);
-    nw_release(params);
-    if (!browser) {
-        return NULL;
-    }
-
-    nw_browser_handle *h = (nw_browser_handle *)calloc(1, sizeof(nw_browser_handle));
-    h->browser = browser;
-    h->queue = dispatch_queue_create("networkframework-rs.browser", DISPATCH_QUEUE_SERIAL);
-    h->found_callback = found_callback;
-    h->lost_callback = lost_callback;
-    h->user_info = user_info;
-
-    nw_browser_set_queue(browser, h->queue);
-    nw_browser_set_browse_results_changed_handler(browser,
-        ^(nw_browse_result_t old_result, nw_browse_result_t new_result, bool batch_complete) {
-            (void)batch_complete;
-            nw_browse_result_t result = new_result ? new_result : old_result;
-            if (!result) {
-                return;
-            }
-            nw_endpoint_t ep = nw_browse_result_copy_endpoint(result);
-            if (!ep) {
-                return;
-            }
-            const char *name = nw_endpoint_get_bonjour_service_name(ep);
-            const char *type = nw_endpoint_get_bonjour_service_type(ep);
-            const char *dom = nw_endpoint_get_bonjour_service_domain(ep);
-            if (!name || !name[0]) {
-                name = nw_endpoint_get_hostname(ep);
-            }
-            if (new_result && !old_result && h->found_callback) {
-                h->found_callback(name ? name : "", type ? type : "", dom ? dom : "", h->user_info);
-            } else if (old_result && !new_result && h->lost_callback) {
-                h->lost_callback(name ? name : "", type ? type : "", dom ? dom : "", h->user_info);
-            }
-            nw_release(ep);
-        });
-    nw_browser_start(browser);
-    return h;
-}
-
-void *nw_shim_bonjour_advertise_start_with_descriptor(void *descriptor, uint16_t port, int *out_status) {
-    if (!descriptor) {
-        if (out_status) *out_status = NW_INVALID_ARG;
-        return NULL;
-    }
-
-    nw_parameters_t params = nw_parameters_create_secure_tcp(
-        NW_PARAMETERS_DISABLE_PROTOCOL,
-        NW_PARAMETERS_DEFAULT_CONFIGURATION);
-
-    char port_str[8];
-    snprintf(port_str, sizeof(port_str), "%u", (unsigned)port);
-    nw_listener_t listener = nw_listener_create_with_port(port_str, params);
-    nw_release(params);
-    if (!listener) {
-        if (out_status) *out_status = NW_LISTEN_FAILED;
-        return NULL;
-    }
-
-    nw_advertise_descriptor_t advertise_descriptor = nw_retain((nw_advertise_descriptor_t)descriptor);
-    nw_listener_set_advertise_descriptor(listener, advertise_descriptor);
-    nw_release(advertise_descriptor);
-
-    nw_bonjour_advertise_handle *h = (nw_bonjour_advertise_handle *)calloc(1, sizeof(nw_bonjour_advertise_handle));
-    h->listener = listener;
-    h->queue = dispatch_queue_create("networkframework-rs.advertise-descriptor", DISPATCH_QUEUE_SERIAL);
-    h->ready = dispatch_semaphore_create(0);
-    atomic_store(&h->state_code, 0);
-
-    nw_listener_set_queue(listener, h->queue);
-    nw_listener_set_state_changed_handler(listener, ^(nw_listener_state_t state, nw_error_t error) {
-        (void)error;
-        if (state == nw_listener_state_ready) {
-            atomic_store(&h->state_code, 1);
-            dispatch_semaphore_signal(h->ready);
-        } else if (state == nw_listener_state_cancelled) {
-            atomic_store(&h->state_code, 2);
-            dispatch_semaphore_signal(h->ready);
-        } else if (state == nw_listener_state_failed) {
-            atomic_store(&h->state_code, 3);
-            dispatch_semaphore_signal(h->ready);
-        }
-    });
-    nw_listener_set_new_connection_handler(listener, ^(nw_connection_t conn) {
-        nw_connection_cancel(conn);
-    });
-    nw_listener_start(listener);
-
-    dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, 10LL * NSEC_PER_SEC);
-    if (dispatch_semaphore_wait(h->ready, deadline) != 0 || atomic_load(&h->state_code) != 1) {
-        nw_listener_cancel(listener);
-        nw_release(h->listener);
-        dispatch_release(h->queue);
-        dispatch_release(h->ready);
-        free(h);
-        if (out_status) *out_status = NW_LISTEN_FAILED;
-        return NULL;
-    }
-
-    if (out_status) *out_status = NW_OK;
-    return h;
 }
 
 void *nw_shim_privacy_context_copy_default(void) {
@@ -3357,42 +4126,12 @@ static nw_interface_t nw_shim_copy_matching_interface_from_path(nw_path_t path, 
 }
 
 static nw_interface_t nw_shim_copy_matching_interface(const char *name, int interface_type, uint32_t index) {
-    __block nw_path_t captured_path = NULL;
-    dispatch_queue_t queue = dispatch_queue_create("networkframework-rs.interface-lookup", DISPATCH_QUEUE_SERIAL);
-    dispatch_semaphore_t ready = dispatch_semaphore_create(0);
-    nw_path_monitor_t monitor = nw_path_monitor_create();
-    if (!monitor) {
-        dispatch_release(queue);
-        dispatch_release(ready);
+    nw_path_t path = nw_shim_copy_current_path("networkframework-rs.interface-lookup");
+    if (!path) {
         return NULL;
     }
-
-    nw_path_monitor_set_queue(monitor, queue);
-    nw_path_monitor_set_update_handler(monitor, ^(nw_path_t path) {
-        if (!captured_path && path) {
-            captured_path = nw_retain(path);
-            dispatch_semaphore_signal(ready);
-        }
-    });
-    nw_path_monitor_start(monitor);
-
-    dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, 5LL * NSEC_PER_SEC);
-    if (dispatch_semaphore_wait(ready, deadline) != 0) {
-        nw_path_monitor_cancel(monitor);
-        nw_release(monitor);
-        dispatch_release(queue);
-        dispatch_release(ready);
-        return NULL;
-    }
-
-    nw_interface_t interface = nw_shim_copy_matching_interface_from_path(captured_path, name, interface_type, index);
-    nw_path_monitor_cancel(monitor);
-    if (captured_path) {
-        nw_release(captured_path);
-    }
-    nw_release(monitor);
-    dispatch_release(queue);
-    dispatch_release(ready);
+    nw_interface_t interface = nw_shim_copy_matching_interface_from_path(path, name, interface_type, index);
+    nw_release(path);
     return interface;
 }
 
@@ -3706,23 +4445,16 @@ void *nw_shim_connection_copy_establishment_report(void *handle) {
     if (!h) {
         return NULL;
     }
-    __block nw_establishment_report_t report = NULL;
-    dispatch_semaphore_t ready = dispatch_semaphore_create(0);
-    nw_connection_access_establishment_report(h->conn, h->queue, ^(nw_establishment_report_t accessed_report) {
-        if (accessed_report) {
-            report = nw_retain(accessed_report);
-        }
-        dispatch_semaphore_signal(ready);
-    });
-    dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, 30LL * NSEC_PER_SEC);
-    if (dispatch_semaphore_wait(ready, deadline) != 0) {
-        dispatch_release(ready);
-        if (report) {
-            nw_release(report);
-        }
+    nw_shim_waiter *waiter = nw_shim_waiter_create(2);
+    if (!waiter) {
         return NULL;
     }
-    dispatch_release(ready);
+    nw_connection_access_establishment_report(h->conn, h->queue, ^(nw_establishment_report_t accessed_report) {
+        nw_shim_waiter_complete(waiter, accessed_report ? nw_retain(accessed_report) : NULL);
+        nw_shim_waiter_release(waiter);
+    });
+    void *report = nw_shim_waiter_wait_take(waiter, NW_SHIM_CONNECT_TIMEOUT_NS, NULL);
+    nw_shim_waiter_release(waiter);
     return report;
 }
 
@@ -3899,17 +4631,21 @@ int nw_shim_data_transfer_report_collect(void *report) {
     if (!report) {
         return NW_INVALID_ARG;
     }
+    nw_shim_waiter *waiter = nw_shim_waiter_create(2);
+    if (!waiter) {
+        return NW_INVALID_ARG;
+    }
     dispatch_queue_t queue = dispatch_queue_create("networkframework-rs.data-transfer-report", DISPATCH_QUEUE_SERIAL);
-    dispatch_semaphore_t ready = dispatch_semaphore_create(0);
     nw_data_transfer_report_collect((nw_data_transfer_report_t)report, queue, ^(nw_data_transfer_report_t collected_report) {
         (void)collected_report;
-        dispatch_semaphore_signal(ready);
+        nw_shim_waiter_complete(waiter, NULL);
+        nw_shim_waiter_release(waiter);
     });
-    dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, 30LL * NSEC_PER_SEC);
-    int status = dispatch_semaphore_wait(ready, deadline) == 0 ? NW_OK : NW_TIMEOUT;
+    bool done = false;
+    (void)nw_shim_waiter_wait_take(waiter, NW_SHIM_CONNECT_TIMEOUT_NS, &done);
     dispatch_release(queue);
-    dispatch_release(ready);
-    return status;
+    nw_shim_waiter_release(waiter);
+    return done ? NW_OK : NW_TIMEOUT;
 }
 
 int nw_shim_data_transfer_report_get_state(void *report) {
@@ -4139,36 +4875,100 @@ int nw_shim_txt_record_is_equal(void *txt_record, void *other_txt_record) {
 }
 
 typedef struct nw_ethernet_channel_handle {
+    _Atomic long refs;
     nw_ethernet_channel_t channel;
     dispatch_queue_t queue;
+    pthread_mutex_t lock;
+    bool cancelled;
+    bool cancel_requested;
+    nw_shim_subscriptions subs;
 } nw_ethernet_channel_handle;
 
-static void nw_shim_destroy_ethernet_channel_handle(nw_ethernet_channel_handle *handle) {
-    if (!handle) {
+static void nw_shim_ethernet_release(nw_ethernet_channel_handle *h) {
+    if (atomic_fetch_sub_explicit(&h->refs, 1, memory_order_acq_rel) != 1) {
         return;
     }
-    if (handle->channel) {
-        nw_release(handle->channel);
+    nw_shim_subscriptions_destroy(&h->subs);
+    nw_release(h->channel);
+    dispatch_release(h->queue);
+    pthread_mutex_destroy(&h->lock);
+    free(h);
+}
+
+static void nw_shim_ethernet_release_async(void *context) {
+    nw_shim_ethernet_release((nw_ethernet_channel_handle *)context);
+}
+
+static void nw_shim_ethernet_on_state(nw_ethernet_channel_handle *h, nw_ethernet_channel_state_t state) {
+    pthread_mutex_lock(&h->lock);
+    if (h->cancelled) {
+        pthread_mutex_unlock(&h->lock);
+        return;
     }
-    if (handle->queue) {
-        dispatch_release(handle->queue);
+    bool final_event = state == nw_ethernet_channel_state_cancelled;
+    if (final_event) {
+        h->cancelled = true;
     }
-    free(handle);
+    pthread_mutex_unlock(&h->lock);
+
+    nw_shim_snapshot snapshot;
+    nw_shim_subscriptions_snapshot(&h->subs, NW_SHIM_EVENT_STATE, &snapshot);
+    for (size_t index = 0; index < snapshot.count; index++) {
+        ((EthernetChannelStateCallback)snapshot.items[index].fn)((int)state, snapshot.items[index].context);
+    }
+    nw_shim_snapshot_release(&snapshot);
+
+    if (final_event) {
+        dispatch_async_f(h->queue, h, nw_shim_ethernet_release_async);
+    }
+}
+
+static void nw_shim_ethernet_on_receive(
+    nw_ethernet_channel_handle *h,
+    dispatch_data_t content,
+    uint16_t vlan_tag,
+    const uint8_t *local_address,
+    const uint8_t *remote_address
+) {
+    nw_shim_snapshot snapshot;
+    nw_shim_subscriptions_snapshot(&h->subs, NW_SHIM_EVENT_RECEIVE, &snapshot);
+    if (snapshot.count > 0) {
+        uint8_t *bytes = NULL;
+        size_t length = nw_shim_copy_dispatch_data(content, &bytes);
+        for (size_t index = 0; index < snapshot.count; index++) {
+            ((EthernetChannelReceiveCallback)snapshot.items[index].fn)(
+                bytes, length, vlan_tag, local_address, remote_address, snapshot.items[index].context);
+        }
+        free(bytes);
+    }
+    nw_shim_snapshot_release(&snapshot);
 }
 
 static nw_ethernet_channel_handle *nw_shim_create_ethernet_channel_handle(nw_ethernet_channel_t channel) {
     if (!channel) {
         return NULL;
     }
-    nw_ethernet_channel_handle *handle = (nw_ethernet_channel_handle *)calloc(1, sizeof(nw_ethernet_channel_handle));
-    if (!handle) {
+    nw_ethernet_channel_handle *h = (nw_ethernet_channel_handle *)calloc(1, sizeof(nw_ethernet_channel_handle));
+    if (!h) {
         nw_release(channel);
         return NULL;
     }
-    handle->channel = channel;
-    handle->queue = dispatch_queue_create("networkframework-rs.ethernet-channel", DISPATCH_QUEUE_SERIAL);
-    nw_ethernet_channel_set_queue(channel, handle->queue);
-    return handle;
+    atomic_init(&h->refs, 2);
+    h->channel = channel;
+    h->queue = dispatch_queue_create("networkframework-rs.ethernet-channel", DISPATCH_QUEUE_SERIAL);
+    pthread_mutex_init(&h->lock, NULL);
+    nw_shim_subscriptions_init(&h->subs);
+
+    nw_ethernet_channel_set_queue(channel, h->queue);
+    nw_ethernet_channel_set_state_changed_handler(channel, ^(nw_ethernet_channel_state_t state, nw_error_t error) {
+        (void)error;
+        nw_shim_ethernet_on_state(h, state);
+    });
+    nw_ethernet_channel_set_receive_handler(channel,
+        ^(dispatch_data_t content, uint16_t vlan_tag, nw_ethernet_address_t local_address, nw_ethernet_address_t remote_address) {
+            nw_shim_ethernet_on_receive(h, content, vlan_tag, local_address, remote_address);
+        });
+    return h;
 }
 
 void *nw_shim_ethernet_channel_create(uint16_t ether_type, const char *name, int interface_type, uint32_t index) {
@@ -4197,30 +4997,42 @@ void *nw_shim_ethernet_channel_create_with_parameters(uint16_t ether_type, const
     return nw_shim_create_ethernet_channel_handle(channel);
 }
 
-void nw_shim_ethernet_channel_set_state_changed_handler(void *handle, EthernetChannelStateCallback callback, void *user_info) {
+uint64_t nw_shim_ethernet_channel_subscribe_state(
+    void *handle,
+    EthernetChannelStateCallback callback,
+    void *context,
+    NwShimContextCallback retain,
+    NwShimContextCallback release
+) {
     nw_ethernet_channel_handle *h = (nw_ethernet_channel_handle *)handle;
+    nw_shim_callback entry = nw_shim_make_callback((nw_shim_fn)callback, context, retain, release);
     if (!h) {
-        return;
+        nw_shim_callback_release(&entry);
+        return 0;
     }
-    nw_ethernet_channel_set_state_changed_handler(h->channel, callback ? ^(nw_ethernet_channel_state_t state, nw_error_t error) {
-        (void)error;
-        callback((int)state, user_info);
-    } : NULL);
+    return nw_shim_subscriptions_add(&h->subs, NW_SHIM_EVENT_STATE, entry);
 }
 
-void nw_shim_ethernet_channel_set_receive_handler(void *handle, EthernetChannelReceiveCallback callback, void *user_info) {
+uint64_t nw_shim_ethernet_channel_subscribe_receive(
+    void *handle,
+    EthernetChannelReceiveCallback callback,
+    void *context,
+    NwShimContextCallback retain,
+    NwShimContextCallback release
+) {
     nw_ethernet_channel_handle *h = (nw_ethernet_channel_handle *)handle;
+    nw_shim_callback entry = nw_shim_make_callback((nw_shim_fn)callback, context, retain, release);
     if (!h) {
-        return;
+        nw_shim_callback_release(&entry);
+        return 0;
     }
-    nw_ethernet_channel_set_receive_handler(h->channel, callback ? ^(dispatch_data_t content, uint16_t vlan_tag, nw_ethernet_address_t local_address, nw_ethernet_address_t remote_address) {
-        uint8_t *bytes = NULL;
-        size_t length = nw_shim_copy_dispatch_data(content, &bytes);
-        callback(bytes, length, vlan_tag, local_address, remote_address, user_info);
-        if (bytes) {
-            free(bytes);
-        }
-    } : NULL);
+    return nw_shim_subscriptions_add(&h->subs, NW_SHIM_EVENT_RECEIVE, entry);
+}
+
+void nw_shim_ethernet_channel_unsubscribe(void *handle, uint64_t token) {
+    nw_ethernet_channel_handle *h = (nw_ethernet_channel_handle *)handle;
+    if (!h) return;
+    nw_shim_subscriptions_remove(&h->subs, token);
 }
 
 uint32_t nw_shim_ethernet_channel_get_maximum_payload_size(void *handle) {
@@ -4241,7 +5053,13 @@ void nw_shim_ethernet_channel_cancel(void *handle) {
     if (!h) {
         return;
     }
-    nw_ethernet_channel_cancel(h->channel);
+    pthread_mutex_lock(&h->lock);
+    bool should_cancel = !h->cancel_requested && !h->cancelled;
+    h->cancel_requested = true;
+    pthread_mutex_unlock(&h->lock);
+    if (should_cancel) {
+        nw_ethernet_channel_cancel(h->channel);
+    }
 }
 
 int nw_shim_ethernet_channel_send(void *handle, const uint8_t *data, size_t len, uint16_t vlan_tag, const uint8_t *remote_address) {
@@ -4271,7 +5089,8 @@ void nw_shim_ethernet_channel_release(void *handle) {
     if (!h) {
         return;
     }
-    nw_shim_destroy_ethernet_channel_handle(h);
+    nw_shim_ethernet_channel_cancel(h);
+    nw_shim_ethernet_release(h);
 }
 
 
@@ -4312,139 +5131,12 @@ static int nw_shim_invoke_endpoint_callback(nw_endpoint_t endpoint, EndpointEnum
     return callback(retained, user_info);
 }
 
-static nw_conn_handle *nw_shim_wrap_started_connection(nw_connection_t conn, const char *label, int *out_status) {
-    if (!conn) {
-        if (out_status) *out_status = NW_INVALID_ARG;
-        return NULL;
-    }
-
-    nw_conn_handle *h = (nw_conn_handle *)calloc(1, sizeof(nw_conn_handle));
-    if (!h) {
-        if (out_status) *out_status = NW_CONNECT_FAILED;
-        return NULL;
-    }
-    h->conn = conn;
-    h->queue = dispatch_queue_create(label ? label : "networkframework-rs.conn.wrap", DISPATCH_QUEUE_SERIAL);
-    h->ready = dispatch_semaphore_create(0);
-    atomic_store(&h->state_code, 0);
-
-    nw_connection_set_queue(conn, h->queue);
-    nw_connection_set_state_changed_handler(conn, ^(nw_connection_state_t state, nw_error_t error) {
-        (void)error;
-        if (state == nw_connection_state_ready) {
-            atomic_store(&h->state_code, 1);
-            dispatch_semaphore_signal(h->ready);
-        } else if (state == nw_connection_state_cancelled) {
-            atomic_store(&h->state_code, 2);
-            dispatch_semaphore_signal(h->ready);
-        } else if (state == nw_connection_state_failed) {
-            atomic_store(&h->state_code, 3);
-            dispatch_semaphore_signal(h->ready);
-        }
-    });
-    nw_connection_start(conn);
-
-    dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, 30LL * NSEC_PER_SEC);
-    if (dispatch_semaphore_wait(h->ready, deadline) != 0) {
-        cancel_and_destroy_handle(h);
-        if (out_status) *out_status = NW_TIMEOUT;
-        return NULL;
-    }
-
-    if (atomic_load(&h->state_code) != 1) {
-        cancel_and_destroy_handle(h);
-        if (out_status) *out_status = NW_CONNECT_FAILED;
-        return NULL;
-    }
-
-    if (out_status) *out_status = NW_OK;
-    return h;
-}
-
-static void *nw_shim_wrap_listener_common(nw_listener_t listener, const char *label, int *out_status) {
-    if (!listener) {
-        if (out_status) *out_status = NW_LISTEN_FAILED;
-        return NULL;
-    }
-
-    nw_listener_handle *h = (nw_listener_handle *)calloc(1, sizeof(nw_listener_handle));
-    if (!h) {
-        if (out_status) *out_status = NW_LISTEN_FAILED;
-        return NULL;
-    }
-    h->listener = listener;
-    h->queue = dispatch_queue_create(label ? label : "networkframework-rs.listener.wrap", DISPATCH_QUEUE_SERIAL);
-    h->ready = dispatch_semaphore_create(0);
-    h->accept_sem = dispatch_semaphore_create(0);
-    atomic_store(&h->state_code, 0);
-
-    nw_listener_set_queue(listener, h->queue);
-    nw_listener_set_state_changed_handler(listener, ^(nw_listener_state_t state, nw_error_t error) {
-        (void)error;
-        if (state == nw_listener_state_ready) {
-            atomic_store(&h->bound_port, nw_listener_get_port(listener));
-            atomic_store(&h->state_code, 1);
-            dispatch_semaphore_signal(h->ready);
-        } else if (state == nw_listener_state_cancelled) {
-            atomic_store(&h->state_code, 2);
-            dispatch_semaphore_signal(h->ready);
-        } else if (state == nw_listener_state_failed) {
-            atomic_store(&h->state_code, 3);
-            dispatch_semaphore_signal(h->ready);
-        }
-    });
-    nw_listener_set_new_connection_handler(listener, ^(nw_connection_t conn) {
-        nw_retain(conn);
-        if (h->pending) {
-            nw_connection_cancel(h->pending);
-            nw_release(h->pending);
-        }
-        h->pending = conn;
-        dispatch_semaphore_signal(h->accept_sem);
-    });
-    nw_listener_start(listener);
-
-    dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, 10LL * NSEC_PER_SEC);
-    if (dispatch_semaphore_wait(h->ready, deadline) != 0 || atomic_load(&h->state_code) != 1) {
-        cancel_and_destroy_listener_handle(h);
-        if (out_status) *out_status = NW_LISTEN_FAILED;
-        return NULL;
-    }
-
-    if (out_status) *out_status = NW_OK;
-    return h;
-}
-
-static nw_connection_group_handle *nw_shim_wrap_connection_group(nw_connection_group_t group, const char *label) {
-    if (!group) {
-        return NULL;
-    }
-    nw_connection_group_handle *h = (nw_connection_group_handle *)calloc(1, sizeof(nw_connection_group_handle));
-    if (!h) {
-        return NULL;
-    }
-    h->group = nw_retain(group);
-    h->queue = dispatch_queue_create(label ? label : "networkframework-rs.connection-group.wrap", DISPATCH_QUEUE_SERIAL);
-    h->state_sem = dispatch_semaphore_create(0);
-    atomic_store(&h->state_code, (int)nw_connection_group_state_invalid);
-    nw_connection_group_set_queue(h->group, h->queue);
-    nw_connection_group_set_state_changed_handler(h->group, ^(nw_connection_group_state_t state, nw_error_t error) {
-        (void)error;
-        atomic_store(&h->state_code, (int)state);
-        dispatch_semaphore_signal(h->state_sem);
-        if (h->state_callback) {
-            h->state_callback((int)state, h->state_user_info);
-        }
-    });
-    return h;
-}
-
 void nw_shim_connection_release_without_cancel(void *handle) {
     nw_conn_handle *h = (nw_conn_handle *)handle;
     if (!h) {
         return;
     }
-    destroy_handle(h);
+    nw_shim_conn_release(h);
 }
 
 void nw_shim_advertise_descriptor_set_txt_record_object(void *descriptor, void *txt_record) {
@@ -4461,46 +5153,6 @@ void *nw_shim_advertise_descriptor_copy_txt_record_object(void *descriptor) {
     return nw_advertise_descriptor_copy_txt_record_object((nw_advertise_descriptor_t)descriptor);
 }
 
-void *nw_shim_browser_start_results_with_descriptor(
-    void *descriptor,
-    void *parameters,
-    BrowseResultChangedCallback callback,
-    void *user_info
-) {
-    if (!descriptor || !callback) {
-        return NULL;
-    }
-
-    nw_browse_descriptor_t desc = nw_retain((nw_browse_descriptor_t)descriptor);
-    nw_parameters_t params = parameters ? nw_parameters_copy((nw_parameters_t)parameters) : nw_parameters_create();
-    if (!params) {
-        nw_release(desc);
-        return NULL;
-    }
-
-    nw_browser_t browser = nw_browser_create(desc, params);
-    nw_release(desc);
-    nw_release(params);
-    if (!browser) {
-        return NULL;
-    }
-
-    nw_browser_handle *h = (nw_browser_handle *)calloc(1, sizeof(nw_browser_handle));
-    h->browser = browser;
-    h->queue = dispatch_queue_create("networkframework-rs.browser.results", DISPATCH_QUEUE_SERIAL);
-    h->user_info = user_info;
-
-    nw_browser_set_queue(browser, h->queue);
-    nw_browser_set_browse_results_changed_handler(browser, ^(nw_browse_result_t old_result, nw_browse_result_t new_result, bool batch_complete) {
-        uint64_t changes = nw_browse_result_get_changes(old_result, new_result);
-        void *old_handle = old_result ? nw_retain(old_result) : NULL;
-        void *new_handle = new_result ? nw_retain(new_result) : NULL;
-        callback(old_handle, new_handle, changes, batch_complete ? 1 : 0, user_info);
-    });
-    nw_browser_start(browser);
-    return h;
-}
-
 void *nw_shim_browser_copy_browse_descriptor(void *handle) {
     nw_browser_handle *h = (nw_browser_handle *)handle;
     if (!h) {
@@ -4515,21 +5167,6 @@ void *nw_shim_browser_copy_parameters(void *handle) {
         return NULL;
     }
     return nw_browser_copy_parameters(h->browser);
-}
-
-void nw_shim_browser_set_state_changed_handler(void *handle, BrowserStateChangedCallback callback, void *user_info) {
-    nw_browser_handle *h = (nw_browser_handle *)handle;
-    if (!h) {
-        return;
-    }
-    if (!callback) {
-        nw_browser_set_state_changed_handler(h->browser, NULL);
-        return;
-    }
-    nw_browser_set_state_changed_handler(h->browser, ^(nw_browser_state_t state, nw_error_t error) {
-        void *retained_error = error ? nw_retain(error) : NULL;
-        callback((int)state, retained_error, user_info);
-    });
 }
 
 uint64_t nw_shim_browse_result_get_changes(void *old_result, void *new_result) {
@@ -4570,47 +5207,65 @@ int nw_shim_browse_result_enumerate_interfaces(void *result, InterfaceEnumeratio
     return count;
 }
 
-void nw_shim_connection_set_viability_changed_handler(void *handle, ConnectionBooleanCallback callback, void *user_info) {
+static uint64_t nw_shim_connection_subscribe(void *handle, int kind, nw_shim_callback entry) {
     nw_conn_handle *h = (nw_conn_handle *)handle;
     if (!h) {
-        return;
+        nw_shim_callback_release(&entry);
+        return 0;
     }
-    if (!callback) {
-        nw_connection_set_viability_changed_handler(h->conn, NULL);
-        return;
-    }
-    nw_connection_set_viability_changed_handler(h->conn, ^(bool value) {
-        callback(value ? 1 : 0, user_info);
-    });
+    return nw_shim_subscriptions_add(&h->subs, kind, entry);
 }
 
-void nw_shim_connection_set_better_path_available_handler(void *handle, ConnectionBooleanCallback callback, void *user_info) {
-    nw_conn_handle *h = (nw_conn_handle *)handle;
-    if (!h) {
-        return;
-    }
-    if (!callback) {
-        nw_connection_set_better_path_available_handler(h->conn, NULL);
-        return;
-    }
-    nw_connection_set_better_path_available_handler(h->conn, ^(bool value) {
-        callback(value ? 1 : 0, user_info);
-    });
+uint64_t nw_shim_connection_subscribe_state(
+    void *handle,
+    ConnectionStateCallback callback,
+    void *context,
+    NwShimContextCallback retain,
+    NwShimContextCallback release
+) {
+    return nw_shim_connection_subscribe(
+        handle, NW_SHIM_EVENT_STATE, nw_shim_make_callback((nw_shim_fn)callback, context, retain, release));
 }
 
-void nw_shim_connection_set_path_changed_handler(void *handle, ConnectionPathCallback callback, void *user_info) {
+uint64_t nw_shim_connection_subscribe_viability(
+    void *handle,
+    ConnectionBooleanCallback callback,
+    void *context,
+    NwShimContextCallback retain,
+    NwShimContextCallback release
+) {
+    return nw_shim_connection_subscribe(
+        handle, NW_SHIM_EVENT_VIABILITY, nw_shim_make_callback((nw_shim_fn)callback, context, retain, release));
+}
+
+uint64_t nw_shim_connection_subscribe_better_path(
+    void *handle,
+    ConnectionBooleanCallback callback,
+    void *context,
+    NwShimContextCallback retain,
+    NwShimContextCallback release
+) {
+    return nw_shim_connection_subscribe(
+        handle, NW_SHIM_EVENT_BETTER_PATH, nw_shim_make_callback((nw_shim_fn)callback, context, retain, release));
+}
+
+uint64_t nw_shim_connection_subscribe_path(
+    void *handle,
+    ConnectionPathCallback callback,
+    void *context,
+    NwShimContextCallback retain,
+    NwShimContextCallback release
+) {
+    return nw_shim_connection_subscribe(
+        handle, NW_SHIM_EVENT_PATH, nw_shim_make_callback((nw_shim_fn)callback, context, retain, release));
+}
+
+void nw_shim_connection_unsubscribe(void *handle, uint64_t token) {
     nw_conn_handle *h = (nw_conn_handle *)handle;
     if (!h) {
         return;
     }
-    if (!callback) {
-        nw_connection_set_path_changed_handler(h->conn, NULL);
-        return;
-    }
-    nw_connection_set_path_changed_handler(h->conn, ^(nw_path_t path) {
-        void *retained_path = path ? nw_retain(path) : NULL;
-        callback(retained_path, user_info);
-    });
+    nw_shim_subscriptions_remove(&h->subs, token);
 }
 
 void nw_shim_connection_restart(void *handle) {
@@ -4837,7 +5492,8 @@ void *nw_shim_connection_group_extract_connection_for_message(void *handle, void
         if (out_status) *out_status = NW_CONNECT_FAILED;
         return NULL;
     }
-    return nw_shim_wrap_started_connection(connection, "networkframework-rs.connection-group.message", out_status);
+    return nw_shim_conn_start_and_wait(
+        connection, "networkframework-rs.connection-group.message", NW_SHIM_CONNECT_TIMEOUT_NS, out_status);
 }
 
 void *nw_shim_connection_group_extract_connection(void *handle, void *endpoint, void *protocol_options, int *out_status) {
@@ -4846,31 +5502,25 @@ void *nw_shim_connection_group_extract_connection(void *handle, void *endpoint, 
         if (out_status) *out_status = NW_INVALID_ARG;
         return NULL;
     }
-    if (__builtin_available(macOS 12.0, *)) {
-        nw_connection_t connection = nw_connection_group_extract_connection(
-            h->group,
-            (nw_endpoint_t)endpoint,
-            (nw_protocol_options_t)protocol_options);
-        if (!connection) {
-            if (out_status) *out_status = NW_CONNECT_FAILED;
-            return NULL;
-        }
-        return nw_shim_wrap_started_connection(connection, "networkframework-rs.connection-group.extract", out_status);
+    nw_connection_t connection = nw_connection_group_extract_connection(
+        h->group,
+        (nw_endpoint_t)endpoint,
+        (nw_protocol_options_t)protocol_options);
+    if (!connection) {
+        if (out_status) *out_status = NW_CONNECT_FAILED;
+        return NULL;
     }
-    if (out_status) *out_status = NW_INVALID_ARG;
-    return NULL;
+    return nw_shim_conn_start_and_wait(
+        connection, "networkframework-rs.connection-group.extract", NW_SHIM_CONNECT_TIMEOUT_NS, out_status);
 }
 
 int nw_shim_connection_group_reinsert_extracted_connection(void *handle, void *connection_handle) {
     nw_connection_group_handle *h = (nw_connection_group_handle *)handle;
     nw_conn_handle *connection = (nw_conn_handle *)connection_handle;
     if (!h || !connection || !connection->conn) {
-        return 0;
+        return NW_INVALID_ARG;
     }
-    if (__builtin_available(macOS 12.0, *)) {
-        return nw_connection_group_reinsert_extracted_connection(h->group, connection->conn) ? 1 : 0;
-    }
-    return 0;
+    return nw_connection_group_reinsert_extracted_connection(h->group, connection->conn) ? NW_OK : NW_INVALID_ARG;
 }
 
 int nw_shim_connection_group_reply(
@@ -4893,33 +5543,6 @@ int nw_shim_connection_group_reply(
         dispatch_release(payload);
     }
     return NW_OK;
-}
-
-void nw_shim_connection_group_set_new_connection_handler(
-    void *handle,
-    ConnectionGroupNewConnectionCallback callback,
-    void *user_info
-) {
-    nw_connection_group_handle *h = (nw_connection_group_handle *)handle;
-    if (!h) {
-        return;
-    }
-    if (!callback) {
-        if (__builtin_available(macOS 12.0, *)) {
-            nw_connection_group_set_new_connection_handler(h->group, NULL);
-        }
-        return;
-    }
-    if (__builtin_available(macOS 12.0, *)) {
-        nw_connection_group_set_new_connection_handler(h->group, ^(nw_connection_t connection) {
-            int status = NW_OK;
-            nw_connection_t retained = nw_retain(connection);
-            nw_conn_handle *wrapped = nw_shim_wrap_started_connection(retained, "networkframework-rs.connection-group.new-connection", &status);
-            if (wrapped) {
-                callback(wrapped, user_info);
-            }
-        });
-    }
 }
 
 int nw_shim_error_get_domain(void *error) {
@@ -5005,7 +5628,7 @@ void *nw_shim_listener_create_direct(void *parameters, int *out_status) {
         return NULL;
     }
     nw_listener_t listener = nw_listener_create((nw_parameters_t)parameters);
-    return nw_shim_wrap_listener_common(listener, "networkframework-rs.listener.direct", out_status);
+    return nw_shim_listener_start(listener, "networkframework-rs.listener.direct", out_status);
 }
 
 void *nw_shim_listener_create_with_connection(void *connection_handle, void *parameters, int *out_status) {
@@ -5014,12 +5637,8 @@ void *nw_shim_listener_create_with_connection(void *connection_handle, void *par
         if (out_status) *out_status = NW_INVALID_ARG;
         return NULL;
     }
-    if (__builtin_available(macOS 11.0, *)) {
-        nw_listener_t listener = nw_listener_create_with_connection(connection->conn, (nw_parameters_t)parameters);
-        return nw_shim_wrap_listener_common(listener, "networkframework-rs.listener.connection", out_status);
-    }
-    if (out_status) *out_status = NW_INVALID_ARG;
-    return NULL;
+    nw_listener_t listener = nw_listener_create_with_connection(connection->conn, (nw_parameters_t)parameters);
+    return nw_shim_listener_start(listener, "networkframework-rs.listener.connection", out_status);
 }
 
 void *nw_shim_listener_create_with_launchd_key(void *parameters, const char *launchd_key, int *out_status) {
@@ -5028,7 +5647,7 @@ void *nw_shim_listener_create_with_launchd_key(void *parameters, const char *lau
         return NULL;
     }
     nw_listener_t listener = nw_listener_create_with_launchd_key((nw_parameters_t)parameters, launchd_key);
-    return nw_shim_wrap_listener_common(listener, "networkframework-rs.listener.launchd", out_status);
+    return nw_shim_listener_start(listener, "networkframework-rs.listener.launchd", out_status);
 }
 
 uint32_t nw_shim_listener_get_new_connection_limit(void *handle) {
@@ -5046,46 +5665,90 @@ void nw_shim_listener_set_new_connection_limit(void *handle, uint32_t new_connec
     }
 }
 
-void nw_shim_listener_set_advertised_endpoint_changed_handler(
-    void *handle,
-    ListenerAdvertisedEndpointChangedCallback callback,
-    void *user_info
-) {
-    nw_listener_handle *h = (nw_listener_handle *)handle;
-    if (!h) {
-        return;
+static void nw_shim_listener_on_advertised(nw_listener_handle *h, nw_endpoint_t endpoint, bool added) {
+    nw_shim_snapshot snapshot;
+    nw_shim_subscriptions_snapshot(&h->subs, NW_SHIM_EVENT_ADVERTISED_ENDPOINT, &snapshot);
+    for (size_t index = 0; index < snapshot.count; index++) {
+        ((ListenerAdvertisedEndpointChangedCallback)snapshot.items[index].fn)(
+            endpoint ? nw_retain(endpoint) : NULL,
+            added ? 1 : 0,
+            snapshot.items[index].context);
     }
-    if (!callback) {
-        nw_listener_set_advertised_endpoint_changed_handler(h->listener, NULL);
-        return;
-    }
-    nw_listener_set_advertised_endpoint_changed_handler(h->listener, ^(nw_endpoint_t endpoint, bool added) {
-        void *retained_endpoint = endpoint ? nw_retain(endpoint) : NULL;
-        callback(retained_endpoint, added ? 1 : 0, user_info);
-    });
+    nw_shim_snapshot_release(&snapshot);
 }
 
-void nw_shim_listener_set_new_connection_group_handler(
-    void *handle,
-    ListenerNewConnectionGroupCallback callback,
-    void *user_info
-) {
-    nw_listener_handle *h = (nw_listener_handle *)handle;
-    if (!h) {
+static void nw_shim_listener_on_group(nw_listener_handle *h, nw_connection_group_t group) {
+    if (!group) {
         return;
     }
-    if (__builtin_available(macOS 12.0, *)) {
-        if (!callback) {
-            nw_listener_set_new_connection_group_handler(h->listener, NULL);
-            return;
-        }
-        nw_listener_set_new_connection_group_handler(h->listener, ^(nw_connection_group_t group) {
-            nw_connection_group_handle *wrapped = nw_shim_wrap_connection_group(group, "networkframework-rs.listener.group");
-            if (wrapped) {
-                callback(wrapped, user_info);
-            }
-        });
+    nw_connection_group_handle *wrapped = nw_shim_group_create_handle(nw_retain(group), "networkframework-rs.listener.group");
+    if (!wrapped) {
+        return;
     }
+    nw_shim_snapshot snapshot;
+    nw_shim_subscriptions_snapshot(&h->subs, NW_SHIM_EVENT_NEW_GROUP, &snapshot);
+    if (snapshot.count > 0) {
+        ((ListenerNewConnectionGroupCallback)snapshot.items[0].fn)(wrapped, snapshot.items[0].context);
+    } else {
+        nw_shim_connection_group_release(wrapped);
+    }
+    nw_shim_snapshot_release(&snapshot);
+}
+
+uint64_t nw_shim_listener_subscribe_advertised_endpoint(
+    void *handle,
+    ListenerAdvertisedEndpointChangedCallback callback,
+    void *context,
+    NwShimContextCallback retain,
+    NwShimContextCallback release
+) {
+    nw_listener_handle *h = (nw_listener_handle *)handle;
+    nw_shim_callback entry = nw_shim_make_callback((nw_shim_fn)callback, context, retain, release);
+    if (!h) {
+        nw_shim_callback_release(&entry);
+        return 0;
+    }
+    uint64_t token = nw_shim_subscriptions_add(&h->subs, NW_SHIM_EVENT_ADVERTISED_ENDPOINT, entry);
+    if (token) {
+        pthread_mutex_lock(&h->lock);
+        bool install = !h->advertised_installed;
+        h->advertised_installed = true;
+        pthread_mutex_unlock(&h->lock);
+        if (install) {
+            nw_listener_set_advertised_endpoint_changed_handler(h->listener, ^(nw_endpoint_t endpoint, bool added) {
+                nw_shim_listener_on_advertised(h, endpoint, added);
+            });
+        }
+    }
+    return token;
+}
+
+uint64_t nw_shim_listener_subscribe_new_connection_group(
+    void *handle,
+    ListenerNewConnectionGroupCallback callback,
+    void *context,
+    NwShimContextCallback retain,
+    NwShimContextCallback release
+) {
+    nw_listener_handle *h = (nw_listener_handle *)handle;
+    nw_shim_callback entry = nw_shim_make_callback((nw_shim_fn)callback, context, retain, release);
+    if (!h) {
+        nw_shim_callback_release(&entry);
+        return 0;
+    }
+    uint64_t token = nw_shim_subscriptions_add(&h->subs, NW_SHIM_EVENT_NEW_GROUP, entry);
+    if (token) {
+        pthread_mutex_lock(&h->lock);
+        bool install = !h->group_installed;
+        h->group_installed = true;
+        pthread_mutex_unlock(&h->lock);
+        if (install) {
+            nw_listener_set_new_connection_group_handler(h->listener, ^(nw_connection_group_t group) {
+                nw_shim_listener_on_group(h, group);
+            });
+        }
+    }
+    return token;
 }
 
 int nw_shim_path_enumerate_gateways(void *path, EndpointEnumerationCallback callback, void *user_info) {
@@ -5103,61 +5766,6 @@ int nw_shim_path_enumerate_gateways(void *path, EndpointEnumerationCallback call
     return count;
 }
 
-static void *nw_shim_start_path_monitor_with_monitor(
-    nw_path_monitor_t monitor,
-    PathMonitorCallback callback,
-    void *user_info,
-    const char *label
-) {
-    if (!monitor) {
-        return NULL;
-    }
-    nw_path_handle *h = (nw_path_handle *)calloc(1, sizeof(nw_path_handle));
-    h->monitor = monitor;
-    h->queue = dispatch_queue_create(label, DISPATCH_QUEUE_SERIAL);
-    h->callback = callback;
-    h->user_info = user_info;
-    nw_path_monitor_set_queue(h->monitor, h->queue);
-    nw_path_monitor_set_update_handler(h->monitor, ^(nw_path_t path) {
-        if (h->latest_path) {
-            nw_release(h->latest_path);
-            h->latest_path = NULL;
-        }
-        if (path) {
-            h->latest_path = nw_retain(path);
-        }
-        if (!h->callback) return;
-        int satisfied = (nw_path_get_status(path) == nw_path_status_satisfied) ? 1 : 0;
-        int iface = 0;
-        if (nw_path_uses_interface_type(path, nw_interface_type_wifi)) iface = 1;
-        else if (nw_path_uses_interface_type(path, nw_interface_type_cellular)) iface = 2;
-        else if (nw_path_uses_interface_type(path, nw_interface_type_wired)) iface = 3;
-        else if (nw_path_uses_interface_type(path, nw_interface_type_loopback)) iface = 4;
-        h->callback(satisfied, iface, h->user_info);
-    });
-    nw_path_monitor_start(h->monitor);
-    return h;
-}
-
-void *nw_shim_path_monitor_start_with_type(int interface_type, PathMonitorCallback callback, void *user_info) {
-    return nw_shim_start_path_monitor_with_monitor(
-        nw_path_monitor_create_with_type((nw_interface_type_t)interface_type),
-        callback,
-        user_info,
-        "networkframework-rs.path.type");
-}
-
-void *nw_shim_path_monitor_start_for_ethernet_channel(PathMonitorCallback callback, void *user_info) {
-    if (__builtin_available(macOS 13.0, *)) {
-        return nw_shim_start_path_monitor_with_monitor(
-            nw_path_monitor_create_for_ethernet_channel(),
-            callback,
-            user_info,
-            "networkframework-rs.path.ethernet");
-    }
-    return NULL;
-}
-
 void nw_shim_path_monitor_prohibit_interface_type(void *handle, int interface_type) {
     nw_path_handle *h = (nw_path_handle *)handle;
     if (!h) {
@@ -5166,20 +5774,6 @@ void nw_shim_path_monitor_prohibit_interface_type(void *handle, int interface_ty
     if (__builtin_available(macOS 11.0, *)) {
         nw_path_monitor_prohibit_interface_type(h->monitor, (nw_interface_type_t)interface_type);
     }
-}
-
-void nw_shim_path_monitor_set_cancel_handler(void *handle, PathMonitorCancelCallback callback, void *user_info) {
-    nw_path_handle *h = (nw_path_handle *)handle;
-    if (!h) {
-        return;
-    }
-    if (!callback) {
-        nw_path_monitor_set_cancel_handler(h->monitor, NULL);
-        return;
-    }
-    nw_path_monitor_set_cancel_handler(h->monitor, ^{
-        callback(user_info);
-    });
 }
 
 void *nw_shim_protocol_create_ip_metadata(void) {
@@ -5355,22 +5949,6 @@ void *nw_shim_ws_metadata_copy_server_response(void *metadata) {
     return NULL;
 }
 
-void nw_shim_ws_metadata_set_pong_handler(void *metadata, WsPongCallback callback, void *user_info) {
-    if (!metadata || !__builtin_available(macOS 10.15, *)) {
-        return;
-    }
-    if (!callback) {
-        nw_ws_metadata_set_pong_handler((nw_protocol_metadata_t)metadata, dispatch_get_main_queue(), NULL);
-        return;
-    }
-    dispatch_queue_t queue = dispatch_queue_create("networkframework-rs.ws.pong", DISPATCH_QUEUE_SERIAL);
-    nw_ws_metadata_set_pong_handler((nw_protocol_metadata_t)metadata, queue, ^(nw_error_t error) {
-        void *retained_error = error ? nw_retain(error) : NULL;
-        callback(retained_error, user_info);
-    });
-    dispatch_release(queue);
-}
-
 int nw_shim_ws_request_enumerate_subprotocols(void *request, StringEnumerationCallback callback, void *user_info) {
     if (!request || !callback) {
         return 0;
@@ -5450,149 +6028,89 @@ int nw_shim_ws_response_enumerate_additional_headers(void *response, HeaderEnume
     return completed ? count : -count;
 }
 
-// --- Async-stream helper shims ---
 
-void nw_shim_connection_set_state_changed_handler(void *handle, ConnectionStateCallback callback, void *user_info) {
-    nw_conn_handle *h = (nw_conn_handle *)handle;
-    if (!h) {
-        return;
+void *nw_shim_identity_create(void *sec_identity_ref) {
+    if (!sec_identity_ref) {
+        return NULL;
     }
-    if (!callback) {
-        nw_connection_set_state_changed_handler(h->conn, NULL);
-        return;
-    }
-    nw_connection_set_state_changed_handler(h->conn, ^(nw_connection_state_t state, nw_error_t error) {
-        if (state == nw_connection_state_ready) {
-            atomic_store(&h->state_code, 1);
-            dispatch_semaphore_signal(h->ready);
-        } else if (state == nw_connection_state_cancelled) {
-            atomic_store(&h->state_code, 2);
-            dispatch_semaphore_signal(h->ready);
-        } else if (state == nw_connection_state_failed) {
-            atomic_store(&h->state_code, 3);
-            dispatch_semaphore_signal(h->ready);
-        }
-        void *retained_error = error ? nw_retain(error) : NULL;
-        callback((int)state, retained_error, user_info);
-    });
+    return sec_identity_create((SecIdentityRef)sec_identity_ref);
 }
 
-void nw_shim_connection_drain_queue(void *handle) {
-    nw_conn_handle *h = (nw_conn_handle *)handle;
-    if (!h || !h->queue) {
+void nw_shim_sec_options_set_local_identity(void *options, void *identity) {
+    if (!options || !identity) {
         return;
     }
-    dispatch_sync(h->queue, ^{});
+    sec_protocol_options_set_local_identity((sec_protocol_options_t)options, (sec_identity_t)identity);
 }
 
-void nw_shim_listener_set_state_changed_handler(void *handle, ListenerStateCallback callback, void *user_info) {
-    nw_listener_handle *h = (nw_listener_handle *)handle;
-    if (!h) {
+void nw_shim_sec_options_set_min_tls_version(void *options, uint16_t version) {
+    if (!options) {
         return;
     }
-    if (!callback) {
-        nw_listener_set_state_changed_handler(h->listener, NULL);
-        return;
-    }
-    nw_listener_set_state_changed_handler(h->listener, ^(nw_listener_state_t state, nw_error_t error) {
-        if (state == nw_listener_state_ready) {
-            atomic_store(&h->bound_port, nw_listener_get_port(h->listener));
-            atomic_store(&h->state_code, 1);
-            dispatch_semaphore_signal(h->ready);
-        } else if (state == nw_listener_state_cancelled) {
-            atomic_store(&h->state_code, 2);
-            dispatch_semaphore_signal(h->ready);
-        } else if (state == nw_listener_state_failed) {
-            atomic_store(&h->state_code, 3);
-            dispatch_semaphore_signal(h->ready);
-        }
-        void *retained_error = error ? nw_retain(error) : NULL;
-        callback((int)state, retained_error, user_info);
-    });
+    sec_protocol_options_set_min_tls_protocol_version((sec_protocol_options_t)options, (tls_protocol_version_t)version);
 }
 
-void nw_shim_listener_set_new_connection_handler(void *handle, ListenerNewConnectionCallback callback, void *user_info) {
-    nw_listener_handle *h = (nw_listener_handle *)handle;
-    if (!h) {
+void nw_shim_sec_options_set_max_tls_version(void *options, uint16_t version) {
+    if (!options) {
         return;
     }
-    if (!callback) {
-        nw_listener_set_new_connection_handler(h->listener, NULL);
-        return;
-    }
-    nw_listener_set_new_connection_handler(h->listener, ^(nw_connection_t conn) {
-        if (!conn) {
-            return;
-        }
-        int status = NW_OK;
-        nw_connection_t retained = nw_retain(conn);
-        nw_conn_handle *wrapped = nw_shim_wrap_started_connection(retained, "networkframework-rs.async-accepted", &status);
-        if (wrapped) {
-            callback(wrapped, user_info);
-        }
-    });
+    sec_protocol_options_set_max_tls_protocol_version((sec_protocol_options_t)options, (tls_protocol_version_t)version);
 }
 
-void nw_shim_listener_drain_queue(void *handle) {
-    nw_listener_handle *h = (nw_listener_handle *)handle;
-    if (!h || !h->queue) {
+void nw_shim_sec_options_add_application_protocol(void *options, const char *application_protocol) {
+    if (!options || !application_protocol) {
         return;
     }
-    dispatch_sync(h->queue, ^{});
+    sec_protocol_options_add_tls_application_protocol((sec_protocol_options_t)options, application_protocol);
 }
 
-void nw_shim_browser_set_browse_results_changed_handler(void *handle, BrowseResultChangedCallback callback, void *user_info) {
-    nw_browser_handle *h = (nw_browser_handle *)handle;
-    if (!h) {
+void nw_shim_sec_options_set_server_name(void *options, const char *server_name) {
+    if (!options || !server_name) {
         return;
     }
-    if (!callback) {
-        nw_browser_set_browse_results_changed_handler(h->browser, NULL);
-        return;
-    }
-    nw_browser_set_browse_results_changed_handler(h->browser, ^(nw_browse_result_t old_result, nw_browse_result_t new_result, bool batch_complete) {
-        uint64_t changes = nw_browse_result_get_changes(old_result, new_result);
-        void *old_handle = old_result ? nw_retain(old_result) : NULL;
-        void *new_handle = new_result ? nw_retain(new_result) : NULL;
-        callback(old_handle, new_handle, changes, batch_complete ? 1 : 0, user_info);
-    });
+    sec_protocol_options_set_tls_server_name((sec_protocol_options_t)options, server_name);
 }
 
-void nw_shim_browser_drain_queue(void *handle) {
-    nw_browser_handle *h = (nw_browser_handle *)handle;
-    if (!h || !h->queue) {
+void nw_shim_sec_options_set_peer_authentication_required(void *options, int required) {
+    if (!options) {
         return;
     }
-    dispatch_sync(h->queue, ^{});
+    sec_protocol_options_set_peer_authentication_required((sec_protocol_options_t)options, required != 0);
 }
 
-void nw_shim_path_monitor_set_update_handler(void *handle, ConnectionPathCallback callback, void *user_info) {
-    nw_path_handle *h = (nw_path_handle *)handle;
-    if (!h) {
-        return;
+uint16_t nw_shim_sec_metadata_get_negotiated_tls_version(void *metadata) {
+    if (!metadata) {
+        return 0;
     }
-    if (!callback) {
-        nw_path_monitor_set_update_handler(h->monitor, NULL);
-        return;
-    }
-    nw_path_monitor_set_update_handler(h->monitor, ^(nw_path_t path) {
-        if (h->latest_path) {
-            nw_release(h->latest_path);
-            h->latest_path = NULL;
-        }
-        if (path) {
-            h->latest_path = nw_retain(path);
-        }
-        void *retained_path = path ? nw_retain(path) : NULL;
-        callback(retained_path, user_info);
-    });
+    return (uint16_t)sec_protocol_metadata_get_negotiated_tls_protocol_version((sec_protocol_metadata_t)metadata);
 }
 
-void nw_shim_path_monitor_drain_queue(void *handle) {
-    nw_path_handle *h = (nw_path_handle *)handle;
-    if (!h || !h->queue) {
-        return;
+char *nw_shim_sec_metadata_copy_negotiated_protocol(void *metadata) {
+    if (!metadata) {
+        return NULL;
     }
-    dispatch_sync(h->queue, ^{});
+    if (__builtin_available(macOS 15.5, *)) {
+        const char *value = sec_protocol_metadata_copy_negotiated_protocol((sec_protocol_metadata_t)metadata);
+        return (char *)value;
+    }
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    const char *value = sec_protocol_metadata_get_negotiated_protocol((sec_protocol_metadata_t)metadata);
+#pragma clang diagnostic pop
+    return value ? strdup(value) : NULL;
 }
 
+void nw_shim_sha256(const uint8_t *data, size_t length, uint8_t *out_digest) {
+    if (!out_digest) {
+        return;
+    }
+    CC_SHA256_CTX context;
+    CC_SHA256_Init(&context);
+    while (data && length > 0) {
+        CC_LONG chunk = length > UINT32_MAX ? UINT32_MAX : (CC_LONG)length;
+        CC_SHA256_Update(&context, data, chunk);
+        data += chunk;
+        length -= chunk;
+    }
+    CC_SHA256_Final(out_digest, &context);
+}

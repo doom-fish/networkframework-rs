@@ -27,6 +27,9 @@ pub enum NetworkError {
     ListenFailed,
     Cancelled,
     Timeout,
+    MessageTooLarge { size: usize, limit: usize },
+    Unsupported(String),
+    Security(i32),
     Unknown(i32),
 }
 
@@ -40,6 +43,12 @@ impl fmt::Display for NetworkError {
             Self::ListenFailed => write!(f, "listen failed"),
             Self::Cancelled => write!(f, "operation cancelled"),
             Self::Timeout => write!(f, "operation timed out"),
+            Self::MessageTooLarge { size, limit } => write!(
+                f,
+                "received message of {size} bytes exceeds the {limit}-byte receive buffer"
+            ),
+            Self::Unsupported(m) => write!(f, "unsupported: {m}"),
+            Self::Security(status) => write!(f, "Security framework error (OSStatus {status})"),
             Self::Unknown(c) => write!(f, "unknown shim status {c}"),
         }
     }
@@ -178,6 +187,16 @@ pub(crate) fn from_status(code: i32) -> NetworkError {
         NW_CANCELLED => NetworkError::Cancelled,
         NW_TIMEOUT => NetworkError::Timeout,
         other => NetworkError::Unknown(other),
+    }
+}
+
+#[must_use]
+#[allow(clippy::cast_possible_truncation)]
+pub(crate) fn receive_error(code: isize, size: usize, limit: usize) -> NetworkError {
+    if code == crate::ffi::NW_MESSAGE_TOO_LARGE as isize {
+        NetworkError::MessageTooLarge { size, limit }
+    } else {
+        from_status(code as i32)
     }
 }
 

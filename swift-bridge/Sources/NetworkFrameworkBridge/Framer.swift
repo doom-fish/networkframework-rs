@@ -13,7 +13,8 @@ public func nfwFramerDefinitionCreate(
     _ wakeupCallback: FramerWakeupCallback?,
     _ stopCallback: FramerStopCallback?,
     _ cleanupCallback: FramerCleanupCallback?,
-    _ userInfo: UnsafeMutableRawPointer?
+    _ factory: UnsafeMutableRawPointer?,
+    _ releaseFactory: NwShimContextCallback?
 ) -> UnsafeMutableRawPointer? {
     nw_shim_framer_definition_create(
         identifier,
@@ -26,7 +27,8 @@ public func nfwFramerDefinitionCreate(
         wakeupCallback,
         stopCallback,
         cleanupCallback,
-        userInfo
+        factory,
+        releaseFactory
     )
 }
 

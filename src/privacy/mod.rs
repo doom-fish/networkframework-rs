@@ -290,7 +290,6 @@ pub struct UrlSessionConfiguration {
 }
 
 unsafe impl Send for ProxyConfig {}
-unsafe impl Sync for ProxyConfig {}
 
 impl std::fmt::Debug for ProxyConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -384,17 +383,16 @@ impl ProxyConfig {
         password: Option<&str>,
     ) -> Result<&mut Self, NetworkError> {
         let username = to_cstring(username, "username")?;
-        let password = match password {
-            Some(password) => Some(to_cstring(password, "password")?),
-            None => None,
-        };
+        let password = password
+            .map(|password| crate::tls::secret_c_string(password, "password"))
+            .transpose()?;
         unsafe {
             ffi::nw_shim_proxy_config_set_username_password(
                 self.handle,
                 username.as_ptr(),
                 password
                     .as_ref()
-                    .map_or(core::ptr::null(), |value| value.as_ptr()),
+                    .map_or(core::ptr::null(), |value| value.as_ptr().cast()),
             );
         }
         Ok(self)

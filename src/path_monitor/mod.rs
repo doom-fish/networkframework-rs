@@ -6,8 +6,10 @@ use core::ptr;
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use doom_fish_utils::callback_context::CallbackContext;
 use doom_fish_utils::panic_safe::catch_user_panic;
 
+use crate::context::{release_arc, retain_arc};
 use crate::ffi;
 use crate::interface::{list_interfaces_for_monitor, NetworkInterface};
 
@@ -26,41 +28,27 @@ type CancelCb = Mutex<Box<dyn FnMut() + Send + 'static>>;
 
 /// RAII guard for a running `nw_path_monitor`. Drop to stop receiving
 /// updates.
-#[allow(clippy::type_complexity)]
 pub struct PathMonitor {
     handle: *mut c_void,
-    callback_raw: *const PathCb,
-    cancel_raw: *const CancelCb,
+    updates: CallbackContext<PathCb>,
+    cancel_token: u64,
 }
 
-// SAFETY: Network.framework serializes monitor callbacks on the monitor queue.
-// The raw callback pointers are only dereferenced while the monitor handle is
-// live, and `Drop` stops the monitor, drains the queue, and only then reclaims
-// the pointers.
+// SAFETY: the shim handle is reference counted and stays alive until the
+// monitor's cancel handler, its final event, has run. Callback contexts are
+// retained by the shim for as long as it can invoke them.
 unsafe impl Send for PathMonitor {}
-// SAFETY: Shared references only forward to the shim. The raw callback
-// pointers remain valid until `Drop` stops the monitor and reclaims them after
-// the queue is idle.
+// SAFETY: shared references only read the latest path under the shim's lock
+// or forward to Network.framework; handler replacement requires `&mut self`.
 unsafe impl Sync for PathMonitor {}
 
 impl std::fmt::Debug for PathMonitor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PathMonitor")
             .field("handle", &self.handle)
-            .field("callback_raw", &self.callback_raw)
-            .field("cancel_raw", &self.cancel_raw)
+            .field("updates", &self.updates)
+            .field("has_cancel_handler", &(self.cancel_token != 0))
             .finish_non_exhaustive()
-    }
-}
-
-fn reclaim_arc_raw<T>(raw: &mut *const T) {
-    if !raw.is_null() {
-        // SAFETY: `*raw` was produced by `Arc::into_raw`, and the caller only
-        // invokes this helper after the shim has stopped using the pointer.
-        unsafe {
-            drop(Arc::from_raw(*raw));
-        }
-        *raw = ptr::null();
     }
 }
 
@@ -107,93 +95,80 @@ impl PathMonitor {
     where
         F: FnMut() + Send + 'static,
     {
-        if !self.cancel_raw.is_null() {
-            if !self.handle.is_null() {
-                // SAFETY: `self.handle` is a live monitor handle. Clearing the
-                // cancel handler and draining the queue ensures no queued
-                // callback can still observe `self.cancel_raw`.
-                unsafe {
-                    ffi::nw_shim_path_monitor_set_cancel_handler(
-                        self.handle,
-                        None,
-                        ptr::null_mut(),
-                    );
-                    ffi::nw_shim_path_monitor_drain_queue(self.handle);
-                }
-            }
-            reclaim_arc_raw(&mut self.cancel_raw);
+        if self.cancel_token != 0 {
+            unsafe { ffi::nw_shim_path_monitor_unsubscribe(self.handle, self.cancel_token) };
+            self.cancel_token = 0;
         }
-
         let callback: Box<dyn FnMut() + Send + 'static> = Box::new(callback);
-        let cancel_raw = Arc::into_raw(Arc::new(Mutex::new(callback)));
-        if self.handle.is_null() {
-            self.cancel_raw = cancel_raw;
-            return;
-        }
-
-        // SAFETY: `self.handle` is a live monitor handle, and `cancel_raw`
-        // points at an `Arc` allocation that stays valid until we clear the
-        // handler and reclaim it.
-        unsafe {
-            ffi::nw_shim_path_monitor_set_cancel_handler(
+        let callback: Arc<CancelCb> = Arc::new(Mutex::new(callback));
+        self.cancel_token = unsafe {
+            ffi::nw_shim_path_monitor_subscribe_cancel(
                 self.handle,
                 Some(cancel_trampoline),
-                cancel_raw.cast::<c_void>().cast_mut(),
-            );
-        }
-        self.cancel_raw = cancel_raw;
+                Arc::into_raw(callback).cast_mut().cast(),
+                Some(retain_arc::<CancelCb>),
+                Some(release_arc::<CancelCb>),
+            )
+        };
     }
 }
 
 impl Drop for PathMonitor {
     fn drop(&mut self) {
+        self.updates.deactivate();
         if !self.handle.is_null() {
             // SAFETY: `self.handle` is the live monitor handle owned by this
-            // value. `nw_shim_path_monitor_stop` cancels the monitor and drains
-            // its queue before returning, so no more callbacks can fire.
+            // value. Stopping cancels the monitor and releases this value's
+            // reference; the shim frees the handle after the cancel handler.
             unsafe {
                 ffi::nw_shim_path_monitor_stop(self.handle);
             }
             self.handle = ptr::null_mut();
         }
-        reclaim_arc_raw(&mut self.callback_raw);
-        reclaim_arc_raw(&mut self.cancel_raw);
     }
 }
 
-unsafe extern "C" fn trampoline(satisfied: i32, interface_type: i32, user_info: *mut c_void) {
-    if user_info.is_null() {
+unsafe extern "C" fn trampoline(satisfied: i32, interface_type: i32, context: *mut c_void) {
+    let update = PathUpdate {
+        satisfied: satisfied != 0,
+        interface: InterfaceType::from_raw(interface_type),
+    };
+    // SAFETY: `context` is the retained callback context registered when the
+    // monitor started; the shim keeps it alive while it can call this.
+    unsafe {
+        CallbackContext::<PathCb>::with(context, "path_monitor_trampoline", |callback| {
+            if let Ok(mut callback) = callback.lock() {
+                callback(update);
+            }
+        })
+    };
+}
+
+unsafe extern "C" fn cancel_trampoline(context: *mut c_void) {
+    if context.is_null() {
         return;
     }
-
-    // SAFETY: `user_info` is the stable pointer created by `Arc::into_raw` in
-    // the constructor and remains valid until `Drop` stops the monitor and
-    // reclaims it.
-    let callback = unsafe { &*user_info.cast::<PathCb>() };
-    let Ok(mut guard) = callback.lock() else {
-        return;
-    };
-    catch_user_panic("path_monitor_trampoline", || {
-        guard(PathUpdate {
-            satisfied: satisfied != 0,
-            interface: InterfaceType::from_raw(interface_type),
-        });
+    // SAFETY: `context` is the `Arc` handed to the shim in
+    // `set_cancel_handler`; the shim holds a reference while calling this.
+    let callback = unsafe { &*context.cast::<CancelCb>() };
+    catch_user_panic("path_monitor_cancel_trampoline", || {
+        if let Ok(mut callback) = callback.lock() {
+            callback();
+        }
     });
 }
 
-unsafe extern "C" fn cancel_trampoline(user_info: *mut c_void) {
-    if user_info.is_null() {
-        return;
+fn start_monitor(
+    callback: Box<dyn FnMut(PathUpdate) + Send + 'static>,
+    start: impl FnOnce(*mut c_void) -> *mut c_void,
+) -> PathMonitor {
+    let updates: CallbackContext<PathCb> = CallbackContext::new(Mutex::new(callback));
+    let handle = start(updates.retained_ptr());
+    PathMonitor {
+        handle,
+        updates,
+        cancel_token: 0,
     }
-
-    // SAFETY: `user_info` is the stable pointer created by `Arc::into_raw` in
-    // `set_cancel_handler` and remains valid until the handler is cleared and
-    // reclaimed.
-    let callback = unsafe { &*user_info.cast::<CancelCb>() };
-    let Ok(mut guard) = callback.lock() else {
-        return;
-    };
-    catch_user_panic("path_monitor_cancel_trampoline", &mut *guard);
 }
 
 /// Start a path monitor. The closure fires whenever Apple reports a
@@ -204,18 +179,14 @@ pub fn start_path_monitor<F>(callback: F) -> PathMonitor
 where
     F: FnMut(PathUpdate) + Send + 'static,
 {
-    let boxed: Box<dyn FnMut(PathUpdate) + Send + 'static> = Box::new(callback);
-    let callback_raw = Arc::into_raw(Arc::new(Mutex::new(boxed)));
-    // SAFETY: `callback_raw` points at the leaked `Arc` allocation that the
-    // shim will hand back to `trampoline` until `Drop` stops the monitor.
-    let handle = unsafe {
-        ffi::nw_shim_path_monitor_start(trampoline, callback_raw.cast::<c_void>().cast_mut())
-    };
-    PathMonitor {
-        handle,
-        callback_raw,
-        cancel_raw: ptr::null(),
-    }
+    start_monitor(Box::new(callback), |context| unsafe {
+        ffi::nw_shim_path_monitor_start(
+            Some(trampoline),
+            context,
+            Some(CallbackContext::<PathCb>::RETAIN),
+            Some(CallbackContext::<PathCb>::RELEASE),
+        )
+    })
 }
 
 /// Start a path monitor restricted to a specific interface type.
@@ -224,22 +195,15 @@ pub fn start_path_monitor_with_type<F>(interface_type: InterfaceType, callback: 
 where
     F: FnMut(PathUpdate) + Send + 'static,
 {
-    let boxed: Box<dyn FnMut(PathUpdate) + Send + 'static> = Box::new(callback);
-    let callback_raw = Arc::into_raw(Arc::new(Mutex::new(boxed)));
-    // SAFETY: `callback_raw` points at the leaked `Arc` allocation that the
-    // shim will hand back to `trampoline` until `Drop` stops the monitor.
-    let handle = unsafe {
+    start_monitor(Box::new(callback), |context| unsafe {
         ffi::nw_shim_path_monitor_start_with_type(
             interface_type.as_raw(),
-            trampoline,
-            callback_raw.cast::<c_void>().cast_mut(),
+            Some(trampoline),
+            context,
+            Some(CallbackContext::<PathCb>::RETAIN),
+            Some(CallbackContext::<PathCb>::RELEASE),
         )
-    };
-    PathMonitor {
-        handle,
-        callback_raw,
-        cancel_raw: ptr::null(),
-    }
+    })
 }
 
 /// Start a path monitor associated with ethernet-channel reachability.
@@ -248,19 +212,12 @@ pub fn start_path_monitor_for_ethernet_channel<F>(callback: F) -> PathMonitor
 where
     F: FnMut(PathUpdate) + Send + 'static,
 {
-    let boxed: Box<dyn FnMut(PathUpdate) + Send + 'static> = Box::new(callback);
-    let callback_raw = Arc::into_raw(Arc::new(Mutex::new(boxed)));
-    // SAFETY: `callback_raw` points at the leaked `Arc` allocation that the
-    // shim will hand back to `trampoline` until `Drop` stops the monitor.
-    let handle = unsafe {
+    start_monitor(Box::new(callback), |context| unsafe {
         ffi::nw_shim_path_monitor_start_for_ethernet_channel(
-            trampoline,
-            callback_raw.cast::<c_void>().cast_mut(),
+            Some(trampoline),
+            context,
+            Some(CallbackContext::<PathCb>::RETAIN),
+            Some(CallbackContext::<PathCb>::RELEASE),
         )
-    };
-    PathMonitor {
-        handle,
-        callback_raw,
-        cancel_raw: ptr::null(),
-    }
+    })
 }

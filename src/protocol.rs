@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use doom_fish_utils::panic_safe::catch_user_panic;
 
+use crate::context::release_arc;
 use crate::error::{FrameworkError, NetworkError};
 use crate::ffi;
 use crate::parameters_support::ServiceClass;
@@ -132,7 +133,6 @@ pub struct ProtocolOptions {
 }
 
 unsafe impl Send for ProtocolOptions {}
-unsafe impl Sync for ProtocolOptions {}
 
 impl std::fmt::Debug for ProtocolOptions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -229,6 +229,7 @@ impl ProtocolOptions {
                 self.handle,
                 Some(ws_client_request_trampoline),
                 raw,
+                Some(release_arc::<WsClientRequestHandlerCallback>),
             );
         };
         self.ws_client_request_callback = Some(arc);
@@ -405,7 +406,6 @@ pub struct ProtocolMetadata {
 }
 
 unsafe impl Send for ProtocolMetadata {}
-unsafe impl Sync for ProtocolMetadata {}
 
 impl std::fmt::Debug for ProtocolMetadata {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -563,6 +563,7 @@ impl ProtocolMetadata {
                 self.handle,
                 Some(ws_pong_trampoline),
                 raw,
+                Some(release_arc::<WsPongHandlerCallback>),
             );
         }
         self.ws_pong_handler_callback = Some(arc);
@@ -858,6 +859,7 @@ mod tests {
 
     use super::{Opcode, ProtocolMetadata, ProtocolOptions};
     use crate::client::ContentContext;
+    use crate::endpoint::Endpoint;
     use crate::parameters::ConnectionParameters;
     use crate::websocket::{WebSocket, WsResponse, WsResponseStatus};
     use crate::{ffi, TcpListener};
@@ -872,6 +874,7 @@ mod tests {
                 Some(WsResponse::new(WsResponseStatus::Accept, None).expect("accept WebSocket"))
             });
         server_parameters.prepend_application_protocol(&server_ws_options)?;
+        server_parameters.set_local_endpoint(Some(&Endpoint::address("127.0.0.1", 0)?));
 
         let listener = TcpListener::bind_with_parameters(0, &server_parameters)?;
         let port = listener.local_port();

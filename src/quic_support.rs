@@ -25,13 +25,12 @@ unsafe fn copied_string(ptr: *mut i8) -> Option<String> {
     Some(value)
 }
 
-/// Opaque `sec_protocol_options_t` extracted from QUIC options.
+/// Opaque `sec_protocol_options_t` extracted from TLS or QUIC options.
 pub struct SecurityProtocolOptions {
     handle: *mut c_void,
 }
 
 unsafe impl Send for SecurityProtocolOptions {}
-unsafe impl Sync for SecurityProtocolOptions {}
 
 impl std::fmt::Debug for SecurityProtocolOptions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -45,6 +44,11 @@ impl SecurityProtocolOptions {
     #[must_use]
     pub(crate) const unsafe fn from_raw(handle: *mut c_void) -> Self {
         Self { handle }
+    }
+
+    #[must_use]
+    pub(crate) const fn as_ptr(&self) -> *mut c_void {
+        self.handle
     }
 }
 
@@ -64,7 +68,7 @@ impl Drop for SecurityProtocolOptions {
     }
 }
 
-/// Opaque `sec_protocol_metadata_t` extracted from QUIC metadata.
+/// Opaque `sec_protocol_metadata_t` extracted from TLS or QUIC metadata.
 pub struct SecurityProtocolMetadata {
     handle: *mut c_void,
 }
@@ -84,6 +88,11 @@ impl SecurityProtocolMetadata {
     #[must_use]
     pub(crate) const unsafe fn from_raw(handle: *mut c_void) -> Self {
         Self { handle }
+    }
+
+    #[must_use]
+    pub(crate) const fn as_ptr(&self) -> *mut c_void {
+        self.handle
     }
 }
 
@@ -131,7 +140,6 @@ pub struct QuicMetadata {
 }
 
 unsafe impl Send for QuicMetadata {}
-unsafe impl Sync for QuicMetadata {}
 
 impl std::fmt::Debug for QuicMetadata {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

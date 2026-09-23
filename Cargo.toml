@@ -45,6 +45,7 @@ crate-type = ["lib"]
 [dependencies]
 apple-cf = { path = "../apple-cf-rs", version = ">=0.11, <0.12" }
 doom-fish-utils = { path = "../doom-fish-utils", version = ">=0.4.1, <0.5" }
+zeroize = ">=1.6, <1.9"
 
 [dev-dependencies]
 pollster = "0.3"

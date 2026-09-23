@@ -5,15 +5,14 @@
 use core::ffi::{c_int, c_void};
 use std::ffi::CString;
 
-use crate::client::{ContentContext, ReceivedContent};
-use crate::error::{from_status, NetworkError};
+use crate::client::{receive_content, ContentContext, ReceivedContent};
+use crate::error::{from_status, receive_error, NetworkError};
 use crate::ffi;
-use crate::parameters::{ConnectionParameters, KeepAlives};
+use crate::parameters::ConnectionParameters;
 
 /// Connected-mode UDP "client". Bound to a single peer `host:port`.
 pub struct UdpClient {
     handle: *mut c_void,
-    _keepalives: KeepAlives,
 }
 
 unsafe impl Send for UdpClient {}
@@ -37,14 +36,11 @@ impl UdpClient {
         let host_c = CString::new(host)
             .map_err(|e| NetworkError::InvalidArgument(format!("host NUL byte: {e}")))?;
         let mut status: c_int = 0;
-        let handle = unsafe { ffi::nw_shim_udp_connect(host_c.as_ptr(), port, &mut status) };
+        let handle = unsafe { ffi::nw_shim_udp_connect(host_c.as_ptr(), port, &raw mut status) };
         if status != ffi::NW_OK || handle.is_null() {
             return Err(from_status(status));
         }
-        Ok(Self {
-            handle,
-            _keepalives: KeepAlives::empty(),
-        })
+        Ok(Self { handle })
     }
 
     /// Open a UDP connection using explicit [`ConnectionParameters`].
@@ -61,16 +57,13 @@ impl UdpClient {
                 host.as_ptr(),
                 port,
                 parameters.as_ptr(),
-                &mut status,
+                &raw mut status,
             )
         };
         if status != ffi::NW_OK || handle.is_null() {
             return Err(from_status(status));
         }
-        Ok(Self {
-            handle,
-            _keepalives: parameters.keepalives(),
-        })
+        Ok(Self { handle })
     }
 
     /// Send `data` as a single UDP datagram.
@@ -106,46 +99,37 @@ impl UdpClient {
         Ok(())
     }
 
-    /// Read up to `max_len` bytes from the next inbound datagram.
+    /// Receive the next inbound datagram, which must fit in `max_len` bytes.
     ///
     /// # Errors
     ///
-    /// Returns [`NetworkError::ReceiveFailed`].
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    /// Returns [`NetworkError::MessageTooLarge`] when the datagram is longer
+    /// than `max_len` (the datagram is consumed; later calls receive the next
+    /// one), or [`NetworkError::ReceiveFailed`].
+    #[allow(clippy::cast_sign_loss)]
     pub fn receive(&self, max_len: usize) -> Result<Vec<u8>, NetworkError> {
         let mut buf = vec![0u8; max_len];
-        let n = unsafe { ffi::nw_shim_tcp_receive(self.handle, buf.as_mut_ptr(), max_len) };
+        let mut size = 0_usize;
+        let n = unsafe {
+            ffi::nw_shim_connection_receive_message(
+                self.handle,
+                buf.as_mut_ptr(),
+                max_len,
+                &raw mut size,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+            )
+        };
         if n < 0 {
-            return Err(from_status(n as i32));
+            return Err(receive_error(n, size, max_len));
         }
         buf.truncate(n as usize);
         Ok(buf)
     }
 
     /// Receive a UDP datagram together with its [`ContentContext`].
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     pub fn receive_with_context(&self, max_len: usize) -> Result<ReceivedContent, NetworkError> {
-        let mut buf = vec![0_u8; max_len];
-        let mut context = core::ptr::null_mut();
-        let mut is_complete = 0;
-        let n = unsafe {
-            ffi::nw_shim_connection_receive_with_context(
-                self.handle,
-                buf.as_mut_ptr(),
-                max_len,
-                &mut context,
-                &mut is_complete,
-            )
-        };
-        if n < 0 {
-            return Err(from_status(n as i32));
-        }
-        buf.truncate(n as usize);
-        Ok(ReceivedContent {
-            data: buf,
-            context: (!context.is_null()).then_some(unsafe { ContentContext::from_raw(context) }),
-            is_complete: is_complete != 0,
-        })
+        receive_content(self.handle, max_len, true)
     }
 }
 

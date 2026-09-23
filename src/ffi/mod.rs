@@ -13,11 +13,17 @@ pub const NW_RECV_FAILED: c_int = -4;
 pub const NW_LISTEN_FAILED: c_int = -5;
 pub const NW_CANCELLED: c_int = -6;
 pub const NW_TIMEOUT: c_int = -7;
+pub const NW_MESSAGE_TOO_LARGE: c_int = -8;
+pub const NW_UNSUPPORTED: c_int = -9;
+pub const NW_SECURITY_FAILED: c_int = -10;
 
 pub const NW_FRAMER_START_READY: c_int = 1;
 pub const NW_FRAMER_START_WILL_MARK_READY: c_int = 2;
 
-pub type BrowserServiceCallback = unsafe extern "C" fn(
+pub type NwShimContextCallback = unsafe extern "C" fn(context: *mut c_void);
+
+pub type BrowserServiceEventCallback = unsafe extern "C" fn(
+    is_found: c_int,
     name: *const c_char,
     service_type: *const c_char,
     domain: *const c_char,
@@ -86,7 +92,12 @@ unsafe extern "C" {
     #[link_name = "nfw_tcp_send"]
     pub fn nw_shim_tcp_send(handle: *mut c_void, data: *const u8, len: usize) -> c_int;
     #[link_name = "nfw_tcp_receive"]
-    pub fn nw_shim_tcp_receive(handle: *mut c_void, out_buf: *mut u8, max_len: usize) -> isize;
+    pub fn nw_shim_tcp_receive(
+        handle: *mut c_void,
+        out_buf: *mut u8,
+        max_len: usize,
+        out_size: *mut usize,
+    ) -> isize;
     #[link_name = "nfw_tcp_close"]
     pub fn nw_shim_tcp_close(handle: *mut c_void);
 
@@ -118,8 +129,10 @@ unsafe extern "C" {
 
     #[link_name = "nfw_path_monitor_start"]
     pub fn nw_shim_path_monitor_start(
-        callback: PathMonitorCallback,
-        user_info: *mut c_void,
+        callback: Option<PathMonitorCallback>,
+        context: *mut c_void,
+        retain: Option<NwShimContextCallback>,
+        release: Option<NwShimContextCallback>,
     ) -> *mut c_void;
     #[link_name = "nfw_path_monitor_stop"]
     pub fn nw_shim_path_monitor_stop(handle: *mut c_void);
@@ -137,30 +150,21 @@ unsafe extern "C" {
         user_info: *mut c_void,
     ) -> c_int;
 
-    #[link_name = "nfw_browser_start"]
-    pub fn nw_shim_browser_start(
-        service_type: *const c_char,
-        domain: *const c_char,
-        found_callback: BrowserServiceCallback,
-        lost_callback: BrowserServiceCallback,
-        user_info: *mut c_void,
-    ) -> *mut c_void;
     #[link_name = "nfw_browser_start_with_descriptor"]
     pub fn nw_shim_browser_start_with_descriptor(
         descriptor: *mut c_void,
         parameters: *mut c_void,
-        found_callback: BrowserServiceCallback,
-        lost_callback: BrowserServiceCallback,
-        user_info: *mut c_void,
+        callback: Option<BrowserServiceEventCallback>,
+        context: *mut c_void,
+        retain: Option<NwShimContextCallback>,
+        release: Option<NwShimContextCallback>,
     ) -> *mut c_void;
     #[link_name = "nfw_browser_stop"]
     pub fn nw_shim_browser_stop(handle: *mut c_void);
 
     #[link_name = "nfw_ws_connect"]
     pub fn nw_shim_ws_connect(
-        host: *const c_char,
-        port: u16,
-        path: *const c_char,
+        url: *const c_char,
         use_tls: c_int,
         out_status: *mut c_int,
     ) -> *mut c_void;
@@ -177,6 +181,7 @@ unsafe extern "C" {
         out_buf: *mut u8,
         max_len: usize,
         out_opcode: *mut c_int,
+        out_size: *mut usize,
     ) -> isize;
 
     #[link_name = "nfw_quic_connect"]
@@ -331,6 +336,16 @@ unsafe extern "C" {
         handle: *mut c_void,
         out_buf: *mut u8,
         max_len: usize,
+        out_size: *mut usize,
+        out_context: *mut *mut c_void,
+        out_is_complete: *mut c_int,
+    ) -> isize;
+    #[link_name = "nw_shim_connection_receive_message"]
+    pub fn nw_shim_connection_receive_message(
+        handle: *mut c_void,
+        out_buf: *mut u8,
+        max_len: usize,
+        out_size: *mut usize,
         out_context: *mut *mut c_void,
         out_is_complete: *mut c_int,
     ) -> isize;
@@ -449,7 +464,8 @@ unsafe extern "C" {
         wakeup_callback: Option<FramerWakeupCallback>,
         stop_callback: Option<FramerStopCallback>,
         cleanup_callback: Option<FramerCleanupCallback>,
-        user_info: *mut c_void,
+        factory: *mut c_void,
+        release_factory: Option<NwShimContextCallback>,
     ) -> *mut c_void;
     #[link_name = "nfw_framer_create_options"]
     pub fn nw_shim_framer_create_options(definition: *mut c_void) -> *mut c_void;
@@ -552,20 +568,27 @@ unsafe extern "C" {
         descriptor: *mut c_void,
         parameters: *mut c_void,
     ) -> *mut c_void;
-    #[link_name = "nfw_connection_group_set_state_changed_handler"]
-    pub fn nw_shim_connection_group_set_state_changed_handler(
+    #[link_name = "nw_shim_connection_group_subscribe_state"]
+    pub fn nw_shim_connection_group_subscribe_state(
         handle: *mut c_void,
-        state_callback: Option<ConnectionGroupStateCallback>,
-        user_info: *mut c_void,
-    );
-    #[link_name = "nfw_connection_group_set_receive_handler"]
-    pub fn nw_shim_connection_group_set_receive_handler(
+        callback: Option<ConnectionGroupStateCallback>,
+        context: *mut c_void,
+        retain: Option<NwShimContextCallback>,
+        release: Option<NwShimContextCallback>,
+    ) -> u64;
+    #[link_name = "nw_shim_connection_group_subscribe_receive"]
+    pub fn nw_shim_connection_group_subscribe_receive(
         handle: *mut c_void,
         maximum_message_size: u32,
         reject_oversized_messages: c_int,
-        receive_callback: Option<ConnectionGroupReceiveCallback>,
-        user_info: *mut c_void,
-    );
+        callback: Option<ConnectionGroupReceiveCallback>,
+        context: *mut c_void,
+        retain: Option<NwShimContextCallback>,
+        release: Option<NwShimContextCallback>,
+    ) -> u64;
+    #[link_name = "nw_shim_connection_group_unsubscribe"]
+    pub fn nw_shim_connection_group_unsubscribe(handle: *mut c_void, token: u64);
+
     #[link_name = "nfw_connection_group_start"]
     pub fn nw_shim_connection_group_start(handle: *mut c_void) -> c_int;
     #[link_name = "nfw_connection_group_cancel"]

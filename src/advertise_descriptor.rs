@@ -18,7 +18,6 @@ pub struct AdvertiseDescriptor {
 }
 
 unsafe impl Send for AdvertiseDescriptor {}
-unsafe impl Sync for AdvertiseDescriptor {}
 
 impl std::fmt::Debug for AdvertiseDescriptor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

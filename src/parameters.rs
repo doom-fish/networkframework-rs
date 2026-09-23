@@ -4,29 +4,9 @@
 
 use core::ffi::{c_int, c_void};
 use std::ffi::CString;
-use std::sync::Arc;
 
 use crate::error::NetworkError;
 use crate::ffi;
-
-pub(crate) type KeepAlive = Arc<dyn Send + Sync>;
-
-#[derive(Clone, Default)]
-pub(crate) struct KeepAlives(Vec<KeepAlive>);
-
-impl KeepAlives {
-    pub(crate) fn add<T>(&mut self, value: Arc<T>)
-    where
-        T: Send + Sync + 'static,
-    {
-        self.0.push(value);
-    }
-
-    #[must_use]
-    pub(crate) fn empty() -> Self {
-        Self::default()
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParametersAttribution {
@@ -46,7 +26,6 @@ impl ParametersAttribution {
 /// Builder for advanced `nw_parameters_t` configuration.
 pub struct ConnectionParameters {
     handle: *mut c_void,
-    keepalives: KeepAlives,
 }
 
 unsafe impl Send for ConnectionParameters {}
@@ -63,10 +42,7 @@ impl std::fmt::Debug for ConnectionParameters {
 impl Clone for ConnectionParameters {
     fn clone(&self) -> Self {
         let handle = unsafe { ffi::nw_shim_parameters_copy(self.handle) };
-        Self {
-            handle,
-            keepalives: self.keepalives.clone(),
-        }
+        Self { handle }
     }
 }
 
@@ -79,10 +55,7 @@ impl ConnectionParameters {
                 "failed to create generic parameters".into(),
             ));
         }
-        Ok(Self {
-            handle,
-            keepalives: KeepAlives::empty(),
-        })
+        Ok(Self { handle })
     }
 
     /// Create parameters configured for application services.
@@ -93,10 +66,7 @@ impl ConnectionParameters {
                 "failed to create application-service parameters".into(),
             ));
         }
-        Ok(Self {
-            handle,
-            keepalives: KeepAlives::empty(),
-        })
+        Ok(Self { handle })
     }
 
     /// Create TCP parameters without TLS.
@@ -107,10 +77,7 @@ impl ConnectionParameters {
                 "failed to create TCP parameters".into(),
             ));
         }
-        Ok(Self {
-            handle,
-            keepalives: KeepAlives::empty(),
-        })
+        Ok(Self { handle })
     }
 
     /// Create TCP parameters with the system TLS configuration enabled.
@@ -121,10 +88,7 @@ impl ConnectionParameters {
                 "failed to create TLS TCP parameters".into(),
             ));
         }
-        Ok(Self {
-            handle,
-            keepalives: KeepAlives::empty(),
-        })
+        Ok(Self { handle })
     }
 
     /// Create UDP parameters without DTLS.
@@ -135,10 +99,7 @@ impl ConnectionParameters {
                 "failed to create UDP parameters".into(),
             ));
         }
-        Ok(Self {
-            handle,
-            keepalives: KeepAlives::empty(),
-        })
+        Ok(Self { handle })
     }
 
     /// Create custom-IP parameters for entitlement-gated transports.
@@ -149,10 +110,7 @@ impl ConnectionParameters {
                 "failed to create custom-IP parameters".into(),
             ));
         }
-        Ok(Self {
-            handle,
-            keepalives: KeepAlives::empty(),
-        })
+        Ok(Self { handle })
     }
 
     /// Create QUIC parameters with the supplied ALPN string.
@@ -165,10 +123,7 @@ impl ConnectionParameters {
                 "failed to create QUIC parameters".into(),
             ));
         }
-        Ok(Self {
-            handle,
-            keepalives: KeepAlives::empty(),
-        })
+        Ok(Self { handle })
     }
 
     /// Attempt direct connections before trying configured proxies.
@@ -310,7 +265,6 @@ impl ConnectionParameters {
         if status != ffi::NW_OK {
             return Err(crate::error::from_status(status));
         }
-        self.keepalives.add(framer_options.keepalive());
         Ok(self)
     }
 
@@ -320,16 +274,8 @@ impl ConnectionParameters {
     }
 
     #[must_use]
-    pub(crate) unsafe fn from_raw(handle: *mut c_void) -> Self {
-        Self {
-            handle,
-            keepalives: KeepAlives::empty(),
-        }
-    }
-
-    #[must_use]
-    pub(crate) fn keepalives(&self) -> KeepAlives {
-        self.keepalives.clone()
+    pub(crate) const unsafe fn from_raw(handle: *mut c_void) -> Self {
+        Self { handle }
     }
 }
 

@@ -21,26 +21,6 @@ public func nfwConnectionGroupCreate(_ descriptor: UnsafeMutableRawPointer?, _ p
     nw_shim_connection_group_create(descriptor, parameters)
 }
 
-@_cdecl("nfw_connection_group_set_state_changed_handler")
-public func nfwConnectionGroupSetStateChangedHandler(
-    _ handle: UnsafeMutableRawPointer?,
-    _ stateCallback: ConnectionGroupStateCallback?,
-    _ userInfo: UnsafeMutableRawPointer?
-) {
-    nw_shim_connection_group_set_state_changed_handler(handle, stateCallback, userInfo)
-}
-
-@_cdecl("nfw_connection_group_set_receive_handler")
-public func nfwConnectionGroupSetReceiveHandler(
-    _ handle: UnsafeMutableRawPointer?,
-    _ maximumMessageSize: UInt32,
-    _ rejectOversizedMessages: Int32,
-    _ receiveCallback: ConnectionGroupReceiveCallback?,
-    _ userInfo: UnsafeMutableRawPointer?
-) {
-    nw_shim_connection_group_set_receive_handler(handle, maximumMessageSize, rejectOversizedMessages, receiveCallback, userInfo)
-}
-
 @_cdecl("nfw_connection_group_start")
 public func nfwConnectionGroupStart(_ handle: UnsafeMutableRawPointer?) -> Int32 { nw_shim_connection_group_start(handle) }
 

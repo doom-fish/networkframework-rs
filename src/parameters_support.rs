@@ -136,7 +136,6 @@ pub struct ProtocolStack {
 }
 
 unsafe impl Send for ProtocolStack {}
-unsafe impl Sync for ProtocolStack {}
 
 impl std::fmt::Debug for ProtocolStack {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

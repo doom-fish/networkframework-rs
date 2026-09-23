@@ -1,26 +1,16 @@
 import Foundation
 import NetworkFrameworkCShim
 
-@_cdecl("nfw_browser_start")
-public func nfwBrowserStart(
-    _ serviceType: UnsafePointer<CChar>?,
-    _ domain: UnsafePointer<CChar>?,
-    _ foundCallback: BrowserServiceCallback?,
-    _ lostCallback: BrowserServiceCallback?,
-    _ userInfo: UnsafeMutableRawPointer?
-) -> UnsafeMutableRawPointer? {
-    nw_shim_browser_start(serviceType, domain, foundCallback, lostCallback, userInfo)
-}
-
 @_cdecl("nfw_browser_start_with_descriptor")
 public func nfwBrowserStartWithDescriptor(
     _ descriptor: UnsafeMutableRawPointer?,
     _ parameters: UnsafeMutableRawPointer?,
-    _ foundCallback: BrowserServiceCallback?,
-    _ lostCallback: BrowserServiceCallback?,
-    _ userInfo: UnsafeMutableRawPointer?
+    _ callback: BrowserServiceEventCallback?,
+    _ context: UnsafeMutableRawPointer?,
+    _ retain: NwShimContextCallback?,
+    _ release: NwShimContextCallback?
 ) -> UnsafeMutableRawPointer? {
-    nw_shim_browser_start_with_descriptor(descriptor, parameters, foundCallback, lostCallback, userInfo)
+    nw_shim_browser_start_with_descriptor(descriptor, parameters, callback, context, retain, release)
 }
 
 @_cdecl("nfw_browser_stop")

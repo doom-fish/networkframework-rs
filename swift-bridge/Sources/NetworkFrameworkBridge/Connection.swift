@@ -17,8 +17,13 @@ public func nfwTcpSend(_ handle: UnsafeMutableRawPointer?, _ data: UnsafePointer
 }
 
 @_cdecl("nfw_tcp_receive")
-public func nfwTcpReceive(_ handle: UnsafeMutableRawPointer?, _ outBuf: UnsafeMutablePointer<UInt8>?, _ maxLen: Int) -> Int {
-    nw_shim_tcp_receive(handle, outBuf, maxLen)
+public func nfwTcpReceive(
+    _ handle: UnsafeMutableRawPointer?,
+    _ outBuf: UnsafeMutablePointer<UInt8>?,
+    _ maxLen: Int,
+    _ outSize: UnsafeMutablePointer<Int>?
+) -> Int {
+    nw_shim_tcp_receive(handle, outBuf, maxLen, outSize)
 }
 
 @_cdecl("nfw_tcp_close")
@@ -66,10 +71,11 @@ public func nfwConnectionReceiveWithContext(
     _ handle: UnsafeMutableRawPointer?,
     _ outBuf: UnsafeMutablePointer<UInt8>?,
     _ maxLen: Int,
+    _ outSize: UnsafeMutablePointer<Int>?,
     _ outContext: UnsafeMutablePointer<UnsafeMutableRawPointer?>?,
     _ outIsComplete: UnsafeMutablePointer<Int32>?
 ) -> Int {
-    nw_shim_connection_receive_with_context(handle, outBuf, maxLen, outContext, outIsComplete)
+    nw_shim_connection_receive_with_context(handle, outBuf, maxLen, outSize, outContext, outIsComplete)
 }
 
 @_cdecl("nfw_udp_connect")
@@ -79,13 +85,11 @@ public func nfwUDPConnect(_ host: UnsafePointer<CChar>?, _ port: UInt16, _ outSt
 
 @_cdecl("nfw_ws_connect")
 public func nfwWSConnect(
-    _ host: UnsafePointer<CChar>?,
-    _ port: UInt16,
-    _ path: UnsafePointer<CChar>?,
+    _ url: UnsafePointer<CChar>?,
     _ useTLS: Int32,
     _ outStatus: UnsafeMutablePointer<Int32>?
 ) -> UnsafeMutableRawPointer? {
-    nw_shim_ws_connect(host, port, path, useTLS, outStatus)
+    nw_shim_ws_connect(url, useTLS, outStatus)
 }
 
 @_cdecl("nfw_ws_send")
@@ -98,7 +102,8 @@ public func nfwWSReceive(
     _ handle: UnsafeMutableRawPointer?,
     _ outBuf: UnsafeMutablePointer<UInt8>?,
     _ maxLen: Int,
-    _ outOpcode: UnsafeMutablePointer<Int32>?
+    _ outOpcode: UnsafeMutablePointer<Int32>?,
+    _ outSize: UnsafeMutablePointer<Int>?
 ) -> Int {
-    nw_shim_ws_receive(handle, outBuf, maxLen, outOpcode)
+    nw_shim_ws_receive(handle, outBuf, maxLen, outOpcode, outSize)
 }

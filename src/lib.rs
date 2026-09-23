@@ -16,6 +16,7 @@ pub mod connection;
 pub mod connection_group;
 pub mod connection_report;
 pub mod content_context;
+mod context;
 pub mod endpoint;
 mod endpoint_support;
 pub mod error;
@@ -40,6 +41,7 @@ mod quic_support;
 #[cfg_attr(docsrs, doc(cfg(feature = "raw-ffi")))]
 pub mod raw_ffi;
 pub mod resolver;
+pub mod tls;
 pub mod txt_record;
 pub mod udp;
 pub mod websocket;
@@ -87,6 +89,7 @@ pub use quic::{QuicConnection, QuicOptions};
 pub use quic_support::{
     QuicMetadata, QuicStreamType, SecurityProtocolMetadata, SecurityProtocolOptions,
 };
+pub use tls::{certificate_sha256, TlsIdentity, TlsPeer, TlsVersion};
 pub use txt_record::{TxtRecord, TxtRecordEntry, TxtRecordFindResult, TxtRecordLookup};
 pub use udp::UdpClient;
 pub use websocket::{
@@ -145,6 +148,7 @@ pub mod prelude {
     pub use crate::quic_support::{
         QuicMetadata, QuicStreamType, SecurityProtocolMetadata, SecurityProtocolOptions,
     };
+    pub use crate::tls::{certificate_sha256, TlsIdentity, TlsPeer, TlsVersion};
     pub use crate::txt_record::{TxtRecord, TxtRecordEntry, TxtRecordFindResult, TxtRecordLookup};
     pub use crate::udp::UdpClient;
     pub use crate::websocket::{

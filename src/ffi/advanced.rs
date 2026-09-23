@@ -1,6 +1,6 @@
 use super::{
-    c_char, c_int, c_void, InterfaceEnumerationCallback, PathMonitorCallback,
-    StringEnumerationCallback,
+    c_char, c_int, c_void, InterfaceEnumerationCallback, NwShimContextCallback,
+    PathMonitorCallback, StringEnumerationCallback,
 };
 
 pub type TxtRecordEntryCallback = unsafe extern "C" fn(
@@ -61,6 +61,13 @@ pub type ConnectionGroupNewConnectionCallback =
 pub type WsPongCallback = unsafe extern "C" fn(error: *mut c_void, user_info: *mut c_void);
 pub type WsClientRequestCallback =
     unsafe extern "C" fn(request: *mut c_void, user_info: *mut c_void) -> *mut c_void;
+pub type SecVerifyCallback = unsafe extern "C" fn(
+    certificates: *const *const u8,
+    certificate_lengths: *const usize,
+    certificate_count: usize,
+    trusted: c_int,
+    context: *mut c_void,
+) -> c_int;
 
 #[repr(C)]
 pub struct NwShimEstablishmentProtocolInfo {
@@ -116,6 +123,48 @@ unsafe extern "C" {
     pub fn nw_shim_sec_retain(object: *mut c_void) -> *mut c_void;
     #[link_name = "nfw_sec_release"]
     pub fn nw_shim_sec_release(object: *mut c_void);
+
+    #[link_name = "nw_shim_identity_create"]
+    pub fn nw_shim_identity_create(sec_identity_ref: *mut c_void) -> *mut c_void;
+    #[link_name = "nw_shim_identity_create_from_pkcs12"]
+    pub fn nw_shim_identity_create_from_pkcs12(
+        data: *const u8,
+        length: usize,
+        password: *const c_char,
+        out_status: *mut c_int,
+        out_os_status: *mut i32,
+    ) -> *mut c_void;
+    #[link_name = "nw_shim_sec_options_set_local_identity"]
+    pub fn nw_shim_sec_options_set_local_identity(options: *mut c_void, identity: *mut c_void);
+    #[link_name = "nw_shim_sec_options_set_min_tls_version"]
+    pub fn nw_shim_sec_options_set_min_tls_version(options: *mut c_void, version: u16);
+    #[link_name = "nw_shim_sec_options_set_max_tls_version"]
+    pub fn nw_shim_sec_options_set_max_tls_version(options: *mut c_void, version: u16);
+    #[link_name = "nw_shim_sec_options_add_application_protocol"]
+    pub fn nw_shim_sec_options_add_application_protocol(
+        options: *mut c_void,
+        application_protocol: *const c_char,
+    );
+    #[link_name = "nw_shim_sec_options_set_server_name"]
+    pub fn nw_shim_sec_options_set_server_name(options: *mut c_void, server_name: *const c_char);
+    #[link_name = "nw_shim_sec_options_set_peer_authentication_required"]
+    pub fn nw_shim_sec_options_set_peer_authentication_required(
+        options: *mut c_void,
+        required: c_int,
+    );
+    #[link_name = "nw_shim_sec_options_set_verify_callback"]
+    pub fn nw_shim_sec_options_set_verify_callback(
+        options: *mut c_void,
+        callback: Option<SecVerifyCallback>,
+        context: *mut c_void,
+        release: Option<NwShimContextCallback>,
+    );
+    #[link_name = "nw_shim_sec_metadata_get_negotiated_tls_version"]
+    pub fn nw_shim_sec_metadata_get_negotiated_tls_version(metadata: *mut c_void) -> u16;
+    #[link_name = "nw_shim_sec_metadata_copy_negotiated_protocol"]
+    pub fn nw_shim_sec_metadata_copy_negotiated_protocol(metadata: *mut c_void) -> *mut c_char;
+    #[link_name = "nw_shim_sha256"]
+    pub fn nw_shim_sha256(data: *const u8, length: usize, out_digest: *mut u8);
 
     #[link_name = "nw_shim_interface_copy_name"]
     pub fn nw_shim_interface_copy_name(interface: *mut c_void) -> *mut c_char;
@@ -539,18 +588,24 @@ unsafe extern "C" {
         index: u32,
         parameters: *mut c_void,
     ) -> *mut c_void;
-    #[link_name = "nw_shim_ethernet_channel_set_state_changed_handler"]
-    pub fn nw_shim_ethernet_channel_set_state_changed_handler(
+    #[link_name = "nw_shim_ethernet_channel_subscribe_state"]
+    pub fn nw_shim_ethernet_channel_subscribe_state(
         handle: *mut c_void,
         callback: Option<EthernetChannelStateCallback>,
-        user_info: *mut c_void,
-    );
-    #[link_name = "nw_shim_ethernet_channel_set_receive_handler"]
-    pub fn nw_shim_ethernet_channel_set_receive_handler(
+        context: *mut c_void,
+        retain: Option<NwShimContextCallback>,
+        release: Option<NwShimContextCallback>,
+    ) -> u64;
+    #[link_name = "nw_shim_ethernet_channel_subscribe_receive"]
+    pub fn nw_shim_ethernet_channel_subscribe_receive(
         handle: *mut c_void,
         callback: Option<EthernetChannelReceiveCallback>,
-        user_info: *mut c_void,
-    );
+        context: *mut c_void,
+        retain: Option<NwShimContextCallback>,
+        release: Option<NwShimContextCallback>,
+    ) -> u64;
+    #[link_name = "nw_shim_ethernet_channel_unsubscribe"]
+    pub fn nw_shim_ethernet_channel_unsubscribe(handle: *mut c_void, token: u64);
     #[link_name = "nw_shim_ethernet_channel_get_maximum_payload_size"]
     pub fn nw_shim_ethernet_channel_get_maximum_payload_size(handle: *mut c_void) -> u32;
     #[link_name = "nw_shim_ethernet_channel_start"]
@@ -583,26 +638,32 @@ unsafe extern "C" {
         descriptor: *mut c_void,
         parameters: *mut c_void,
         callback: Option<BrowseResultChangedCallback>,
-        user_info: *mut c_void,
+        context: *mut c_void,
+        retain: Option<NwShimContextCallback>,
+        release: Option<NwShimContextCallback>,
     ) -> *mut c_void;
     #[link_name = "nw_shim_browser_copy_browse_descriptor"]
     pub fn nw_shim_browser_copy_browse_descriptor(handle: *mut c_void) -> *mut c_void;
     #[link_name = "nw_shim_browser_copy_parameters"]
     pub fn nw_shim_browser_copy_parameters(handle: *mut c_void) -> *mut c_void;
-    #[link_name = "nw_shim_browser_set_state_changed_handler"]
-    pub fn nw_shim_browser_set_state_changed_handler(
+    #[link_name = "nw_shim_browser_subscribe_state"]
+    pub fn nw_shim_browser_subscribe_state(
         handle: *mut c_void,
         callback: Option<BrowserStateChangedCallback>,
-        user_info: *mut c_void,
-    );
-    #[link_name = "nw_shim_browser_set_browse_results_changed_handler"]
-    pub fn nw_shim_browser_set_browse_results_changed_handler(
+        context: *mut c_void,
+        retain: Option<NwShimContextCallback>,
+        release: Option<NwShimContextCallback>,
+    ) -> u64;
+    #[link_name = "nw_shim_browser_subscribe_results"]
+    pub fn nw_shim_browser_subscribe_results(
         handle: *mut c_void,
         callback: Option<BrowseResultChangedCallback>,
-        user_info: *mut c_void,
-    );
-    #[link_name = "nw_shim_browser_drain_queue"]
-    pub fn nw_shim_browser_drain_queue(handle: *mut c_void);
+        context: *mut c_void,
+        retain: Option<NwShimContextCallback>,
+        release: Option<NwShimContextCallback>,
+    ) -> u64;
+    #[link_name = "nw_shim_browser_unsubscribe"]
+    pub fn nw_shim_browser_unsubscribe(handle: *mut c_void, token: u64);
     #[link_name = "nw_shim_browse_result_get_changes"]
     pub fn nw_shim_browse_result_get_changes(
         old_result: *mut c_void,
@@ -621,32 +682,40 @@ unsafe extern "C" {
         user_info: *mut c_void,
     ) -> c_int;
 
-    #[link_name = "nw_shim_connection_set_state_changed_handler"]
-    pub fn nw_shim_connection_set_state_changed_handler(
+    #[link_name = "nw_shim_connection_subscribe_state"]
+    pub fn nw_shim_connection_subscribe_state(
         handle: *mut c_void,
         callback: Option<ConnectionStateCallback>,
-        user_info: *mut c_void,
-    );
-    #[link_name = "nw_shim_connection_drain_queue"]
-    pub fn nw_shim_connection_drain_queue(handle: *mut c_void);
-    #[link_name = "nw_shim_connection_set_viability_changed_handler"]
-    pub fn nw_shim_connection_set_viability_changed_handler(
+        context: *mut c_void,
+        retain: Option<NwShimContextCallback>,
+        release: Option<NwShimContextCallback>,
+    ) -> u64;
+    #[link_name = "nw_shim_connection_subscribe_viability"]
+    pub fn nw_shim_connection_subscribe_viability(
         handle: *mut c_void,
         callback: Option<ConnectionBooleanCallback>,
-        user_info: *mut c_void,
-    );
-    #[link_name = "nw_shim_connection_set_better_path_available_handler"]
-    pub fn nw_shim_connection_set_better_path_available_handler(
+        context: *mut c_void,
+        retain: Option<NwShimContextCallback>,
+        release: Option<NwShimContextCallback>,
+    ) -> u64;
+    #[link_name = "nw_shim_connection_subscribe_better_path"]
+    pub fn nw_shim_connection_subscribe_better_path(
         handle: *mut c_void,
         callback: Option<ConnectionBooleanCallback>,
-        user_info: *mut c_void,
-    );
-    #[link_name = "nw_shim_connection_set_path_changed_handler"]
-    pub fn nw_shim_connection_set_path_changed_handler(
+        context: *mut c_void,
+        retain: Option<NwShimContextCallback>,
+        release: Option<NwShimContextCallback>,
+    ) -> u64;
+    #[link_name = "nw_shim_connection_subscribe_path"]
+    pub fn nw_shim_connection_subscribe_path(
         handle: *mut c_void,
         callback: Option<ConnectionPathCallback>,
-        user_info: *mut c_void,
-    );
+        context: *mut c_void,
+        retain: Option<NwShimContextCallback>,
+        release: Option<NwShimContextCallback>,
+    ) -> u64;
+    #[link_name = "nw_shim_connection_unsubscribe"]
+    pub fn nw_shim_connection_unsubscribe(handle: *mut c_void, token: u64);
     #[link_name = "nw_shim_connection_restart"]
     pub fn nw_shim_connection_restart(handle: *mut c_void);
     #[link_name = "nw_shim_connection_force_cancel"]
@@ -764,12 +833,14 @@ unsafe extern "C" {
         data: *const u8,
         len: usize,
     ) -> c_int;
-    #[link_name = "nw_shim_connection_group_set_new_connection_handler"]
-    pub fn nw_shim_connection_group_set_new_connection_handler(
+    #[link_name = "nw_shim_connection_group_subscribe_new_connection"]
+    pub fn nw_shim_connection_group_subscribe_new_connection(
         handle: *mut c_void,
         callback: Option<ConnectionGroupNewConnectionCallback>,
-        user_info: *mut c_void,
-    );
+        context: *mut c_void,
+        retain: Option<NwShimContextCallback>,
+        release: Option<NwShimContextCallback>,
+    ) -> u64;
 
     #[link_name = "nw_shim_error_get_domain"]
     pub fn nw_shim_error_get_domain(error: *mut c_void) -> c_int;
@@ -817,32 +888,40 @@ unsafe extern "C" {
         handle: *mut c_void,
         new_connection_limit: u32,
     );
-    #[link_name = "nw_shim_listener_set_advertised_endpoint_changed_handler"]
-    pub fn nw_shim_listener_set_advertised_endpoint_changed_handler(
-        handle: *mut c_void,
-        callback: Option<ListenerAdvertisedEndpointChangedCallback>,
-        user_info: *mut c_void,
-    );
-    #[link_name = "nw_shim_listener_set_new_connection_group_handler"]
-    pub fn nw_shim_listener_set_new_connection_group_handler(
-        handle: *mut c_void,
-        callback: Option<ListenerNewConnectionGroupCallback>,
-        user_info: *mut c_void,
-    );
-    #[link_name = "nw_shim_listener_set_state_changed_handler"]
-    pub fn nw_shim_listener_set_state_changed_handler(
+    #[link_name = "nw_shim_listener_subscribe_state"]
+    pub fn nw_shim_listener_subscribe_state(
         handle: *mut c_void,
         callback: Option<ListenerStateCallback>,
-        user_info: *mut c_void,
-    );
-    #[link_name = "nw_shim_listener_set_new_connection_handler"]
-    pub fn nw_shim_listener_set_new_connection_handler(
+        context: *mut c_void,
+        retain: Option<NwShimContextCallback>,
+        release: Option<NwShimContextCallback>,
+    ) -> u64;
+    #[link_name = "nw_shim_listener_subscribe_new_connection"]
+    pub fn nw_shim_listener_subscribe_new_connection(
         handle: *mut c_void,
         callback: Option<ListenerNewConnectionCallback>,
-        user_info: *mut c_void,
-    );
-    #[link_name = "nw_shim_listener_drain_queue"]
-    pub fn nw_shim_listener_drain_queue(handle: *mut c_void);
+        context: *mut c_void,
+        retain: Option<NwShimContextCallback>,
+        release: Option<NwShimContextCallback>,
+    ) -> u64;
+    #[link_name = "nw_shim_listener_subscribe_advertised_endpoint"]
+    pub fn nw_shim_listener_subscribe_advertised_endpoint(
+        handle: *mut c_void,
+        callback: Option<ListenerAdvertisedEndpointChangedCallback>,
+        context: *mut c_void,
+        retain: Option<NwShimContextCallback>,
+        release: Option<NwShimContextCallback>,
+    ) -> u64;
+    #[link_name = "nw_shim_listener_subscribe_new_connection_group"]
+    pub fn nw_shim_listener_subscribe_new_connection_group(
+        handle: *mut c_void,
+        callback: Option<ListenerNewConnectionGroupCallback>,
+        context: *mut c_void,
+        retain: Option<NwShimContextCallback>,
+        release: Option<NwShimContextCallback>,
+    ) -> u64;
+    #[link_name = "nw_shim_listener_unsubscribe"]
+    pub fn nw_shim_listener_unsubscribe(handle: *mut c_void, token: u64);
 
     #[link_name = "nw_shim_path_enumerate_gateways"]
     pub fn nw_shim_path_enumerate_gateways(
@@ -853,30 +932,38 @@ unsafe extern "C" {
     #[link_name = "nw_shim_path_monitor_start_with_type"]
     pub fn nw_shim_path_monitor_start_with_type(
         interface_type: c_int,
-        callback: PathMonitorCallback,
-        user_info: *mut c_void,
+        callback: Option<PathMonitorCallback>,
+        context: *mut c_void,
+        retain: Option<NwShimContextCallback>,
+        release: Option<NwShimContextCallback>,
     ) -> *mut c_void;
     #[link_name = "nw_shim_path_monitor_start_for_ethernet_channel"]
     pub fn nw_shim_path_monitor_start_for_ethernet_channel(
-        callback: PathMonitorCallback,
-        user_info: *mut c_void,
+        callback: Option<PathMonitorCallback>,
+        context: *mut c_void,
+        retain: Option<NwShimContextCallback>,
+        release: Option<NwShimContextCallback>,
     ) -> *mut c_void;
     #[link_name = "nw_shim_path_monitor_prohibit_interface_type"]
     pub fn nw_shim_path_monitor_prohibit_interface_type(handle: *mut c_void, interface_type: c_int);
-    #[link_name = "nw_shim_path_monitor_set_cancel_handler"]
-    pub fn nw_shim_path_monitor_set_cancel_handler(
-        handle: *mut c_void,
-        callback: Option<PathMonitorCancelCallback>,
-        user_info: *mut c_void,
-    );
-    #[link_name = "nw_shim_path_monitor_set_update_handler"]
-    pub fn nw_shim_path_monitor_set_update_handler(
+    #[link_name = "nw_shim_path_monitor_subscribe_update"]
+    pub fn nw_shim_path_monitor_subscribe_update(
         handle: *mut c_void,
         callback: Option<ConnectionPathCallback>,
-        user_info: *mut c_void,
-    );
-    #[link_name = "nw_shim_path_monitor_drain_queue"]
-    pub fn nw_shim_path_monitor_drain_queue(handle: *mut c_void);
+        context: *mut c_void,
+        retain: Option<NwShimContextCallback>,
+        release: Option<NwShimContextCallback>,
+    ) -> u64;
+    #[link_name = "nw_shim_path_monitor_subscribe_cancel"]
+    pub fn nw_shim_path_monitor_subscribe_cancel(
+        handle: *mut c_void,
+        callback: Option<PathMonitorCancelCallback>,
+        context: *mut c_void,
+        retain: Option<NwShimContextCallback>,
+        release: Option<NwShimContextCallback>,
+    ) -> u64;
+    #[link_name = "nw_shim_path_monitor_unsubscribe"]
+    pub fn nw_shim_path_monitor_unsubscribe(handle: *mut c_void, token: u64);
 
     #[link_name = "nw_shim_protocol_create_ip_metadata"]
     pub fn nw_shim_protocol_create_ip_metadata() -> *mut c_void;
@@ -1031,6 +1118,7 @@ unsafe extern "C" {
         metadata: *mut c_void,
         callback: Option<WsPongCallback>,
         user_info: *mut c_void,
+        release: Option<NwShimContextCallback>,
     );
     #[link_name = "nw_shim_ws_request_enumerate_subprotocols"]
     pub fn nw_shim_ws_request_enumerate_subprotocols(
@@ -1093,6 +1181,7 @@ unsafe extern "C" {
         options: *mut c_void,
         callback: Option<WsClientRequestCallback>,
         user_info: *mut c_void,
+        release: Option<NwShimContextCallback>,
     );
     #[link_name = "nw_shim_url_session_configuration_default"]
     pub fn nw_shim_url_session_configuration_default() -> *mut c_void;

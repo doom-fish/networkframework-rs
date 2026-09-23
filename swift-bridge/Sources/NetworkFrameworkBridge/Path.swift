@@ -2,8 +2,13 @@ import Foundation
 import NetworkFrameworkCShim
 
 @_cdecl("nfw_path_monitor_start")
-public func nfwPathMonitorStart(_ callback: PathMonitorCallback?, _ userInfo: UnsafeMutableRawPointer?) -> UnsafeMutableRawPointer? {
-    nw_shim_path_monitor_start(callback, userInfo)
+public func nfwPathMonitorStart(
+    _ callback: PathMonitorCallback?,
+    _ context: UnsafeMutableRawPointer?,
+    _ retain: NwShimContextCallback?,
+    _ release: NwShimContextCallback?
+) -> UnsafeMutableRawPointer? {
+    nw_shim_path_monitor_start(callback, context, retain, release)
 }
 
 @_cdecl("nfw_path_monitor_stop")

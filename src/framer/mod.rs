@@ -13,6 +13,7 @@ use std::slice;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::context::release_arc;
 use crate::endpoint::Endpoint;
 use crate::error::NetworkError;
 use crate::ffi;
@@ -66,7 +67,7 @@ pub(crate) struct FramerCallbacksOwner {
 /// A retained custom framer protocol definition.
 pub struct FramerDefinition {
     handle: *mut c_void,
-    keepalive: Arc<FramerCallbacksOwner>,
+    factory: Arc<FramerCallbacksOwner>,
 }
 
 unsafe impl Send for FramerDefinition {}
@@ -76,7 +77,7 @@ impl std::fmt::Debug for FramerDefinition {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FramerDefinition")
             .field("handle", &self.handle)
-            .field("keepalive_refs", &Arc::strong_count(&self.keepalive))
+            .field("factory_refs", &Arc::strong_count(&self.factory))
             .finish_non_exhaustive()
     }
 }
@@ -84,7 +85,6 @@ impl std::fmt::Debug for FramerDefinition {
 /// Framer options attachable to [`crate::ConnectionParameters`].
 pub struct FramerOptions {
     handle: *mut c_void,
-    keepalive: Arc<FramerCallbacksOwner>,
 }
 
 unsafe impl Send for FramerOptions {}
@@ -94,8 +94,7 @@ impl std::fmt::Debug for FramerOptions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FramerOptions")
             .field("handle", &self.handle)
-            .field("keepalive_refs", &Arc::strong_count(&self.keepalive))
-            .finish_non_exhaustive()
+            .finish()
     }
 }
 
@@ -105,7 +104,6 @@ pub struct FramerMessage {
 }
 
 unsafe impl Send for FramerMessage {}
-unsafe impl Sync for FramerMessage {}
 
 impl std::fmt::Debug for FramerMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -140,7 +138,7 @@ impl FramerDefinition {
     {
         let identifier = CString::new(identifier)
             .map_err(|e| NetworkError::InvalidArgument(format!("identifier NUL byte: {e}")))?;
-        let keepalive = Arc::new(FramerCallbacksOwner {
+        let factory = Arc::new(FramerCallbacksOwner {
             factory: Box::new(move || Box::new(factory()) as Box<dyn Framer>),
         });
         let handle = unsafe {
@@ -155,7 +153,10 @@ impl FramerDefinition {
                 Some(wakeup_trampoline),
                 Some(stop_trampoline),
                 Some(cleanup_trampoline),
-                Arc::as_ptr(&keepalive).cast_mut().cast::<c_void>(),
+                Arc::into_raw(Arc::clone(&factory))
+                    .cast_mut()
+                    .cast::<c_void>(),
+                Some(release_arc::<FramerCallbacksOwner>),
             )
         };
         if handle.is_null() {
@@ -163,7 +164,7 @@ impl FramerDefinition {
                 "failed to create framer definition".into(),
             ));
         }
-        Ok(Self { handle, keepalive })
+        Ok(Self { handle, factory })
     }
 
     /// Create options from this definition for use on a protocol stack.
@@ -174,10 +175,7 @@ impl FramerDefinition {
                 "failed to create framer options".into(),
             ));
         }
-        Ok(FramerOptions {
-            handle,
-            keepalive: self.keepalive.clone(),
-        })
+        Ok(FramerOptions { handle })
     }
 }
 
@@ -229,11 +227,6 @@ impl FramerOptions {
     #[must_use]
     pub(crate) const fn as_ptr(&self) -> *mut c_void {
         self.handle
-    }
-
-    #[must_use]
-    pub(crate) fn keepalive(&self) -> Arc<FramerCallbacksOwner> {
-        self.keepalive.clone()
     }
 }
 
@@ -326,8 +319,9 @@ impl FramerMessageView<'_> {
     pub fn get_u64(&self, key: &str) -> Option<u64> {
         let key = CString::new(key).ok()?;
         let mut value = 0_u64;
-        let found =
-            unsafe { ffi::nw_shim_framer_message_get_u64(self.handle, key.as_ptr(), &mut value) };
+        let found = unsafe {
+            ffi::nw_shim_framer_message_get_u64(self.handle, key.as_ptr(), &raw mut value)
+        };
         if found > 0 {
             Some(value)
         } else {
@@ -555,6 +549,9 @@ impl FramerContext {
 }
 
 unsafe extern "C" fn create_instance_trampoline(user_info: *mut c_void) -> *mut c_void {
+    if user_info.is_null() {
+        return core::ptr::null_mut();
+    }
     let owner = unsafe { &*user_info.cast::<FramerCallbacksOwner>() };
     let mut instance: Option<Box<dyn Framer>> = None;
     catch_user_panic("framer_create_instance_trampoline", || {

@@ -4,13 +4,16 @@
 
 use core::ffi::{c_int, c_void};
 use std::ffi::CString;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
+
+use doom_fish_utils::callback_context::CallbackContext;
 
 use crate::{
+    context::Subscription,
     error::{from_status, NetworkError},
     ffi,
     interface::NetworkInterface,
-    parameters::{ConnectionParameters, KeepAlives},
+    parameters::ConnectionParameters,
 };
 
 fn to_cstring(value: &str, field: &str) -> Result<CString, NetworkError> {
@@ -56,12 +59,10 @@ type StateCallback = Mutex<Box<dyn FnMut(EthernetChannelState) + Send + 'static>
 type ReceiveCallback = Mutex<Box<dyn FnMut(EthernetFrame) + Send + 'static>>;
 
 /// A custom `EtherType` data channel.
-#[allow(clippy::type_complexity)]
 pub struct EthernetChannel {
     handle: *mut c_void,
-    state_callback: Option<Arc<StateCallback>>,
-    receive_callback: Option<Arc<ReceiveCallback>>,
-    _keepalives: KeepAlives,
+    state: Option<Subscription<StateCallback>>,
+    receive: Option<Subscription<ReceiveCallback>>,
 }
 
 unsafe impl Send for EthernetChannel {}
@@ -71,8 +72,8 @@ impl std::fmt::Debug for EthernetChannel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EthernetChannel")
             .field("handle", &self.handle)
-            .field("has_state_callback", &self.state_callback.is_some())
-            .field("has_receive_callback", &self.receive_callback.is_some())
+            .field("state", &self.state)
+            .field("receive", &self.receive)
             .finish_non_exhaustive()
     }
 }
@@ -105,9 +106,8 @@ impl EthernetChannel {
         }
         Ok(Self {
             handle,
-            state_callback: None,
-            receive_callback: None,
-            _keepalives: KeepAlives::empty(),
+            state: None,
+            receive: None,
         })
     }
 
@@ -134,10 +134,16 @@ impl EthernetChannel {
         }
         Ok(Self {
             handle,
-            state_callback: None,
-            receive_callback: None,
-            _keepalives: parameters.keepalives(),
+            state: None,
+            receive: None,
         })
+    }
+
+    fn unsubscribe<T: Send + Sync + 'static>(&self, subscription: Option<Subscription<T>>) {
+        if let Some(subscription) = subscription {
+            subscription.deactivate();
+            unsafe { ffi::nw_shim_ethernet_channel_unsubscribe(self.handle, subscription.token) };
+        }
     }
 
     /// Set a state-change callback. Call before [`start`](Self::start).
@@ -145,17 +151,20 @@ impl EthernetChannel {
     where
         F: FnMut(EthernetChannelState) + Send + 'static,
     {
+        let previous = self.state.take();
+        self.unsubscribe(previous);
         let callback: Box<dyn FnMut(EthernetChannelState) + Send + 'static> = Box::new(callback);
-        let arc = Arc::new(Mutex::new(callback));
-        let raw = Arc::into_raw(arc.clone()).cast::<c_void>().cast_mut();
-        unsafe {
-            ffi::nw_shim_ethernet_channel_set_state_changed_handler(
-                self.handle,
-                Some(state_trampoline),
-                raw,
-            )
-        };
-        self.state_callback = Some(arc);
+        let handle = self.handle;
+        self.state =
+            Subscription::register(Mutex::new(callback), |context, retain, release| unsafe {
+                ffi::nw_shim_ethernet_channel_subscribe_state(
+                    handle,
+                    Some(state_trampoline),
+                    context,
+                    Some(retain),
+                    Some(release),
+                )
+            });
     }
 
     /// Set the receive callback. Call before [`start`](Self::start).
@@ -163,17 +172,20 @@ impl EthernetChannel {
     where
         F: FnMut(EthernetFrame) + Send + 'static,
     {
+        let previous = self.receive.take();
+        self.unsubscribe(previous);
         let callback: Box<dyn FnMut(EthernetFrame) + Send + 'static> = Box::new(callback);
-        let arc = Arc::new(Mutex::new(callback));
-        let raw = Arc::into_raw(arc.clone()).cast::<c_void>().cast_mut();
-        unsafe {
-            ffi::nw_shim_ethernet_channel_set_receive_handler(
-                self.handle,
-                Some(receive_trampoline),
-                raw,
-            )
-        };
-        self.receive_callback = Some(arc);
+        let handle = self.handle;
+        self.receive =
+            Subscription::register(Mutex::new(callback), |context, retain, release| unsafe {
+                ffi::nw_shim_ethernet_channel_subscribe_receive(
+                    handle,
+                    Some(receive_trampoline),
+                    context,
+                    Some(retain),
+                    Some(release),
+                )
+            });
     }
 
     /// Current maximum payload size for the channel.
@@ -217,6 +229,8 @@ impl EthernetChannel {
 
 impl Drop for EthernetChannel {
     fn drop(&mut self) {
+        self.state = None;
+        self.receive = None;
         if !self.handle.is_null() {
             unsafe { ffi::nw_shim_ethernet_channel_release(self.handle) };
             self.handle = core::ptr::null_mut();
@@ -224,15 +238,19 @@ impl Drop for EthernetChannel {
     }
 }
 
-unsafe extern "C" fn state_trampoline(state: c_int, user_info: *mut c_void) {
-    if user_info.is_null() {
-        return;
-    }
-    let callback = unsafe { &*user_info.cast::<StateCallback>() };
-    let Ok(mut guard) = callback.lock() else {
-        return;
+unsafe extern "C" fn state_trampoline(state: c_int, context: *mut c_void) {
+    let state = EthernetChannelState::from_raw(state);
+    unsafe {
+        CallbackContext::<StateCallback>::with(
+            context,
+            "ethernet_channel_state_trampoline",
+            |callback| {
+                if let Ok(mut callback) = callback.lock() {
+                    callback(state);
+                }
+            },
+        )
     };
-    guard(EthernetChannelState::from_raw(state));
 }
 
 unsafe extern "C" fn receive_trampoline(
@@ -241,24 +259,28 @@ unsafe extern "C" fn receive_trampoline(
     vlan_tag: u16,
     local_address: *const u8,
     remote_address: *const u8,
-    user_info: *mut c_void,
+    context: *mut c_void,
 ) {
-    if user_info.is_null() {
-        return;
-    }
-    let callback = unsafe { &*user_info.cast::<ReceiveCallback>() };
-    let Ok(mut guard) = callback.lock() else {
-        return;
-    };
     let data = if data.is_null() || len == 0 {
         Vec::new()
     } else {
         unsafe { std::slice::from_raw_parts(data, len) }.to_vec()
     };
-    guard(EthernetFrame {
+    let frame = EthernetFrame {
         data,
         vlan_tag,
         local_address: copy_mac_address(local_address),
         remote_address: copy_mac_address(remote_address),
-    });
+    };
+    unsafe {
+        CallbackContext::<ReceiveCallback>::with(
+            context,
+            "ethernet_channel_receive_trampoline",
+            move |callback| {
+                if let Ok(mut callback) = callback.lock() {
+                    callback(frame);
+                }
+            },
+        )
+    };
 }

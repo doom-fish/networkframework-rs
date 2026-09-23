@@ -4,8 +4,11 @@
 
 use core::ffi::{c_char, c_int, c_void};
 use std::ffi::{CStr, CString};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
+use doom_fish_utils::callback_context::CallbackContext;
+
+use crate::context::Subscription;
 use crate::endpoint::Endpoint;
 use crate::error::{FrameworkError, NetworkError};
 use crate::ffi;
@@ -199,7 +202,6 @@ pub struct BrowseDescriptor {
 }
 
 unsafe impl Send for BrowseDescriptor {}
-unsafe impl Sync for BrowseDescriptor {}
 
 impl std::fmt::Debug for BrowseDescriptor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -337,11 +339,10 @@ type StateCb = Mutex<Box<dyn FnMut(BrowserState, Option<FrameworkError>) + Send 
 
 /// RAII guard for a running `nw_browser`. Drop to stop receiving
 /// discovery callbacks.
-#[allow(clippy::type_complexity)]
 pub struct Browser {
     handle: *mut c_void,
-    _callback: Arc<Cb>,
-    state_callback: Option<Arc<StateCb>>,
+    events: CallbackContext<Cb>,
+    state: Option<Subscription<StateCb>>,
 }
 
 unsafe impl Send for Browser {}
@@ -351,7 +352,8 @@ impl std::fmt::Debug for Browser {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Browser")
             .field("handle", &self.handle)
-            .field("has_state_callback", &self.state_callback.is_some())
+            .field("events", &self.events)
+            .field("state", &self.state)
             .finish_non_exhaustive()
     }
 }
@@ -382,23 +384,14 @@ impl Browser {
     where
         F: FnMut(BrowserState, Option<FrameworkError>) + Send + 'static,
     {
-        let callback: Box<dyn FnMut(BrowserState, Option<FrameworkError>) + Send + 'static> =
-            Box::new(callback);
-        let arc = Arc::new(Mutex::new(callback));
-        let raw = Arc::into_raw(arc.clone()).cast::<c_void>().cast_mut();
-        unsafe {
-            ffi::nw_shim_browser_set_state_changed_handler(
-                self.handle,
-                Some(state_trampoline),
-                raw,
-            );
-        };
-        self.state_callback = Some(arc);
+        self.state = subscribe_state(self.handle, self.state.take(), callback);
     }
 }
 
 impl Drop for Browser {
     fn drop(&mut self) {
+        self.events.deactivate();
+        self.state = None;
         if !self.handle.is_null() {
             unsafe { ffi::nw_shim_browser_stop(self.handle) };
             self.handle = core::ptr::null_mut();
@@ -407,11 +400,10 @@ impl Drop for Browser {
 }
 
 /// RAII guard for a running `nw_browser` that delivers rich browse-result objects.
-#[allow(clippy::type_complexity)]
 pub struct BrowseResultsBrowser {
     handle: *mut c_void,
-    _callback: Arc<ResultsCb>,
-    state_callback: Option<Arc<StateCb>>,
+    events: CallbackContext<ResultsCb>,
+    state: Option<Subscription<StateCb>>,
 }
 
 unsafe impl Send for BrowseResultsBrowser {}
@@ -421,7 +413,8 @@ impl std::fmt::Debug for BrowseResultsBrowser {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BrowseResultsBrowser")
             .field("handle", &self.handle)
-            .field("has_state_callback", &self.state_callback.is_some())
+            .field("events", &self.events)
+            .field("state", &self.state)
             .finish_non_exhaustive()
     }
 }
@@ -446,23 +439,14 @@ impl BrowseResultsBrowser {
     where
         F: FnMut(BrowserState, Option<FrameworkError>) + Send + 'static,
     {
-        let callback: Box<dyn FnMut(BrowserState, Option<FrameworkError>) + Send + 'static> =
-            Box::new(callback);
-        let arc = Arc::new(Mutex::new(callback));
-        let raw = Arc::into_raw(arc.clone()).cast::<c_void>().cast_mut();
-        unsafe {
-            ffi::nw_shim_browser_set_state_changed_handler(
-                self.handle,
-                Some(state_trampoline),
-                raw,
-            );
-        };
-        self.state_callback = Some(arc);
+        self.state = subscribe_state(self.handle, self.state.take(), callback);
     }
 }
 
 impl Drop for BrowseResultsBrowser {
     fn drop(&mut self) {
+        self.events.deactivate();
+        self.state = None;
         if !self.handle.is_null() {
             unsafe { ffi::nw_shim_browser_stop(self.handle) };
             self.handle = core::ptr::null_mut();
@@ -470,34 +454,67 @@ impl Drop for BrowseResultsBrowser {
     }
 }
 
-unsafe extern "C" fn found_trampoline(
-    name: *const c_char,
-    service_type: *const c_char,
-    domain: *const c_char,
-    user_info: *mut c_void,
-) {
-    invoke(user_info, name, service_type, domain, true);
-}
-
-unsafe extern "C" fn lost_trampoline(
-    name: *const c_char,
-    service_type: *const c_char,
-    domain: *const c_char,
-    user_info: *mut c_void,
-) {
-    invoke(user_info, name, service_type, domain, false);
-}
-
-unsafe extern "C" fn state_trampoline(state: c_int, error: *mut c_void, user_info: *mut c_void) {
-    if user_info.is_null() {
-        return;
+fn subscribe_state<F>(
+    handle: *mut c_void,
+    previous: Option<Subscription<StateCb>>,
+    callback: F,
+) -> Option<Subscription<StateCb>>
+where
+    F: FnMut(BrowserState, Option<FrameworkError>) + Send + 'static,
+{
+    if let Some(previous) = previous {
+        previous.deactivate();
+        unsafe { ffi::nw_shim_browser_unsubscribe(handle, previous.token) };
     }
-    let callback = unsafe { &*user_info.cast::<StateCb>() };
-    let Ok(mut guard) = callback.lock() else {
-        return;
+    let callback: Box<dyn FnMut(BrowserState, Option<FrameworkError>) + Send + 'static> =
+        Box::new(callback);
+    Subscription::register(Mutex::new(callback), |context, retain, release| unsafe {
+        ffi::nw_shim_browser_subscribe_state(
+            handle,
+            Some(state_trampoline),
+            context,
+            Some(retain),
+            Some(release),
+        )
+    })
+}
+
+unsafe extern "C" fn service_trampoline(
+    is_found: c_int,
+    name: *const c_char,
+    service_type: *const c_char,
+    domain: *const c_char,
+    context: *mut c_void,
+) {
+    let service = DiscoveredService {
+        name: unsafe { cstr_to_string(name) },
+        service_type: unsafe { cstr_to_string(service_type) },
+        domain: unsafe { cstr_to_string(domain) },
     };
-    let error = (!error.is_null()).then_some(unsafe { FrameworkError::from_raw(error) });
-    guard(BrowserState::from_raw(state), error);
+    let event = if is_found != 0 {
+        BrowserEvent::Found(service)
+    } else {
+        BrowserEvent::Lost(service)
+    };
+    unsafe {
+        CallbackContext::<Cb>::with(context, "browser_service_trampoline", move |callback| {
+            if let Ok(mut callback) = callback.lock() {
+                callback(event);
+            }
+        })
+    };
+}
+
+unsafe extern "C" fn state_trampoline(state: c_int, error: *mut c_void, context: *mut c_void) {
+    let error = (!error.is_null()).then(|| unsafe { FrameworkError::from_raw(error) });
+    let state = BrowserState::from_raw(state);
+    unsafe {
+        CallbackContext::<StateCb>::with(context, "browser_state_trampoline", move |callback| {
+            if let Ok(mut callback) = callback.lock() {
+                callback(state, error);
+            }
+        })
+    };
 }
 
 unsafe extern "C" fn result_trampoline(
@@ -505,52 +522,18 @@ unsafe extern "C" fn result_trampoline(
     new_result: *mut c_void,
     changes: u64,
     batch_complete: c_int,
-    user_info: *mut c_void,
+    context: *mut c_void,
 ) {
-    if user_info.is_null() {
-        return;
-    }
-    let callback = unsafe { &*user_info.cast::<ResultsCb>() };
-    let Ok(mut guard) = callback.lock() else {
-        return;
+    let old_result = (!old_result.is_null()).then(|| unsafe { BrowseResult::from_raw(old_result) });
+    let new_result = (!new_result.is_null()).then(|| unsafe { BrowseResult::from_raw(new_result) });
+    let changes = BrowseResultChange::from_bits(changes);
+    unsafe {
+        CallbackContext::<ResultsCb>::with(context, "browser_result_trampoline", move |callback| {
+            if let Ok(mut callback) = callback.lock() {
+                callback(old_result, new_result, changes, batch_complete != 0);
+            }
+        })
     };
-    let old_result =
-        (!old_result.is_null()).then_some(unsafe { BrowseResult::from_raw(old_result) });
-    let new_result =
-        (!new_result.is_null()).then_some(unsafe { BrowseResult::from_raw(new_result) });
-    guard(
-        old_result,
-        new_result,
-        BrowseResultChange::from_bits(changes),
-        batch_complete != 0,
-    );
-}
-
-unsafe fn invoke(
-    user_info: *mut c_void,
-    name: *const c_char,
-    service_type: *const c_char,
-    domain: *const c_char,
-    is_found: bool,
-) {
-    if user_info.is_null() {
-        return;
-    }
-    let arc_ptr = user_info.cast::<Cb>();
-    let svc = DiscoveredService {
-        name: cstr_to_string(name),
-        service_type: cstr_to_string(service_type),
-        domain: cstr_to_string(domain),
-    };
-    let event = if is_found {
-        BrowserEvent::Found(svc)
-    } else {
-        BrowserEvent::Lost(svc)
-    };
-    let Ok(mut guard) = (unsafe { &*arc_ptr }).lock() else {
-        return;
-    };
-    guard(event);
 }
 
 unsafe fn cstr_to_string(p: *const c_char) -> String {
@@ -570,25 +553,24 @@ where
     F: FnMut(BrowserEvent) + Send + 'static,
 {
     let boxed: Box<dyn FnMut(BrowserEvent) + Send + 'static> = Box::new(callback);
-    let arc: Arc<Cb> = Arc::new(Mutex::new(boxed));
-    let raw = Arc::into_raw(arc.clone()).cast::<c_void>().cast_mut();
+    let events = CallbackContext::new(Mutex::new(boxed));
     let handle = unsafe {
         ffi::nw_shim_browser_start_with_descriptor(
             descriptor.as_ptr(),
             parameters.map_or(core::ptr::null_mut(), ConnectionParameters::as_ptr),
-            found_trampoline,
-            lost_trampoline,
-            raw,
+            Some(service_trampoline),
+            events.retained_ptr(),
+            Some(CallbackContext::<Cb>::RETAIN),
+            Some(CallbackContext::<Cb>::RELEASE),
         )
     };
     if handle.is_null() {
-        unsafe { Arc::from_raw(raw.cast::<Cb>()) };
         return Err(NetworkError::ListenFailed);
     }
     Ok(Browser {
         handle,
-        _callback: arc,
-        state_callback: None,
+        events,
+        state: None,
     })
 }
 
@@ -601,24 +583,24 @@ pub fn start_browser_results_with_descriptor<F>(
 where
     F: FnMut(Option<BrowseResult>, Option<BrowseResult>, BrowseResultChange, bool) + Send + 'static,
 {
-    let arc: Arc<ResultsCb> = Arc::new(Mutex::new(Box::new(callback)));
-    let raw = Arc::into_raw(arc.clone()).cast::<c_void>().cast_mut();
+    let events: CallbackContext<ResultsCb> = CallbackContext::new(Mutex::new(Box::new(callback)));
     let handle = unsafe {
         ffi::nw_shim_browser_start_results_with_descriptor(
             descriptor.as_ptr(),
             parameters.map_or(core::ptr::null_mut(), ConnectionParameters::as_ptr),
             Some(result_trampoline),
-            raw,
+            events.retained_ptr(),
+            Some(CallbackContext::<ResultsCb>::RETAIN),
+            Some(CallbackContext::<ResultsCb>::RELEASE),
         )
     };
     if handle.is_null() {
-        unsafe { Arc::from_raw(raw.cast::<ResultsCb>()) };
         return Err(NetworkError::ListenFailed);
     }
     Ok(BrowseResultsBrowser {
         handle,
-        _callback: arc,
-        state_callback: None,
+        events,
+        state: None,
     })
 }
 
@@ -686,7 +668,7 @@ pub fn advertise_bonjour_service(
             svc_name.as_ptr(),
             dom.as_ref().map_or(core::ptr::null(), |c| c.as_ptr()),
             port,
-            &mut status,
+            &raw mut status,
         )
     };
     if status != ffi::NW_OK || handle.is_null() {

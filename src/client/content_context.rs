@@ -23,7 +23,6 @@ pub struct ContentContext {
 }
 
 unsafe impl Send for ContentContext {}
-unsafe impl Sync for ContentContext {}
 
 impl std::fmt::Debug for ContentContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

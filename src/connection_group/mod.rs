@@ -4,16 +4,18 @@
 
 use core::ffi::{c_int, c_void};
 use std::ffi::CString;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
+
+use doom_fish_utils::callback_context::CallbackContext;
 
 use crate::client::{ContentContext, TcpClient};
+use crate::context::Subscription;
 use crate::endpoint::Endpoint;
 use crate::error::{from_status, NetworkError};
 use crate::ffi;
-use crate::parameters::{ConnectionParameters, KeepAlives};
+use crate::parameters::ConnectionParameters;
 use crate::path::Path;
 use crate::protocol::{ProtocolDefinition, ProtocolMetadata, ProtocolOptions};
-use doom_fish_utils::panic_safe::catch_user_panic;
 
 fn to_cstring(value: &str, field: &str) -> Result<CString, NetworkError> {
     CString::new(value).map_err(|e| NetworkError::InvalidArgument(format!("{field} NUL byte: {e}")))
@@ -25,7 +27,6 @@ pub struct ConnectionGroupDescriptor {
 }
 
 unsafe impl Send for ConnectionGroupDescriptor {}
-unsafe impl Sync for ConnectionGroupDescriptor {}
 
 impl std::fmt::Debug for ConnectionGroupDescriptor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -181,20 +182,14 @@ pub struct ConnectionGroupMessage {
 
 type StateCallback = Mutex<Box<dyn FnMut(ConnectionGroupState) + Send + 'static>>;
 type ReceiveCallback = Mutex<Box<dyn FnMut(ConnectionGroupMessage) + Send + 'static>>;
-
-struct NewConnectionCallback {
-    keepalives: KeepAlives,
-    callback: Mutex<Box<dyn FnMut(TcpClient) + Send + 'static>>,
-}
+type NewConnectionCallback = Mutex<Box<dyn FnMut(TcpClient) + Send + 'static>>;
 
 /// A running connection group.
-#[allow(clippy::type_complexity)]
 pub struct ConnectionGroup {
     handle: *mut c_void,
-    state_callback: Option<Arc<StateCallback>>,
-    receive_callback: Option<Arc<ReceiveCallback>>,
-    new_connection_callback: Option<Arc<NewConnectionCallback>>,
-    keepalives: KeepAlives,
+    state: Option<Subscription<StateCallback>>,
+    receive: Option<Subscription<ReceiveCallback>>,
+    new_connection: Option<Subscription<NewConnectionCallback>>,
 }
 
 unsafe impl Send for ConnectionGroup {}
@@ -204,9 +199,9 @@ impl std::fmt::Debug for ConnectionGroup {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ConnectionGroup")
             .field("handle", &self.handle)
-            .field("has_state_callback", &self.state_callback.is_some())
-            .field("has_receive_callback", &self.receive_callback.is_some())
-            .field("has_new_connection_callback", &self.new_connection_callback.is_some())
+            .field("state", &self.state)
+            .field("receive", &self.receive)
+            .field("new_connection", &self.new_connection)
             .finish_non_exhaustive()
     }
 }
@@ -225,13 +220,14 @@ impl ConnectionGroup {
                 "failed to create connection group".into(),
             ));
         }
-        Ok(Self {
-            handle,
-            state_callback: None,
-            receive_callback: None,
-            new_connection_callback: None,
-            keepalives: parameters.keepalives(),
-        })
+        Ok(unsafe { Self::from_raw(handle) })
+    }
+
+    fn unsubscribe<T: Send + Sync + 'static>(&self, subscription: Option<Subscription<T>>) {
+        if let Some(subscription) = subscription {
+            subscription.deactivate();
+            unsafe { ffi::nw_shim_connection_group_unsubscribe(self.handle, subscription.token) };
+        }
     }
 
     /// Set a state-change callback. Call before [`start`](Self::start).
@@ -239,17 +235,20 @@ impl ConnectionGroup {
     where
         F: FnMut(ConnectionGroupState) + Send + 'static,
     {
+        let previous = self.state.take();
+        self.unsubscribe(previous);
         let callback: Box<dyn FnMut(ConnectionGroupState) + Send + 'static> = Box::new(callback);
-        let arc = Arc::new(Mutex::new(callback));
-        let raw = Arc::into_raw(arc.clone()).cast::<c_void>().cast_mut();
-        unsafe {
-            ffi::nw_shim_connection_group_set_state_changed_handler(
-                self.handle,
-                Some(state_trampoline),
-                raw,
-            )
-        };
-        self.state_callback = Some(arc);
+        let handle = self.handle;
+        self.state =
+            Subscription::register(Mutex::new(callback), |context, retain, release| unsafe {
+                ffi::nw_shim_connection_group_subscribe_state(
+                    handle,
+                    Some(state_trampoline),
+                    context,
+                    Some(retain),
+                    Some(release),
+                )
+            });
     }
 
     /// Set the receive callback. Call before [`start`](Self::start).
@@ -258,22 +257,32 @@ impl ConnectionGroup {
         maximum_message_size: u32,
         reject_oversized_messages: bool,
         callback: F,
-    ) where
+    ) -> Result<(), NetworkError>
+    where
         F: FnMut(ConnectionGroupMessage) + Send + 'static,
     {
         let callback: Box<dyn FnMut(ConnectionGroupMessage) + Send + 'static> = Box::new(callback);
-        let arc = Arc::new(Mutex::new(callback));
-        let raw = Arc::into_raw(arc.clone()).cast::<c_void>().cast_mut();
-        unsafe {
-            ffi::nw_shim_connection_group_set_receive_handler(
-                self.handle,
-                maximum_message_size,
-                c_int::from(reject_oversized_messages),
-                Some(receive_trampoline),
-                raw,
-            )
-        };
-        self.receive_callback = Some(arc);
+        let handle = self.handle;
+        let subscription =
+            Subscription::register(Mutex::new(callback), |context, retain, release| unsafe {
+                ffi::nw_shim_connection_group_subscribe_receive(
+                    handle,
+                    maximum_message_size,
+                    c_int::from(reject_oversized_messages),
+                    Some(receive_trampoline),
+                    context,
+                    Some(retain),
+                    Some(release),
+                )
+            })
+            .ok_or_else(|| {
+                NetworkError::InvalidArgument(
+                    "the receive handler must be set before the group starts".into(),
+                )
+            })?;
+        let previous = self.receive.replace(subscription);
+        self.unsubscribe(previous);
+        Ok(())
     }
 
     /// # Safety
@@ -281,13 +290,12 @@ impl ConnectionGroup {
     /// `handle` must be a valid retained connection-group handle owned by the
     /// caller and remain alive for the returned wrapper.
     #[must_use]
-    pub(crate) const unsafe fn from_raw(handle: *mut c_void, keepalives: KeepAlives) -> Self {
+    pub(crate) const unsafe fn from_raw(handle: *mut c_void) -> Self {
         Self {
             handle,
-            state_callback: None,
-            receive_callback: None,
-            new_connection_callback: None,
-            keepalives,
+            state: None,
+            receive: None,
+            new_connection: None,
         }
     }
 
@@ -426,13 +434,13 @@ impl ConnectionGroup {
             ffi::nw_shim_connection_group_extract_connection_for_message(
                 self.handle,
                 context.as_ptr(),
-                &mut status,
+                &raw mut status,
             )
         };
         if status != ffi::NW_OK || handle.is_null() {
             return Err(from_status(status));
         }
-        Ok(unsafe { TcpClient::from_raw_with_keepalives(handle, self.keepalives.clone()) })
+        Ok(unsafe { TcpClient::from_raw(handle) })
     }
 
     /// Extract a connection for a specific remote endpoint and protocol options.
@@ -447,33 +455,40 @@ impl ConnectionGroup {
                 self.handle,
                 endpoint.as_ptr(),
                 protocol_options.as_ptr(),
-                &mut status,
+                &raw mut status,
             )
         };
         if status != ffi::NW_OK || handle.is_null() {
             return Err(from_status(status));
         }
-        Ok(unsafe { TcpClient::from_raw_with_keepalives(handle, self.keepalives.clone()) })
+        Ok(unsafe { TcpClient::from_raw(handle) })
     }
 
     /// Receive callbacks for new connections accepted by the group.
-    pub fn set_new_connection_handler<F>(&mut self, callback: F)
+    pub fn set_new_connection_handler<F>(&mut self, callback: F) -> Result<(), NetworkError>
     where
         F: FnMut(TcpClient) + Send + 'static,
     {
-        let handler = Arc::new(NewConnectionCallback {
-            keepalives: self.keepalives.clone(),
-            callback: Mutex::new(Box::new(callback)),
-        });
-        let raw = Arc::into_raw(handler.clone()).cast::<c_void>().cast_mut();
-        unsafe {
-            ffi::nw_shim_connection_group_set_new_connection_handler(
-                self.handle,
-                Some(new_connection_trampoline),
-                raw,
-            );
-        };
-        self.new_connection_callback = Some(handler);
+        let callback: Box<dyn FnMut(TcpClient) + Send + 'static> = Box::new(callback);
+        let handle = self.handle;
+        let subscription =
+            Subscription::register(Mutex::new(callback), |context, retain, release| unsafe {
+                ffi::nw_shim_connection_group_subscribe_new_connection(
+                    handle,
+                    Some(new_connection_trampoline),
+                    context,
+                    Some(retain),
+                    Some(release),
+                )
+            })
+            .ok_or_else(|| {
+                NetworkError::InvalidArgument(
+                    "the new-connection handler must be set before the group starts".into(),
+                )
+            })?;
+        let previous = self.new_connection.replace(subscription);
+        self.unsubscribe(previous);
+        Ok(())
     }
 
     /// Reinsert an extracted connection back into the group.
@@ -487,7 +502,7 @@ impl ConnectionGroup {
         if status != ffi::NW_OK {
             return Err(from_status(status));
         }
-        std::mem::forget(connection);
+        unsafe { ffi::nw_shim_connection_release_without_cancel(connection.into_raw()) };
         Ok(())
     }
 
@@ -521,6 +536,9 @@ impl ConnectionGroup {
 
 impl Drop for ConnectionGroup {
     fn drop(&mut self) {
+        self.state = None;
+        self.receive = None;
+        self.new_connection = None;
         if !self.handle.is_null() {
             unsafe { ffi::nw_shim_connection_group_release(self.handle) };
             self.handle = core::ptr::null_mut();
@@ -528,65 +546,67 @@ impl Drop for ConnectionGroup {
     }
 }
 
-unsafe extern "C" fn state_trampoline(state: c_int, user_info: *mut c_void) {
-    if user_info.is_null() {
-        return;
-    }
-    let callback = unsafe { &*user_info.cast::<StateCallback>() };
-    let Ok(mut guard) = callback.lock() else {
-        return;
-    };
+unsafe extern "C" fn state_trampoline(state: c_int, context: *mut c_void) {
     let state = ConnectionGroupState::from_raw(state);
-    catch_user_panic("connection_group_state_trampoline", || {
-        guard(state);
-    });
+    unsafe {
+        CallbackContext::<StateCallback>::with(
+            context,
+            "connection_group_state_trampoline",
+            |callback| {
+                if let Ok(mut callback) = callback.lock() {
+                    callback(state);
+                }
+            },
+        )
+    };
 }
 
-unsafe extern "C" fn new_connection_trampoline(connection: *mut c_void, user_info: *mut c_void) {
-    if user_info.is_null() || connection.is_null() {
+unsafe extern "C" fn new_connection_trampoline(connection: *mut c_void, context: *mut c_void) {
+    if connection.is_null() {
         return;
     }
-    let callback = unsafe { &*user_info.cast::<NewConnectionCallback>() };
-    let Ok(mut guard) = callback.callback.lock() else {
-        return;
+    let client = unsafe { TcpClient::from_raw(connection) };
+    unsafe {
+        CallbackContext::<NewConnectionCallback>::with(
+            context,
+            "connection_group_new_connection_trampoline",
+            move |callback| {
+                if let Ok(mut callback) = callback.lock() {
+                    callback(client);
+                }
+            },
+        )
     };
-    let client =
-        unsafe { TcpClient::from_raw_with_keepalives(connection, callback.keepalives.clone()) };
-    catch_user_panic("connection_group_new_connection_trampoline", || {
-        guard(client);
-    });
 }
 
 unsafe extern "C" fn receive_trampoline(
     data: *const u8,
     len: usize,
-    context: *mut c_void,
+    message_context: *mut c_void,
     is_complete: c_int,
-    user_info: *mut c_void,
+    context: *mut c_void,
 ) {
-    if user_info.is_null() {
-        return;
-    }
-    let callback = unsafe { &*user_info.cast::<ReceiveCallback>() };
-    let Ok(mut guard) = callback.lock() else {
-        return;
-    };
+    let content_context =
+        (!message_context.is_null()).then(|| unsafe { ContentContext::from_raw(message_context) });
     let bytes = if data.is_null() || len == 0 {
         Vec::new()
     } else {
         unsafe { std::slice::from_raw_parts(data, len) }.to_vec()
     };
-    let context = if context.is_null() {
-        None
-    } else {
-        Some(unsafe { ContentContext::from_raw(context) })
-    };
     let message = ConnectionGroupMessage {
         data: bytes,
-        context,
+        context: content_context,
         is_complete: is_complete != 0,
     };
-    catch_user_panic("connection_group_receive_trampoline", || {
-        guard(message);
-    });
+    unsafe {
+        CallbackContext::<ReceiveCallback>::with(
+            context,
+            "connection_group_receive_trampoline",
+            move |callback| {
+                if let Ok(mut callback) = callback.lock() {
+                    callback(message);
+                }
+            },
+        )
+    };
 }

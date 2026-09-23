@@ -4,31 +4,30 @@
 
 use core::ffi::{c_int, c_void};
 use std::ffi::CString;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
+
+use doom_fish_utils::callback_context::CallbackContext;
 
 use crate::client::TcpClient;
 use crate::connection_group::ConnectionGroup;
+use crate::context::Subscription;
 use crate::endpoint::Endpoint;
 use crate::error::{from_status, NetworkError};
 use crate::ffi;
-use crate::parameters::{ConnectionParameters, KeepAlives};
-use doom_fish_utils::panic_safe::catch_user_panic;
+use crate::interface::InterfaceType;
+use crate::parameters::ConnectionParameters;
+use crate::tls::{TlsIdentity, TlsVersion};
 
 type AdvertisedEndpointCallback = Mutex<Box<dyn FnMut(Option<Endpoint>, bool) + Send + 'static>>;
-
-struct NewConnectionGroupCallback {
-    keepalives: KeepAlives,
-    callback: Mutex<Box<dyn FnMut(ConnectionGroup) + Send + 'static>>,
-}
+type NewConnectionGroupCallback = Mutex<Box<dyn FnMut(ConnectionGroup) + Send + 'static>>;
 
 /// Blocking listener wrapper around `nw_listener`. Each accepted
 /// connection returns a [`TcpClient`] handle that is already fully
 /// ready for reads/writes.
 pub struct TcpListener {
     handle: *mut c_void,
-    keepalives: KeepAlives,
-    advertised_endpoint_callback: Option<Arc<AdvertisedEndpointCallback>>,
-    new_connection_group_callback: Option<Arc<NewConnectionGroupCallback>>,
+    advertised_endpoint: Option<Subscription<AdvertisedEndpointCallback>>,
+    new_connection_group: Option<Subscription<NewConnectionGroupCallback>>,
 }
 
 unsafe impl Send for TcpListener {}
@@ -38,36 +37,59 @@ impl std::fmt::Debug for TcpListener {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TcpListener")
             .field("handle", &self.handle)
-            .field("has_advertised_endpoint_callback", &self.advertised_endpoint_callback.is_some())
-            .field("has_new_connection_group_callback", &self.new_connection_group_callback.is_some())
+            .field("advertised_endpoint", &self.advertised_endpoint)
+            .field("new_connection_group", &self.new_connection_group)
             .finish_non_exhaustive()
     }
 }
 
 impl TcpListener {
+    const fn from_handle(handle: *mut c_void) -> Self {
+        Self {
+            handle,
+            advertised_endpoint: None,
+            new_connection_group: None,
+        }
+    }
+
     /// Bind a plain TCP listener on `port` (use `0` for an OS-assigned
-    /// port).
+    /// port) on every local interface, reachable from the network.
     ///
-    /// For TLS, use [`bind_tls`](Self::bind_tls).
+    /// For TLS, use [`bind_tls`](Self::bind_tls); to accept only local
+    /// connections, use [`bind_loopback`](Self::bind_loopback).
     ///
     /// # Errors
     ///
     /// Returns [`NetworkError::ListenFailed`] if the bind fails.
     pub fn bind(port: u16) -> Result<Self, NetworkError> {
-        Self::bind_inner(port, false)
+        let mut status: c_int = 0;
+        let handle = unsafe { ffi::nw_shim_listener_create(port, 0, &raw mut status) };
+        if status != ffi::NW_OK || handle.is_null() {
+            return Err(from_status(status));
+        }
+        Ok(Self::from_handle(handle))
     }
 
-    /// Bind a TLS-wrapped TCP listener on `port`. Uses Apple's default
-    /// TLS configuration; the server must be configured with an
-    /// identity (out of scope for this crate's `bind_tls` helper — for
-    /// real-world use cases plug in `nw_protocol_options_set_identity`
-    /// via your own shim).
+    pub fn bind_loopback(port: u16) -> Result<Self, NetworkError> {
+        let mut parameters = ConnectionParameters::tcp()?;
+        parameters
+            .set_required_interface_type(InterfaceType::Loopback)
+            .set_local_endpoint(Some(&Endpoint::address("127.0.0.1", 0)?));
+        Self::bind_with_parameters(port, &parameters)
+    }
+
+    /// Bind a TLS listener on `port` on every local interface. It presents
+    /// `identity` and requires TLS 1.2 or newer.
     ///
     /// # Errors
     ///
     /// Returns [`NetworkError::ListenFailed`] if the bind fails.
-    pub fn bind_tls(port: u16) -> Result<Self, NetworkError> {
-        Self::bind_inner(port, true)
+    pub fn bind_tls(port: u16, identity: &TlsIdentity) -> Result<Self, NetworkError> {
+        let parameters = ConnectionParameters::tls_tcp_configured(|tls| {
+            tls.set_local_identity(identity)
+                .set_min_tls_version(TlsVersion::Tls12);
+        })?;
+        Self::bind_with_parameters(port, &parameters)
     }
 
     /// Bind a listener using explicit [`ConnectionParameters`].
@@ -77,33 +99,23 @@ impl TcpListener {
     ) -> Result<Self, NetworkError> {
         let mut status: c_int = 0;
         let handle = unsafe {
-            ffi::nw_shim_listener_create_with_parameters(parameters.as_ptr(), port, &mut status)
+            ffi::nw_shim_listener_create_with_parameters(parameters.as_ptr(), port, &raw mut status)
         };
         if status != ffi::NW_OK || handle.is_null() {
             return Err(from_status(status));
         }
-        Ok(Self {
-            handle,
-            keepalives: parameters.keepalives(),
-            advertised_endpoint_callback: None,
-            new_connection_group_callback: None,
-        })
+        Ok(Self::from_handle(handle))
     }
 
     /// Create a listener directly from parameters without binding a specific port first.
     pub fn bind_direct(parameters: &ConnectionParameters) -> Result<Self, NetworkError> {
         let mut status: c_int = 0;
         let handle =
-            unsafe { ffi::nw_shim_listener_create_direct(parameters.as_ptr(), &mut status) };
+            unsafe { ffi::nw_shim_listener_create_direct(parameters.as_ptr(), &raw mut status) };
         if status != ffi::NW_OK || handle.is_null() {
             return Err(from_status(status));
         }
-        Ok(Self {
-            handle,
-            keepalives: parameters.keepalives(),
-            advertised_endpoint_callback: None,
-            new_connection_group_callback: None,
-        })
+        Ok(Self::from_handle(handle))
     }
 
     /// Create a listener anchored to an existing connection.
@@ -116,18 +128,13 @@ impl TcpListener {
             ffi::nw_shim_listener_create_with_connection(
                 connection.as_ptr(),
                 parameters.as_ptr(),
-                &mut status,
+                &raw mut status,
             )
         };
         if status != ffi::NW_OK || handle.is_null() {
             return Err(from_status(status));
         }
-        Ok(Self {
-            handle,
-            keepalives: parameters.keepalives(),
-            advertised_endpoint_callback: None,
-            new_connection_group_callback: None,
-        })
+        Ok(Self::from_handle(handle))
     }
 
     /// Create a launchd-backed listener from an existing launchd key.
@@ -142,33 +149,13 @@ impl TcpListener {
             ffi::nw_shim_listener_create_with_launchd_key(
                 parameters.as_ptr(),
                 launchd_key.as_ptr(),
-                &mut status,
+                &raw mut status,
             )
         };
         if status != ffi::NW_OK || handle.is_null() {
             return Err(from_status(status));
         }
-        Ok(Self {
-            handle,
-            keepalives: parameters.keepalives(),
-            advertised_endpoint_callback: None,
-            new_connection_group_callback: None,
-        })
-    }
-
-    fn bind_inner(port: u16, use_tls: bool) -> Result<Self, NetworkError> {
-        let mut status: c_int = 0;
-        let handle =
-            unsafe { ffi::nw_shim_listener_create(port, c_int::from(use_tls), &mut status) };
-        if status != ffi::NW_OK || handle.is_null() {
-            return Err(from_status(status));
-        }
-        Ok(Self {
-            handle,
-            keepalives: KeepAlives::empty(),
-            advertised_endpoint_callback: None,
-            new_connection_group_callback: None,
-        })
+        Ok(Self::from_handle(handle))
     }
 
     /// The port actually bound (useful when `bind(0)` was used).
@@ -196,17 +183,22 @@ impl TcpListener {
     where
         F: FnMut(Option<Endpoint>, bool) + Send + 'static,
     {
+        if let Some(previous) = self.advertised_endpoint.take() {
+            previous.deactivate();
+            unsafe { ffi::nw_shim_listener_unsubscribe(self.handle, previous.token) };
+        }
         let callback: Box<dyn FnMut(Option<Endpoint>, bool) + Send + 'static> = Box::new(callback);
-        let arc = Arc::new(Mutex::new(callback));
-        let raw = Arc::into_raw(arc.clone()).cast::<c_void>().cast_mut();
-        unsafe {
-            ffi::nw_shim_listener_set_advertised_endpoint_changed_handler(
-                self.handle,
-                Some(advertised_endpoint_trampoline),
-                raw,
-            );
-        };
-        self.advertised_endpoint_callback = Some(arc);
+        let handle = self.handle;
+        self.advertised_endpoint =
+            Subscription::register(Mutex::new(callback), |context, retain, release| unsafe {
+                ffi::nw_shim_listener_subscribe_advertised_endpoint(
+                    handle,
+                    Some(advertised_endpoint_trampoline),
+                    context,
+                    Some(retain),
+                    Some(release),
+                )
+            });
     }
 
     /// Receive callbacks when the listener creates connection groups.
@@ -214,19 +206,22 @@ impl TcpListener {
     where
         F: FnMut(ConnectionGroup) + Send + 'static,
     {
-        let handler = Arc::new(NewConnectionGroupCallback {
-            keepalives: self.keepalives.clone(),
-            callback: Mutex::new(Box::new(callback)),
-        });
-        let raw = Arc::into_raw(handler.clone()).cast::<c_void>().cast_mut();
-        unsafe {
-            ffi::nw_shim_listener_set_new_connection_group_handler(
-                self.handle,
-                Some(new_connection_group_trampoline),
-                raw,
-            );
-        };
-        self.new_connection_group_callback = Some(handler);
+        if let Some(previous) = self.new_connection_group.take() {
+            previous.deactivate();
+            unsafe { ffi::nw_shim_listener_unsubscribe(self.handle, previous.token) };
+        }
+        let callback: Box<dyn FnMut(ConnectionGroup) + Send + 'static> = Box::new(callback);
+        let handle = self.handle;
+        self.new_connection_group =
+            Subscription::register(Mutex::new(callback), |context, retain, release| unsafe {
+                ffi::nw_shim_listener_subscribe_new_connection_group(
+                    handle,
+                    Some(new_connection_group_trampoline),
+                    context,
+                    Some(retain),
+                    Some(release),
+                )
+            });
     }
 
     #[cfg(feature = "async")]
@@ -235,66 +230,67 @@ impl TcpListener {
         self.handle
     }
 
-    #[cfg(feature = "async")]
-    #[must_use]
-    pub(crate) fn keepalives(&self) -> KeepAlives {
-        self.keepalives.clone()
-    }
-
-    /// Block until a new connection arrives, then return it as a
+    /// Block until a new connection is ready, then return it as a
     /// ready-to-use [`TcpClient`].
     ///
     /// # Errors
     ///
-    /// Returns [`NetworkError::ConnectFailed`] if the accepted
-    /// connection couldn't reach the ready state.
+    /// Returns [`NetworkError::Cancelled`] once the listener has failed or
+    /// been cancelled and no ready connection is left.
     pub fn accept(&self) -> Result<TcpClient, NetworkError> {
         let mut status: c_int = 0;
-        let conn_handle = unsafe { ffi::nw_shim_listener_accept(self.handle, &mut status) };
+        let conn_handle = unsafe { ffi::nw_shim_listener_accept(self.handle, &raw mut status) };
         if status != ffi::NW_OK || conn_handle.is_null() {
             return Err(from_status(status));
         }
         // SAFETY: nw_shim_listener_accept returns the same shape as
         // nw_shim_tcp_connect — a `nw_conn_handle*`. We hand it to
         // TcpClient via a private constructor below.
-        Ok(unsafe { TcpClient::from_raw_with_keepalives(conn_handle, self.keepalives.clone()) })
+        Ok(unsafe { TcpClient::from_raw(conn_handle) })
     }
 }
 
 unsafe extern "C" fn advertised_endpoint_trampoline(
     endpoint: *mut c_void,
     is_added: c_int,
-    user_info: *mut c_void,
+    context: *mut c_void,
 ) {
-    if user_info.is_null() {
-        return;
-    }
-    let callback = unsafe { &*user_info.cast::<AdvertisedEndpointCallback>() };
-    let Ok(mut guard) = callback.lock() else {
-        return;
+    let endpoint = (!endpoint.is_null()).then(|| unsafe { Endpoint::from_raw(endpoint) });
+    unsafe {
+        CallbackContext::<AdvertisedEndpointCallback>::with(
+            context,
+            "listener_advertised_endpoint_trampoline",
+            move |callback| {
+                if let Ok(mut callback) = callback.lock() {
+                    callback(endpoint, is_added != 0);
+                }
+            },
+        )
     };
-    let endpoint = (!endpoint.is_null()).then_some(unsafe { Endpoint::from_raw(endpoint) });
-    catch_user_panic("listener_advertised_endpoint_trampoline", || {
-        guard(endpoint, is_added != 0);
-    });
 }
 
-unsafe extern "C" fn new_connection_group_trampoline(group: *mut c_void, user_info: *mut c_void) {
-    if user_info.is_null() || group.is_null() {
+unsafe extern "C" fn new_connection_group_trampoline(group: *mut c_void, context: *mut c_void) {
+    if group.is_null() {
         return;
     }
-    let callback = unsafe { &*user_info.cast::<NewConnectionGroupCallback>() };
-    let Ok(mut guard) = callback.callback.lock() else {
-        return;
+    let group = unsafe { ConnectionGroup::from_raw(group) };
+    unsafe {
+        CallbackContext::<NewConnectionGroupCallback>::with(
+            context,
+            "listener_new_connection_group_trampoline",
+            move |callback| {
+                if let Ok(mut callback) = callback.lock() {
+                    callback(group);
+                }
+            },
+        )
     };
-    let group = unsafe { ConnectionGroup::from_raw(group, callback.keepalives.clone()) };
-    catch_user_panic("listener_new_connection_group_trampoline", || {
-        guard(group);
-    });
 }
 
 impl Drop for TcpListener {
     fn drop(&mut self) {
+        self.advertised_endpoint = None;
+        self.new_connection_group = None;
         if !self.handle.is_null() {
             unsafe { ffi::nw_shim_listener_close(self.handle) };
             self.handle = core::ptr::null_mut();

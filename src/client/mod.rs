@@ -7,15 +7,17 @@ mod content_context;
 use core::ffi::{c_char, c_int, c_void};
 use core::ptr;
 use std::ffi::{CStr, CString};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
+use doom_fish_utils::callback_context::CallbackContext;
 use doom_fish_utils::panic_safe::catch_user_panic;
 
 pub use content_context::{ContentContext, ReceivedContent};
 
-use crate::error::{from_status, NetworkError};
+use crate::context::Subscription;
+use crate::error::{from_status, receive_error, NetworkError};
 use crate::ffi;
-use crate::parameters::{ConnectionParameters, KeepAlives};
+use crate::parameters::ConnectionParameters;
 use crate::path::Path;
 use crate::protocol::{ProtocolDefinition, ProtocolMetadata};
 
@@ -28,41 +30,28 @@ type PathChangedCallback = Mutex<Box<dyn FnMut(Option<Path>) + Send + 'static>>;
 
 pub struct TcpClient {
     handle: *mut c_void,
-    _keepalives: KeepAlives,
-    viability_raw: *const BooleanCallback,
-    better_path_raw: *const BooleanCallback,
-    path_raw: *const PathChangedCallback,
+    viability: Option<Subscription<BooleanCallback>>,
+    better_path: Option<Subscription<BooleanCallback>>,
+    path_changed: Option<Subscription<PathChangedCallback>>,
 }
 
-// SAFETY: Network.framework serializes connection callbacks on its own queue,
-// and the raw callback pointers are only dereferenced by that queue while the
-// connection handle is live. `Drop` closes the connection, waits for the queue
-// to drain, and only then reclaims the raw callback pointers.
+// SAFETY: the shim handle is reference counted. The connection's own state
+// handler holds a reference until Network.framework delivers the final
+// `cancelled` event, and each callback context is retained by the shim for as
+// long as it can be invoked, so no callback outlives the memory it touches.
 unsafe impl Send for TcpClient {}
-// SAFETY: Shared references only forward to the shim. The raw callback
-// pointers remain valid until `Drop` closes the connection and reclaims them
-// after the serial queue has finished running callbacks.
+// SAFETY: shared references only forward to Network.framework calls that are
+// safe to make concurrently; handler replacement requires `&mut self`.
 unsafe impl Sync for TcpClient {}
 
 impl std::fmt::Debug for TcpClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TcpClient")
             .field("handle", &self.handle)
-            .field("viability_raw", &self.viability_raw)
-            .field("better_path_raw", &self.better_path_raw)
-            .field("path_raw", &self.path_raw)
+            .field("viability", &self.viability)
+            .field("better_path", &self.better_path)
+            .field("path_changed", &self.path_changed)
             .finish_non_exhaustive()
-    }
-}
-
-fn reclaim_arc_raw<T>(raw: &mut *const T) {
-    if !raw.is_null() {
-        // SAFETY: `*raw` was produced by `Arc::into_raw`, and the caller only
-        // invokes this helper after the native side has stopped using it.
-        unsafe {
-            drop(Arc::from_raw(*raw));
-        }
-        *raw = ptr::null();
     }
 }
 
@@ -126,19 +115,13 @@ impl TcpClient {
                 host.as_ptr(),
                 port,
                 parameters.as_ptr(),
-                &mut status,
+                &raw mut status,
             )
         };
         if status != ffi::NW_OK || handle.is_null() {
             return Err(from_status(status));
         }
-        Ok(Self {
-            handle,
-            _keepalives: parameters.keepalives(),
-            viability_raw: ptr::null(),
-            better_path_raw: ptr::null(),
-            path_raw: ptr::null(),
-        })
+        Ok(unsafe { Self::from_raw(handle) })
     }
 
     fn connect_inner(host: &str, port: u16, use_tls: bool) -> Result<Self, NetworkError> {
@@ -148,18 +131,12 @@ impl TcpClient {
         // SAFETY: `host_c` and `status` outlive the call, and the boolean flag
         // is represented exactly as the shim expects.
         let handle = unsafe {
-            ffi::nw_shim_tcp_connect(host_c.as_ptr(), port, c_int::from(use_tls), &mut status)
+            ffi::nw_shim_tcp_connect(host_c.as_ptr(), port, c_int::from(use_tls), &raw mut status)
         };
         if status != ffi::NW_OK || handle.is_null() {
             return Err(from_status(status));
         }
-        Ok(Self {
-            handle,
-            _keepalives: KeepAlives::empty(),
-            viability_raw: ptr::null(),
-            better_path_raw: ptr::null(),
-            path_raw: ptr::null(),
-        })
+        Ok(unsafe { Self::from_raw(handle) })
     }
 
     /// Wrap a raw `nw_conn_handle*` (produced by the listener shim).
@@ -169,17 +146,20 @@ impl TcpClient {
     /// `handle` must be a live pointer returned by the shim's accept
     /// path. Ownership is transferred to the returned [`TcpClient`].
     #[must_use]
-    pub(crate) const unsafe fn from_raw_with_keepalives(
-        handle: *mut c_void,
-        keepalives: KeepAlives,
-    ) -> Self {
+    pub(crate) const unsafe fn from_raw(handle: *mut c_void) -> Self {
         Self {
             handle,
-            _keepalives: keepalives,
-            viability_raw: ptr::null(),
-            better_path_raw: ptr::null(),
-            path_raw: ptr::null(),
+            viability: None,
+            better_path: None,
+            path_changed: None,
         }
+    }
+
+    pub(crate) fn into_raw(mut self) -> *mut c_void {
+        self.viability = None;
+        self.better_path = None;
+        self.path_changed = None;
+        core::mem::replace(&mut self.handle, ptr::null_mut())
     }
 
     /// Copy the remote endpoint of the connection.
@@ -230,63 +210,6 @@ impl TcpClient {
     #[must_use]
     pub(crate) const fn as_ptr(&self) -> *mut c_void {
         self.handle
-    }
-
-    fn clear_viability_changed_handler(&mut self) {
-        if !self.viability_raw.is_null() {
-            if !self.handle.is_null() {
-                // SAFETY: `self.handle` is a live connection handle. Clearing
-                // the handler and draining the serial queue ensures no queued
-                // viability callback can still observe `self.viability_raw`.
-                unsafe {
-                    ffi::nw_shim_connection_set_viability_changed_handler(
-                        self.handle,
-                        None,
-                        ptr::null_mut(),
-                    );
-                    ffi::nw_shim_connection_drain_queue(self.handle);
-                }
-            }
-            reclaim_arc_raw(&mut self.viability_raw);
-        }
-    }
-
-    fn clear_better_path_available_handler(&mut self) {
-        if !self.better_path_raw.is_null() {
-            if !self.handle.is_null() {
-                // SAFETY: `self.handle` is a live connection handle. Clearing
-                // the handler and draining the serial queue ensures no queued
-                // better-path callback can still observe `self.better_path_raw`.
-                unsafe {
-                    ffi::nw_shim_connection_set_better_path_available_handler(
-                        self.handle,
-                        None,
-                        ptr::null_mut(),
-                    );
-                    ffi::nw_shim_connection_drain_queue(self.handle);
-                }
-            }
-            reclaim_arc_raw(&mut self.better_path_raw);
-        }
-    }
-
-    fn clear_path_changed_handler(&mut self) {
-        if !self.path_raw.is_null() {
-            if !self.handle.is_null() {
-                // SAFETY: `self.handle` is a live connection handle. Clearing
-                // the handler and draining the serial queue ensures no queued
-                // path callback can still observe `self.path_raw`.
-                unsafe {
-                    ffi::nw_shim_connection_set_path_changed_handler(
-                        self.handle,
-                        None,
-                        ptr::null_mut(),
-                    );
-                    ffi::nw_shim_connection_drain_queue(self.handle);
-                }
-            }
-            reclaim_arc_raw(&mut self.path_raw);
-        }
     }
 
     /// Restart the connection's path and protocol selection.
@@ -379,31 +302,32 @@ impl TcpClient {
         }
     }
 
+    fn unsubscribe<T: Send + Sync + 'static>(&self, subscription: Option<Subscription<T>>) {
+        if let Some(subscription) = subscription {
+            subscription.deactivate();
+            unsafe { ffi::nw_shim_connection_unsubscribe(self.handle, subscription.token) };
+        }
+    }
+
     /// Receive viability updates for the connection.
     pub fn set_viability_changed_handler<F>(&mut self, callback: F)
     where
         F: FnMut(bool) + Send + 'static,
     {
-        self.clear_viability_changed_handler();
-
+        let previous = self.viability.take();
+        self.unsubscribe(previous);
         let callback: Box<dyn FnMut(bool) + Send + 'static> = Box::new(callback);
-        let viability_raw = Arc::into_raw(Arc::new(Mutex::new(callback)));
-        if self.handle.is_null() {
-            self.viability_raw = viability_raw;
-            return;
-        }
-
-        // SAFETY: `self.handle` is a live connection handle, and
-        // `viability_raw` points at an `Arc` allocation that stays valid until
-        // we clear the handler and reclaim it.
-        unsafe {
-            ffi::nw_shim_connection_set_viability_changed_handler(
-                self.handle,
-                Some(boolean_trampoline),
-                viability_raw.cast::<c_void>().cast_mut(),
-            );
-        }
-        self.viability_raw = viability_raw;
+        let handle = self.handle;
+        self.viability =
+            Subscription::register(Mutex::new(callback), |context, retain, release| unsafe {
+                ffi::nw_shim_connection_subscribe_viability(
+                    handle,
+                    Some(boolean_trampoline),
+                    context,
+                    Some(retain),
+                    Some(release),
+                )
+            });
     }
 
     /// Receive updates when a better network path becomes available.
@@ -411,26 +335,20 @@ impl TcpClient {
     where
         F: FnMut(bool) + Send + 'static,
     {
-        self.clear_better_path_available_handler();
-
+        let previous = self.better_path.take();
+        self.unsubscribe(previous);
         let callback: Box<dyn FnMut(bool) + Send + 'static> = Box::new(callback);
-        let better_path_raw = Arc::into_raw(Arc::new(Mutex::new(callback)));
-        if self.handle.is_null() {
-            self.better_path_raw = better_path_raw;
-            return;
-        }
-
-        // SAFETY: `self.handle` is a live connection handle, and
-        // `better_path_raw` points at an `Arc` allocation that stays valid
-        // until we clear the handler and reclaim it.
-        unsafe {
-            ffi::nw_shim_connection_set_better_path_available_handler(
-                self.handle,
-                Some(boolean_trampoline),
-                better_path_raw.cast::<c_void>().cast_mut(),
-            );
-        }
-        self.better_path_raw = better_path_raw;
+        let handle = self.handle;
+        self.better_path =
+            Subscription::register(Mutex::new(callback), |context, retain, release| unsafe {
+                ffi::nw_shim_connection_subscribe_better_path(
+                    handle,
+                    Some(boolean_trampoline),
+                    context,
+                    Some(retain),
+                    Some(release),
+                )
+            });
     }
 
     /// Receive path snapshots whenever Network.framework changes the active path.
@@ -438,26 +356,20 @@ impl TcpClient {
     where
         F: FnMut(Option<Path>) + Send + 'static,
     {
-        self.clear_path_changed_handler();
-
+        let previous = self.path_changed.take();
+        self.unsubscribe(previous);
         let callback: Box<dyn FnMut(Option<Path>) + Send + 'static> = Box::new(callback);
-        let path_raw = Arc::into_raw(Arc::new(Mutex::new(callback)));
-        if self.handle.is_null() {
-            self.path_raw = path_raw;
-            return;
-        }
-
-        // SAFETY: `self.handle` is a live connection handle, and `path_raw`
-        // points at an `Arc` allocation that stays valid until we clear the
-        // handler and reclaim it.
-        unsafe {
-            ffi::nw_shim_connection_set_path_changed_handler(
-                self.handle,
-                Some(path_trampoline),
-                path_raw.cast::<c_void>().cast_mut(),
-            );
-        }
-        self.path_raw = path_raw;
+        let handle = self.handle;
+        self.path_changed =
+            Subscription::register(Mutex::new(callback), |context, retain, release| unsafe {
+                ffi::nw_shim_connection_subscribe_path(
+                    handle,
+                    Some(path_trampoline),
+                    context,
+                    Some(retain),
+                    Some(release),
+                )
+            });
     }
 
     /// Send `data` over the connection. Blocks until the framework has
@@ -504,105 +416,133 @@ impl TcpClient {
     /// # Errors
     ///
     /// Returns [`NetworkError::ReceiveFailed`].
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    #[allow(clippy::cast_sign_loss)]
     pub fn receive(&self, max_len: usize) -> Result<Vec<u8>, NetworkError> {
         let mut buf = vec![0u8; max_len];
+        let mut size = 0_usize;
         // SAFETY: `self.handle` is a live connection handle, and `buf`
         // provides writable storage for the duration of the blocking shim call.
-        let n = unsafe { ffi::nw_shim_tcp_receive(self.handle, buf.as_mut_ptr(), max_len) };
+        let n = unsafe {
+            ffi::nw_shim_tcp_receive(self.handle, buf.as_mut_ptr(), max_len, &raw mut size)
+        };
         if n < 0 {
-            return Err(from_status(n as i32));
+            return Err(receive_error(n, size, max_len));
         }
         buf.truncate(n as usize);
         Ok(buf)
     }
 
     /// Receive data together with its [`ContentContext`].
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     pub fn receive_with_context(&self, max_len: usize) -> Result<ReceivedContent, NetworkError> {
-        let mut buf = vec![0_u8; max_len];
-        let mut context = ptr::null_mut();
-        let mut is_complete = 0;
-        // SAFETY: `self.handle` is a live connection handle, and `buf`,
-        // `context`, and `is_complete` all provide valid out-pointers for the
-        // duration of the blocking shim call.
-        let n = unsafe {
-            ffi::nw_shim_connection_receive_with_context(
-                self.handle,
+        receive_content(self.handle, max_len, false)
+    }
+
+    pub fn receive_message(&self, max_len: usize) -> Result<ReceivedContent, NetworkError> {
+        receive_content(self.handle, max_len, true)
+    }
+}
+
+#[allow(clippy::cast_sign_loss)]
+pub(crate) fn receive_content(
+    handle: *mut c_void,
+    max_len: usize,
+    whole_message: bool,
+) -> Result<ReceivedContent, NetworkError> {
+    let mut buf = vec![0_u8; max_len];
+    let mut size = 0_usize;
+    let mut context = ptr::null_mut();
+    let mut is_complete = 0;
+    // SAFETY: `handle` is a live connection handle, and `buf`, `size`,
+    // `context`, and `is_complete` all provide valid out-pointers for the
+    // duration of the blocking shim call.
+    let n = unsafe {
+        if whole_message {
+            ffi::nw_shim_connection_receive_message(
+                handle,
                 buf.as_mut_ptr(),
                 max_len,
-                &mut context,
-                &mut is_complete,
+                &raw mut size,
+                &raw mut context,
+                &raw mut is_complete,
             )
-        };
-        if n < 0 {
-            return Err(from_status(n as i32));
-        }
-        buf.truncate(n as usize);
-        let context = if context.is_null() {
-            None
         } else {
-            // SAFETY: the shim returned a retained content-context handle for
-            // the caller to wrap and own.
-            Some(unsafe { ContentContext::from_raw(context) })
-        };
-        Ok(ReceivedContent {
-            data: buf,
-            context,
-            is_complete: is_complete != 0,
-        })
-    }
-}
-
-unsafe extern "C" fn boolean_trampoline(value: c_int, user_info: *mut c_void) {
-    if user_info.is_null() {
-        return;
-    }
-
-    // SAFETY: `user_info` is the stable pointer created by `Arc::into_raw` in
-    // the setter and remains valid until the handler is cleared and reclaimed.
-    let callback = unsafe { &*user_info.cast::<BooleanCallback>() };
-    let Ok(mut guard) = callback.lock() else {
-        return;
+            ffi::nw_shim_connection_receive_with_context(
+                handle,
+                buf.as_mut_ptr(),
+                max_len,
+                &raw mut size,
+                &raw mut context,
+                &raw mut is_complete,
+            )
+        }
     };
-    catch_user_panic("tcp_client_boolean_trampoline", || guard(value != 0));
-}
-
-unsafe extern "C" fn path_trampoline(path: *mut c_void, user_info: *mut c_void) {
-    if user_info.is_null() {
-        return;
+    if n < 0 {
+        return Err(receive_error(n, size, max_len));
     }
-
-    // SAFETY: `user_info` is the stable pointer created by `Arc::into_raw` in
-    // the setter and remains valid until the handler is cleared and reclaimed.
-    let callback = unsafe { &*user_info.cast::<PathChangedCallback>() };
-    let Ok(mut guard) = callback.lock() else {
-        return;
-    };
-    let path = if path.is_null() {
+    buf.truncate(n as usize);
+    let context = if context.is_null() {
         None
     } else {
-        // SAFETY: the shim passes a retained path snapshot to the callback, and
-        // ownership transfers to this wrapper value.
-        Some(unsafe { Path::from_raw(path) })
+        // SAFETY: the shim returned a retained content-context handle for
+        // the caller to wrap and own.
+        Some(unsafe { ContentContext::from_raw(context) })
     };
-    catch_user_panic("tcp_client_path_trampoline", || guard(path));
+    Ok(ReceivedContent {
+        data: buf,
+        context,
+        is_complete: is_complete != 0,
+    })
+}
+
+unsafe extern "C" fn boolean_trampoline(value: c_int, context: *mut c_void) {
+    // SAFETY: `context` is the retained callback context registered in the
+    // setter; the shim keeps it alive for as long as it can invoke this.
+    unsafe {
+        CallbackContext::<BooleanCallback>::with(
+            context,
+            "tcp_client_boolean_trampoline",
+            |callback| {
+                if let Ok(mut callback) = callback.lock() {
+                    callback(value != 0);
+                }
+            },
+        )
+    };
+}
+
+unsafe extern "C" fn path_trampoline(path: *mut c_void, context: *mut c_void) {
+    // SAFETY: the shim passes a retained path snapshot to the callback, and
+    // ownership transfers to this wrapper value.
+    let path = (!path.is_null()).then(|| unsafe { Path::from_raw(path) });
+    // SAFETY: `context` is the retained callback context registered in the
+    // setter; the shim keeps it alive for as long as it can invoke this.
+    unsafe {
+        CallbackContext::<PathChangedCallback>::with(
+            context,
+            "tcp_client_path_trampoline",
+            move |callback| {
+                if let Ok(mut callback) = callback.lock() {
+                    callback(path);
+                }
+            },
+        )
+    };
 }
 
 impl Drop for TcpClient {
     fn drop(&mut self) {
+        self.viability = None;
+        self.better_path = None;
+        self.path_changed = None;
         if !self.handle.is_null() {
             // SAFETY: `self.handle` is the live connection handle owned by this
-            // client. `nw_shim_tcp_close` waits for the serial queue to reach
-            // the cancelled state before returning, so no more callbacks can
-            // fire after this call completes.
+            // client. Closing cancels the connection and releases this
+            // client's reference; the shim frees the handle after the final
+            // `cancelled` event.
             unsafe {
                 ffi::nw_shim_tcp_close(self.handle);
             }
             self.handle = ptr::null_mut();
         }
-        reclaim_arc_raw(&mut self.viability_raw);
-        reclaim_arc_raw(&mut self.better_path_raw);
-        reclaim_arc_raw(&mut self.path_raw);
     }
 }

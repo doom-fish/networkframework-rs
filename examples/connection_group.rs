@@ -15,7 +15,7 @@ fn main() -> Result<(), networkframework::NetworkError> {
         println!("state: {state:?}");
         states_for_callback.lock().expect("state lock").push(state);
     });
-    group.set_receive_handler(2048, false, |_message| {});
+    group.set_receive_handler(2048, false, |_message| {})?;
     group.start()?;
     std::thread::sleep(Duration::from_millis(200));
 

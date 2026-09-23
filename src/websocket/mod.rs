@@ -1,9 +1,11 @@
 //! [`WebSocket`] — RFC 6455 WebSocket client over Network.framework.
 
 use core::ffi::{c_char, c_int, c_void};
+use core::fmt::Write;
 use std::ffi::{CStr, CString};
+use std::net::Ipv6Addr;
 
-use crate::error::{from_status, NetworkError};
+use crate::error::{from_status, receive_error, NetworkError};
 use crate::ffi;
 
 /// WebSocket message kind.
@@ -415,6 +417,91 @@ pub struct WebSocket {
 unsafe impl Send for WebSocket {}
 unsafe impl Sync for WebSocket {}
 
+fn invalid_url(reason: &str) -> NetworkError {
+    NetworkError::InvalidArgument(format!("invalid WebSocket URL: {reason}"))
+}
+
+fn websocket_host(host: &str) -> Result<String, NetworkError> {
+    if host.is_empty() {
+        return Err(invalid_url("the host is empty"));
+    }
+    let unbracketed = host
+        .strip_prefix('[')
+        .and_then(|inner| inner.strip_suffix(']'));
+    let candidate = unbracketed.unwrap_or(host);
+    let (address, zone) = candidate
+        .split_once('%')
+        .map_or((candidate, None), |(address, zone)| (address, Some(zone)));
+    if address.parse::<Ipv6Addr>().is_ok() {
+        return match zone {
+            None => Ok(format!("[{address}]")),
+            Some(zone)
+                if !zone.is_empty()
+                    && zone
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-')) =>
+            {
+                Ok(format!("[{address}%25{zone}]"))
+            }
+            Some(_) => Err(invalid_url("the IPv6 zone identifier is malformed")),
+        };
+    }
+    if unbracketed.is_some() {
+        return Err(invalid_url(
+            "brackets are only allowed around IPv6 addresses",
+        ));
+    }
+    if host
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_'))
+    {
+        Ok(host.to_owned())
+    } else {
+        Err(invalid_url(
+            "hosts may only contain ASCII letters, digits, '-', '.' and '_'",
+        ))
+    }
+}
+
+fn websocket_path(path: &str) -> Result<String, NetworkError> {
+    if path.is_empty() {
+        return Ok("/".to_owned());
+    }
+    if !path.starts_with('/') {
+        return Err(invalid_url("the path must start with '/'"));
+    }
+    let mut encoded = String::with_capacity(path.len());
+    for byte in path.bytes() {
+        match byte {
+            b'\\' | b'#' => return Err(invalid_url("the path may not contain '\\' or '#'")),
+            0x00..=0x20 | 0x7f => {
+                return Err(invalid_url(
+                    "the path may not contain spaces or control characters",
+                ))
+            }
+            0x80..=0xff => {
+                let _ = write!(encoded, "%{byte:02X}");
+            }
+            _ => encoded.push(char::from(byte)),
+        }
+    }
+    Ok(encoded)
+}
+
+pub(crate) fn websocket_url(
+    host: &str,
+    port: u16,
+    path: &str,
+    use_tls: bool,
+) -> Result<String, NetworkError> {
+    let scheme = if use_tls { "wss" } else { "ws" };
+    Ok(format!(
+        "{scheme}://{}:{port}{}",
+        websocket_host(host)?,
+        websocket_path(path)?
+    ))
+}
+
 impl std::fmt::Debug for WebSocket {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WebSocket")
@@ -429,22 +516,15 @@ impl WebSocket {
     ///
     /// # Errors
     ///
-    /// Returns [`NetworkError::ConnectFailed`] on failure.
+    /// Returns [`NetworkError::InvalidArgument`] if the host or path could
+    /// change the URL's authority, and [`NetworkError::ConnectFailed`] or
+    /// [`NetworkError::Timeout`] on failure.
     pub fn connect(host: &str, port: u16, path: &str, use_tls: bool) -> Result<Self, NetworkError> {
-        let host_c = CString::new(host)
-            .map_err(|e| NetworkError::InvalidArgument(format!("host NUL byte: {e}")))?;
-        let path_c = CString::new(path)
-            .map_err(|e| NetworkError::InvalidArgument(format!("path NUL byte: {e}")))?;
+        let url = CString::new(websocket_url(host, port, path, use_tls)?)
+            .map_err(|e| NetworkError::InvalidArgument(format!("url NUL byte: {e}")))?;
         let mut status: c_int = 0;
-        let handle = unsafe {
-            ffi::nw_shim_ws_connect(
-                host_c.as_ptr(),
-                port,
-                path_c.as_ptr(),
-                c_int::from(use_tls),
-                &mut status,
-            )
-        };
+        let handle =
+            unsafe { ffi::nw_shim_ws_connect(url.as_ptr(), c_int::from(use_tls), &raw mut status) };
         if status != ffi::NW_OK || handle.is_null() {
             return Err(from_status(status));
         }
@@ -503,14 +583,25 @@ impl WebSocket {
     ///
     /// # Errors
     ///
-    /// Returns [`NetworkError::ReceiveFailed`].
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    /// Returns [`NetworkError::MessageTooLarge`] when the message is longer
+    /// than `max_len` (the message is consumed), or
+    /// [`NetworkError::ReceiveFailed`].
+    #[allow(clippy::cast_sign_loss)]
     pub fn receive(&self, max_len: usize) -> Result<WsMessage, NetworkError> {
         let mut buf = vec![0u8; max_len];
         let mut op: c_int = 0;
-        let n = unsafe { ffi::nw_shim_ws_receive(self.handle, buf.as_mut_ptr(), max_len, &mut op) };
+        let mut size = 0_usize;
+        let n = unsafe {
+            ffi::nw_shim_ws_receive(
+                self.handle,
+                buf.as_mut_ptr(),
+                max_len,
+                &raw mut op,
+                &raw mut size,
+            )
+        };
         if n < 0 {
-            return Err(from_status(n as i32));
+            return Err(receive_error(n, size, max_len));
         }
         buf.truncate(n as usize);
         Ok(WsMessage {
@@ -549,6 +640,7 @@ impl WebSocket {
                 metadata,
                 Some(callback),
                 core::ptr::null_mut(),
+                None,
             );
         }
         Ok(())
@@ -580,7 +672,7 @@ impl WebSocket {
             ));
         }
         unsafe {
-            ffi::nw_shim_ws_metadata_set_pong_handler(metadata, Some(callback), user_info);
+            ffi::nw_shim_ws_metadata_set_pong_handler(metadata, Some(callback), user_info, None);
         }
         Ok(())
     }
@@ -592,5 +684,74 @@ impl Drop for WebSocket {
             unsafe { ffi::nw_shim_tcp_close(self.handle) };
             self.handle = core::ptr::null_mut();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::websocket_url;
+    use crate::error::NetworkError;
+
+    #[test]
+    fn websocket_url_brackets_ipv6_hosts() {
+        assert_eq!(
+            websocket_url("::1", 8080, "/chat", false).unwrap(),
+            "ws://[::1]:8080/chat"
+        );
+        assert_eq!(
+            websocket_url("[::1]", 443, "", true).unwrap(),
+            "wss://[::1]:443/"
+        );
+        assert_eq!(
+            websocket_url("fe80::1%en0", 80, "/", false).unwrap(),
+            "ws://[fe80::1%25en0]:80/"
+        );
+        assert_eq!(
+            websocket_url("example.com", 80, "/a?b=c", false).unwrap(),
+            "ws://example.com:80/a?b=c"
+        );
+        assert_eq!(
+            websocket_url("127.0.0.1", 1, "/", false).unwrap(),
+            "ws://127.0.0.1:1/"
+        );
+    }
+
+    #[test]
+    fn websocket_url_rejects_authority_injection() {
+        for (host, path) in [
+            ("example.com", "@evil.com/"),
+            ("example.com", "evil"),
+            ("user@evil.com", "/"),
+            ("evil.com:99", "/"),
+            ("evil.com/x", "/"),
+            ("[example.com]", "/"),
+            ("fe80::1%", "/"),
+            ("fe80::1%en0/x", "/"),
+            ("", "/"),
+            ("example.com", "/a b"),
+            ("example.com", "/a\\b"),
+            ("example.com", "/a#frag"),
+            ("example.com", "/\r\nHost: evil"),
+        ] {
+            assert!(
+                matches!(
+                    websocket_url(host, 80, path, false),
+                    Err(NetworkError::InvalidArgument(_))
+                ),
+                "{host:?} {path:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn websocket_url_keeps_long_paths_and_encodes_non_ascii() {
+        let path = format!("/{}", "a".repeat(5000));
+        let url = websocket_url("example.com", 80, &path, false).unwrap();
+        assert_eq!(url.len(), "ws://example.com:80".len() + path.len());
+        assert!(url.ends_with(&path));
+        assert_eq!(
+            websocket_url("example.com", 80, "/caf\u{e9}", false).unwrap(),
+            "ws://example.com:80/caf%C3%A9"
+        );
     }
 }
