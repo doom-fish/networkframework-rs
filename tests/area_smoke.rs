@@ -7,7 +7,8 @@ use networkframework::{
     advertise_with_descriptor, start_browser_results_with_descriptor,
     start_browser_with_descriptor, start_path_monitor_for_ethernet_channel,
     start_path_monitor_with_type, AdvertiseDescriptor, BrowseDescriptor, BrowserEvent,
-    BrowserState, ConnectionGroup, ConnectionGroupDescriptor, ConnectionParameters, ContentContext,
+    BrowserState, ConnectionGroup, ConnectionGroupDescriptor, ConnectionGroupState,
+    ConnectionParameters, ContentContext,
     DataTransferReportState, Endpoint, EndpointType, ErrorDomain, EthernetChannel,
     ExpiredDnsBehavior, Framer, FramerContext, FramerDefinition, FramerMessageView, FramerStart,
     InterfaceType, IpEcnFlag, IpLocalAddressPreference, IpVersion, MultipathService,
@@ -91,7 +92,7 @@ impl Framer for LengthPrefixFramer {
 
 #[test]
 fn connection_area_round_trip_exposes_metadata() -> Result<(), networkframework::NetworkError> {
-    let listener = TcpListener::bind(0)?;
+    let listener = TcpListener::bind_loopback(0)?;
     let port = listener.local_port();
     let server = std::thread::spawn(move || -> Result<(), networkframework::NetworkError> {
         let connection = listener.accept()?;
@@ -124,7 +125,7 @@ fn connection_area_round_trip_exposes_metadata() -> Result<(), networkframework:
 
 #[test]
 fn listener_area_accepts_connections() -> Result<(), networkframework::NetworkError> {
-    let mut listener = TcpListener::bind(0)?;
+    let mut listener = TcpListener::bind_loopback(0)?;
     listener.set_advertised_endpoint_changed_handler(|_endpoint, _is_added| {});
     listener.set_new_connection_group_handler(|_group| {});
     assert!(listener.local_port() > 0);
@@ -353,7 +354,7 @@ fn endpoint_area_builds_common_endpoint_types() -> Result<(), networkframework::
 
 #[test]
 fn path_area_reports_connection_path() -> Result<(), networkframework::NetworkError> {
-    let listener = TcpListener::bind(0)?;
+    let listener = TcpListener::bind_loopback(0)?;
     let port = listener.local_port();
     let server = std::thread::spawn(move || -> Result<(), networkframework::NetworkError> {
         let connection = listener.accept()?;
@@ -390,6 +391,7 @@ fn framer_area_round_trip() -> Result<(), networkframework::NetworkError> {
 
     let mut parameters = ConnectionParameters::tcp()?;
     parameters.prepend_framer(&options)?;
+    parameters.set_local_endpoint(Some(&Endpoint::address("127.0.0.1", 0)?));
 
     let listener = TcpListener::bind_with_parameters(0, &parameters)?;
     let port = listener.local_port();
@@ -409,6 +411,28 @@ fn framer_area_round_trip() -> Result<(), networkframework::NetworkError> {
 }
 
 #[test]
+fn group_area_builds_descriptors_and_drops_unstarted_groups(
+) -> Result<(), networkframework::NetworkError> {
+    let mut descriptor = ConnectionGroupDescriptor::multicast("239.255.0.1", 5000)?;
+    let specific_source = Endpoint::address("127.0.0.1", 5000)?;
+    descriptor.set_specific_source(&specific_source);
+    descriptor.set_disable_unicast_traffic(true);
+    assert!(descriptor.disable_unicast_traffic());
+    assert!(!descriptor.endpoints().is_empty());
+
+    let parameters = ConnectionParameters::udp()?;
+    for _ in 0..32 {
+        let mut group = ConnectionGroup::new(&descriptor, &parameters)?;
+        group.set_state_changed_handler(|_state| {});
+        group.set_new_connection_handler(|_connection| {})?;
+        group.set_receive_handler(2048, false, |_message| {})?;
+        drop(group);
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "multicast groups listen on every interface"]
 fn group_area_starts_and_cancels() -> Result<(), networkframework::NetworkError> {
     let mut descriptor = ConnectionGroupDescriptor::multicast("239.255.0.1", 5000)?;
     let specific_source = Endpoint::address("127.0.0.1", 5000)?;
@@ -425,17 +449,34 @@ fn group_area_starts_and_cancels() -> Result<(), networkframework::NetworkError>
     group.set_state_changed_handler(move |state| {
         states_for_callback.lock().expect("states lock").push(state);
     });
-    group.set_new_connection_handler(|_connection| {});
-    group.set_receive_handler(2048, false, |_message| {});
+    group.set_new_connection_handler(|_connection| {})?;
+    group.set_receive_handler(2048, false, |_message| {})?;
     group.start()?;
+    assert!(matches!(
+        group.set_receive_handler(2048, false, |_message| {}),
+        Err(networkframework::NetworkError::InvalidArgument(_))
+    ));
+    assert!(matches!(
+        group.set_new_connection_handler(|_connection| {}),
+        Err(networkframework::NetworkError::InvalidArgument(_))
+    ));
     std::thread::sleep(Duration::from_millis(200));
     let _ = group.descriptor();
     let _ = group.parameters();
     group.cancel();
 
-    let observed = states.lock().expect("states lock");
-    assert!(!observed.is_empty());
-    drop(observed);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !states
+        .lock()
+        .expect("states lock")
+        .contains(&ConnectionGroupState::Cancelled)
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the group never reported cancellation"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
     Ok(())
 }
 
@@ -675,6 +716,30 @@ fn proxy_config_area_tracks_domains_and_optional_relay(
 }
 
 #[test]
+fn advertise_descriptor_area_builds_descriptors() -> Result<(), networkframework::NetworkError> {
+    let mut descriptor = AdvertiseDescriptor::bonjour_service(
+        Some(&unique_label("service")),
+        "_nfwtest._tcp",
+        Some("local"),
+    )?;
+    descriptor.set_txt_record(b"k=v").set_no_auto_rename(true);
+    assert!(descriptor.no_auto_rename());
+    assert_eq!(descriptor.service_type(), Some("_nfwtest._tcp"));
+    assert!(descriptor.service_name().is_some());
+
+    if let Ok(application_service) =
+        AdvertiseDescriptor::application_service("com.example.networkframework")
+    {
+        assert_eq!(
+            application_service.application_service_name().as_deref(),
+            Some("com.example.networkframework")
+        );
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "advertising listens on every interface"]
 fn advertise_descriptor_area_builds_and_advertises() -> Result<(), networkframework::NetworkError> {
     let mut descriptor = AdvertiseDescriptor::bonjour_service(
         Some(&unique_label("service")),
@@ -744,7 +809,7 @@ fn txt_record_area_supports_lookup_and_endpoint_helpers(
 
 #[test]
 fn connection_report_area_collects_metrics() -> Result<(), networkframework::NetworkError> {
-    let listener = TcpListener::bind(0)?;
+    let listener = TcpListener::bind_loopback(0)?;
     let port = listener.local_port();
     let server = std::thread::spawn(move || -> Result<(), networkframework::NetworkError> {
         let connection = listener.accept()?;
@@ -826,11 +891,12 @@ fn advanced_path_monitor_and_misc_area_smoke() -> Result<(), networkframework::N
 
     let _ = ConnectionParameters::custom_ip(253);
 
-    let mut listener = TcpListener::bind(0)?;
+    let mut listener = TcpListener::bind_loopback(0)?;
     let current_limit = listener.new_connection_limit();
     listener.set_new_connection_limit(current_limit.max(1));
 
-    let parameters = ConnectionParameters::tcp()?;
+    let mut parameters = ConnectionParameters::tcp()?;
+    parameters.set_local_endpoint(Some(&Endpoint::address("127.0.0.1", 0)?));
     let _ = TcpListener::bind_direct(&parameters);
     let _ = TcpListener::bind_with_launchd_key(&parameters, "com.example.networkframework.test");
 

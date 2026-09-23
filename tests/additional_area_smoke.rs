@@ -47,7 +47,7 @@ impl Framer for MetadataFramer {
 
 #[test]
 fn connection_area_connect_with_parameters_tracks_snapshots() -> Result<(), NetworkError> {
-    let listener = TcpListener::bind(0)?;
+    let listener = TcpListener::bind_loopback(0)?;
     let port = listener.local_port();
     let server = std::thread::spawn(move || -> Result<Vec<u8>, NetworkError> {
         let connection = listener.accept()?;
@@ -77,7 +77,9 @@ fn connection_area_connect_with_parameters_tracks_snapshots() -> Result<(), Netw
 #[test]
 fn listener_area_bind_with_parameters_updates_connection_limit() -> Result<(), NetworkError> {
     let mut parameters = ConnectionParameters::tcp()?;
-    parameters.set_reuse_local_address(true);
+    parameters
+        .set_reuse_local_address(true)
+        .set_local_endpoint(Some(&Endpoint::address("127.0.0.1", 0)?));
 
     let mut listener = TcpListener::bind_with_parameters(0, &parameters)?;
     assert!(listener.local_port() > 0);
@@ -191,7 +193,7 @@ fn endpoint_area_clone_preserves_signature_and_invalid_input_errors() -> Result<
 
 #[test]
 fn path_area_clone_reports_loopback_interfaces() -> Result<(), NetworkError> {
-    let listener = TcpListener::bind(0)?;
+    let listener = TcpListener::bind_loopback(0)?;
     let port = listener.local_port();
     let server = std::thread::spawn(move || -> Result<(), NetworkError> {
         let connection = listener.accept()?;
@@ -204,7 +206,7 @@ fn path_area_clone_reports_loopback_interfaces() -> Result<(), NetworkError> {
     let client = Connection::connect_with_parameters("127.0.0.1", port, &parameters)?;
     let path = client.current_path().expect("current path");
     let path_clone = path.clone();
-    assert!(path_clone == path);
+    assert_eq!(path_clone, path);
     assert!(path.uses_interface_type(InterfaceType::Loopback));
     assert!(path
         .interfaces()

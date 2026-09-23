@@ -1,6 +1,6 @@
 use networkframework::{
-    ConnectionParameters, Framer, FramerContext, FramerDefinition, FramerStart, TcpClient,
-    TcpListener,
+    ConnectionParameters, Endpoint, Framer, FramerContext, FramerDefinition, FramerStart,
+    TcpClient, TcpListener,
 };
 
 #[derive(Default)]
@@ -73,6 +73,7 @@ fn main() -> Result<(), networkframework::NetworkError> {
 
     let mut parameters = ConnectionParameters::tcp()?;
     parameters.prepend_framer(&options)?;
+    parameters.set_local_endpoint(Some(&Endpoint::address("127.0.0.1", 0)?));
 
     let listener = TcpListener::bind_with_parameters(0, &parameters)?;
     let port = listener.local_port();

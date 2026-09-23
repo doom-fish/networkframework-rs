@@ -1,7 +1,7 @@
 use networkframework::{TcpClient, TcpListener};
 
 fn main() -> Result<(), networkframework::NetworkError> {
-    let listener = TcpListener::bind(0)?;
+    let listener = TcpListener::bind_loopback(0)?;
     let port = listener.local_port();
     let server = std::thread::spawn(move || -> Result<(), networkframework::NetworkError> {
         let connection = listener.accept()?;
