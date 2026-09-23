@@ -515,7 +515,7 @@ impl UrlSessionConfiguration {
         let items = unsafe {
             ffi::nw_shim_url_session_configuration_copy_proxy_configurations(
                 self.handle,
-                &mut count,
+                &raw mut count,
             )
         };
         if items.is_null() || count == 0 {

@@ -172,7 +172,7 @@ impl Endpoint {
     #[must_use]
     pub fn signature(&self) -> Option<Vec<u8>> {
         let mut len = 0_usize;
-        let ptr = unsafe { ffi::nw_shim_endpoint_copy_signature(self.handle, &mut len) };
+        let ptr = unsafe { ffi::nw_shim_endpoint_copy_signature(self.handle, &raw mut len) };
         if ptr.is_null() || len == 0 {
             return None;
         }

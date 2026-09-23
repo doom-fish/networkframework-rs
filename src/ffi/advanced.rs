@@ -86,9 +86,8 @@ pub struct NwShimResolutionStepInfo {
 // languages, the marshalled data silently corrupts.
 //
 // These compile-time assertions pin the exact size and alignment of each struct
-// so accidental layout changes fail `cargo build` immediately. The crate's MSRV
-// is 1.76, so `offset_of!` (stabilised in 1.77) is unavailable; size + alignment
-// are used instead. `verify_ffi_layout` re-checks the same invariants at runtime
+// so accidental layout changes fail `cargo build` immediately. Size + alignment
+// are pinned here. `verify_ffi_layout` re-checks the same invariants at runtime
 // and is exercised by the unit test at the bottom of this module.
 const _: () = assert!(core::mem::size_of::<NwShimEstablishmentProtocolInfo>() == 24);
 const _: () = assert!(core::mem::align_of::<NwShimEstablishmentProtocolInfo>() == 8);

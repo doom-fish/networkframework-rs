@@ -163,7 +163,7 @@ impl ProtocolStack {
     pub fn application_protocols(&self) -> Vec<ProtocolOptions> {
         let mut count = 0_usize;
         let items = unsafe {
-            ffi::nw_shim_protocol_stack_copy_application_protocols(self.handle, &mut count)
+            ffi::nw_shim_protocol_stack_copy_application_protocols(self.handle, &raw mut count)
         };
         if items.is_null() || count == 0 {
             return Vec::new();
@@ -258,9 +258,9 @@ impl ConnectionParameters {
         let found = unsafe {
             ffi::nw_shim_parameters_copy_required_interface(
                 self.as_ptr(),
-                &mut name,
-                &mut interface_type,
-                &mut index,
+                &raw mut name,
+                &raw mut interface_type,
+                &raw mut index,
             )
         };
         if found == 0 {
@@ -298,7 +298,7 @@ impl ConnectionParameters {
     pub fn prohibited_interfaces(&self) -> Vec<NetworkInterface> {
         let mut count = 0_usize;
         let items = unsafe {
-            ffi::nw_shim_parameters_copy_prohibited_interfaces(self.as_ptr(), &mut count)
+            ffi::nw_shim_parameters_copy_prohibited_interfaces(self.as_ptr(), &raw mut count)
         };
         if items.is_null() || count == 0 {
             return Vec::new();
@@ -331,7 +331,7 @@ impl ConnectionParameters {
     pub fn prohibited_interface_types(&self) -> Vec<InterfaceType> {
         let mut count = 0_usize;
         let items = unsafe {
-            ffi::nw_shim_parameters_copy_prohibited_interface_types(self.as_ptr(), &mut count)
+            ffi::nw_shim_parameters_copy_prohibited_interface_types(self.as_ptr(), &raw mut count)
         };
         if items.is_null() || count == 0 {
             return Vec::new();

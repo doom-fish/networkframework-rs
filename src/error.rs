@@ -137,7 +137,7 @@ impl FrameworkError {
     #[must_use]
     pub fn cf_error(&self) -> Option<apple_cf::cf::CFError> {
         let cf_error_ptr = unsafe { ffi::nw_shim_error_copy_cf_error(self.handle) };
-        unsafe { apple_cf::cf::CFError::from_raw_retained(cf_error_ptr) }
+        unsafe { apple_cf::cf::CFError::from_raw(cf_error_ptr) }
     }
 
     /// Alias for [`Self::cf_error`].

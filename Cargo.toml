@@ -9,7 +9,7 @@ description = "Safe Rust bindings for Apple's Network.framework — modern, post
 authors = ["Per Johansson <per@doom.fish>"]
 keywords = ["network", "tcp", "udp", "macos", "apple"]
 categories = ["api-bindings", "os::macos-apis", "network-programming"]
-rust-version = "1.76"
+rust-version = "1.82"
 readme = "README.md"
 build = "build.rs"
 include = [
@@ -43,8 +43,8 @@ crate-type = ["lib"]
 [build-dependencies]
 
 [dependencies]
-apple-cf = { path = "../apple-cf-rs", version = ">=0.7, <0.10" }
-doom-fish-utils = { path = "../doom-fish-utils", version = ">=0.1, <0.4" }
+apple-cf = { path = "../apple-cf-rs", version = ">=0.11, <0.12" }
+doom-fish-utils = { path = "../doom-fish-utils", version = ">=0.4.1, <0.5" }
 
 [dev-dependencies]
 pollster = "0.3"

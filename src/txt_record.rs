@@ -131,8 +131,8 @@ impl TxtRecord {
             ffi::nw_shim_txt_record_copy_value(
                 self.handle,
                 key.as_ptr(),
-                &mut value_length,
-                &mut found,
+                &raw mut value_length,
+                &raw mut found,
             )
         };
         let status = TxtRecordFindResult::from_raw(found);
@@ -175,7 +175,7 @@ impl TxtRecord {
     #[must_use]
     pub fn bytes(&self) -> Vec<u8> {
         let mut len = 0_usize;
-        let ptr = unsafe { ffi::nw_shim_txt_record_copy_bytes(self.handle, &mut len) };
+        let ptr = unsafe { ffi::nw_shim_txt_record_copy_bytes(self.handle, &raw mut len) };
         if ptr.is_null() || len == 0 {
             return Vec::new();
         }

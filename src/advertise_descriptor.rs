@@ -225,7 +225,7 @@ pub fn advertise_with_descriptor(
                     .as_ref()
                     .map_or(core::ptr::null(), |value| value.as_ptr()),
                 port,
-                &mut status,
+                &raw mut status,
             )
         }
     } else {
@@ -233,7 +233,7 @@ pub fn advertise_with_descriptor(
             ffi::nw_shim_bonjour_advertise_start_with_descriptor(
                 descriptor.as_ptr(),
                 port,
-                &mut status,
+                &raw mut status,
             )
         }
     };

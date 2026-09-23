@@ -261,8 +261,9 @@ impl EstablishmentReport {
     #[must_use]
     pub fn protocols(&self) -> Vec<EstablishmentProtocol> {
         let mut count = 0_usize;
-        let items =
-            unsafe { ffi::nw_shim_establishment_report_copy_protocols(self.handle, &mut count) };
+        let items = unsafe {
+            ffi::nw_shim_establishment_report_copy_protocols(self.handle, &raw mut count)
+        };
         if items.is_null() || count == 0 {
             return Vec::new();
         }
@@ -287,8 +288,9 @@ impl EstablishmentReport {
     #[must_use]
     pub fn resolutions(&self) -> Vec<ResolutionStep> {
         let mut count = 0_usize;
-        let items =
-            unsafe { ffi::nw_shim_establishment_report_copy_resolutions(self.handle, &mut count) };
+        let items = unsafe {
+            ffi::nw_shim_establishment_report_copy_resolutions(self.handle, &raw mut count)
+        };
         if items.is_null() || count == 0 {
             return Vec::new();
         }
@@ -314,7 +316,7 @@ impl EstablishmentReport {
     pub fn resolution_reports(&self) -> Vec<ResolutionReport> {
         let mut count = 0_usize;
         let items = unsafe {
-            ffi::nw_shim_establishment_report_copy_resolution_reports(self.handle, &mut count)
+            ffi::nw_shim_establishment_report_copy_resolution_reports(self.handle, &raw mut count)
         };
         if items.is_null() || count == 0 {
             return Vec::new();
