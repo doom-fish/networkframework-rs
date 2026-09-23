@@ -2,11 +2,15 @@
 
 SDK_PUBLIC_SYMBOLS: 500
 VERIFIED: 500
+SAFE_API: 499
+RAW_FFI_ONLY: 1
 GAPS: 0
 EXEMPT: 0
 COVERAGE_PCT: 100%
 
 Methodology: enumerated the macOS 26.2 Network.framework C surface from headers, then marked symbols as verified when they are reachable through the crate's safe Rust API or (where noted) the public `raw-ffi` shim bridge. No macOS-deprecated Network.framework symbols were present in this SDK, so the exempt set is empty.
+
+Scope (updated in 0.14.0): only Network.framework's own headers are counted. The `sec_protocol_*` API from Security.framework, which configures Network.framework's TLS and QUIC, is not part of the 500; `COVERAGE.md` lists the parts wrapped since 0.14.0. `nw_protocol_metadata_copy_definition` is reachable only through `raw-ffi`. The list was re-checked against the macOS 26.5 SDK headers (every listed function is still declared, none is missing); macOS 27 additions such as `nw_tcp_set_max_pacing_rate` are not covered.
 
 ## 🟢 VERIFIED
 | Symbol | Kind | Header | Wrapped by |
