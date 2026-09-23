@@ -37,14 +37,14 @@ SDKs. See [`COVERAGE.md`](COVERAGE.md) for the logical-area map and
 
 ```toml
 [dependencies]
-networkframework = "0.13.1"
+networkframework = "0.14.0"
 ```
 
 Enable async support explicitly when you want awaitable event streams:
 
 ```toml
 [dependencies]
-networkframework = { version = "0.13.1", features = ["async"] }
+networkframework = { version = "0.14.0", features = ["async"] }
 ```
 
 ## Async usage

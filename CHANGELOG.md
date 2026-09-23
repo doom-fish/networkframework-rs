@@ -1,5 +1,137 @@
 # Changelog
 
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.14.0] - Unreleased
+
+### Security
+
+- Connections are no longer freed while their state handler can still run.
+  Shim handles are reference counted and released only after
+  Network.framework delivers the final `cancelled` event; the 5 s give-up that
+  freed live handles is gone. `TcpClient` viability, better-path and path
+  callbacks follow the same rule.
+- Listener accept state is lock protected. Pending connections are no longer
+  over-released, accept loops no longer end on semaphore drift, and a
+  connection that fails its handshake is dropped instead of ending `accept()`.
+- `ConnectionGroup` teardown waits for the real `cancelled` state instead of
+  freeing the group on a stale semaphore signal. Browsers, path monitors,
+  Bonjour advertisers and Ethernet channels use the same lifecycle, which
+  fixes use-after-free on their teardown too.
+- Establishment and data-transfer reports, interface lookups and the test
+  error helper no longer signal a released semaphore after a timeout.
+- `FramerDefinition` owns its factory through Network.framework, so parameters
+  re-wrapped from a definition keep the factory alive (it used to be borrowed
+  with `Arc::as_ptr` and could dangle).
+- `WebSocket::connect` builds its URL safely. The host must be a DNS name or
+  an IP address (IPv6 is bracketed, with an optional zone), so userinfo such
+  as `user@` and other authority-changing characters are rejected; the path
+  must start with `/` and may not contain `\`, `#`, whitespace or control
+  characters, and non-ASCII bytes are percent-encoded. Long URLs are no longer
+  silently truncated at 2048 bytes.
+- The six browser and Ethernet channel callback trampolines that lacked panic
+  guards now contain panics instead of unwinding into C.
+- `ProxyConfig::set_credentials` zeroizes the crate's temporary copy
+  of the proxy password.
+- `Sync` is removed from mutable Network.framework wrappers whose clones share
+  one object: `AdvertiseDescriptor`, `BrowseDescriptor`, `ConnectionGroupDescriptor`,
+  `ContentContext`, `FramerMessage`, `ProtocolMetadata`, `ProtocolOptions`,
+  `ProtocolStack`, `ProxyConfig`, `QuicMetadata`, `QuicOptions` and
+  `SecurityProtocolOptions` (**breaking**).
+
+### Fixed
+
+- The async listener and group new-connection handlers no longer block the
+  listener's serial queue while each connection becomes ready. Inbound
+  connections finish their handshakes concurrently and are handed off when
+  ready; up to 128 ready connections queue for `accept()`, which used to keep
+  only the newest one.
+- Async streams subscribe next to the callback handlers instead of replacing
+  them, so a `ConnectionStateStream`, `ListenerEventStream`, `PathUpdateStream`
+  or `BrowserEventStream` no longer disables `Browser`, `PathMonitor` or
+  listener callbacks, and dropping a stream no longer stalls.
+- `TcpListener::bind_tls` can complete handshakes: it takes the identity the
+  server presents.
+- QUIC connections and listeners use `nw_parameters_create_quic` instead of a
+  DTLS plus QUIC stack.
+- Framer `deliver` calls and every WebSocket receive no longer leak retained
+  objects (`nw_protocol_copy_ws_definition` was never released).
+- WebSocket client-request and pong handler contexts are released when
+  Network.framework drops the handler, and clearing a pong handler no longer
+  leaves a block that calls a null callback.
+- `ConnectionGroup::reinsert_extracted_connection` no longer reports failure
+  on success.
+- Browser handlers are installed before the browser starts, as the SDK
+  requires.
+- A connection that Network.framework reports as waiting with an error
+  (connection refused, failed TLS trust) fails at once instead of after the
+  30 s connect timeout.
+- A malformed PKCS#12 blob is reported as an error instead of raising an
+  uncaught Objective-C exception.
+
+### Changed
+
+- **Breaking:** `TcpListener::bind_tls(port)` is now
+  `bind_tls(port, &TlsIdentity)` and requires TLS 1.2 or newer.
+- **Breaking:** `ConnectionGroup::set_receive_handler` and
+  `set_new_connection_handler` return `Result` and fail with
+  `NetworkError::InvalidArgument` once the group has started.
+- **Breaking:** `NetworkError` has new variants `MessageTooLarge { size, limit }`,
+  `Unsupported(String)` and `Security(i32)`.
+- **Breaking:** `UdpClient::receive`, `UdpClient::receive_with_context` and
+  `WebSocket::receive` return `NetworkError::MessageTooLarge` for a message
+  longer than `max_len` (the message is consumed) instead of truncating it or
+  returning it in pieces.
+- **Breaking:** UDP, WebSocket and QUIC connect timeouts are reported as
+  `NetworkError::Timeout` instead of `ConnectFailed`.
+- **Breaking:** `WebSocket::connect` returns `NetworkError::InvalidArgument`
+  for hosts and paths that could change the URL's authority.
+- **Breaking:** while a `ListenerEventStream` exists, ready inbound
+  connections go to the stream instead of to `TcpListener::accept`.
+- **Breaking:** `TcpListener::accept` never returns a connection that failed
+  its handshake; it returns `NetworkError::Cancelled` once the listener is
+  closed and no ready connection is left.
+- **Breaking (`raw-ffi`):** the async helper shims (`nw_shim_*_set_*_handler`,
+  `nw_shim_*_drain_queue`) and `nw_shim_browser_start` are replaced by
+  `nw_shim_*_subscribe_*` and `nw_shim_*_unsubscribe`, and the signatures of
+  `nw_shim_tcp_receive`, `nw_shim_connection_receive_with_context`,
+  `nw_shim_ws_connect`, `nw_shim_ws_receive`, `nw_shim_path_monitor_start*`,
+  `nw_shim_browser_start*_with_descriptor`, `nw_shim_framer_definition_create`,
+  `nw_shim_ws_metadata_set_pong_handler` and
+  `nw_shim_ws_options_set_client_request_handler` changed.
+- Dropping a connection, listener, group, browser or path monitor no longer
+  waits for its queue to drain. No new callback starts after the drop, but one
+  that is already running may finish afterwards. A `PathMonitor` cancel
+  handler still runs when the monitor is dropped.
+- Depends on `apple-cf` `>=0.11, <0.12` and `doom-fish-utils` `>=0.4.1, <0.5`,
+  and declares `rust-version = "1.82"`.
+- The README documents macOS 14 as the minimum, matching the Swift bridge.
+
+### Added
+
+- `tls` module: `TlsIdentity` (`from_pkcs12`, macOS 15 or later, and
+  `from_sec_identity`), `TlsVersion`, `TlsPeer` and `certificate_sha256`.
+- `SecurityProtocolOptions::set_local_identity`, `set_min_tls_version`,
+  `set_max_tls_version`, `add_application_protocol`, `set_server_name`,
+  `set_peer_authentication_required`, `set_verify_handler` and
+  `pin_peer_certificate_sha256`; there is no accept-all verifier.
+- `SecurityProtocolMetadata::negotiated_tls_version` and
+  `negotiated_application_protocol`.
+- `ConnectionParameters::tls_tcp_configured` and `quic_configured`.
+- `TcpListener::bind_loopback`, which listens on `127.0.0.1` only;
+  `TcpListener::bind` is documented to listen on every interface.
+- `TcpClient::receive_message`.
+- Loopback regression tests for peer resets, failed TLS handshakes,
+  simultaneous accepts, handler replacement, framer lifetimes, oversized
+  datagrams, QUIC streams, connection groups and repeated create/drop.
+
+## [0.13.3] - 2026-06-06
+
+- Guarded the Network.framework callback trampolines against panics and pinned the FFI shim struct layouts.
+
 ## [0.13.2] - 2026-05-20
 
 - Clippy hygiene sweep: cleared all `-D warnings` lints across the crate. No public API change.
