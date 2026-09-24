@@ -141,7 +141,7 @@ fn listener_area_accepts_connections() -> Result<(), networkframework::NetworkEr
 }
 
 #[test]
-fn browser_area_descriptor_and_start() -> Result<(), networkframework::NetworkError> {
+fn browse_descriptor_area_reports_bonjour_fields() -> Result<(), networkframework::NetworkError> {
     let mut descriptor = BrowseDescriptor::bonjour_service("_nfwtest._tcp", Some("local"))?;
     assert_eq!(
         descriptor.bonjour_service_type().as_deref(),
@@ -153,6 +153,14 @@ fn browser_area_descriptor_and_start() -> Result<(), networkframework::NetworkEr
         .is_some_and(|domain| domain.contains("local")));
     descriptor.set_include_txt_record(true);
     assert!(descriptor.include_txt_record());
+    Ok(())
+}
+
+#[test]
+#[ignore = "Bonjour browsing sends mDNS queries on the LAN"]
+fn browser_area_descriptor_and_start() -> Result<(), networkframework::NetworkError> {
+    let mut descriptor = BrowseDescriptor::bonjour_service("_nfwtest._tcp", Some("local"))?;
+    descriptor.set_include_txt_record(true);
 
     let events = Arc::new(Mutex::new(Vec::new()));
     let events_for_callback = Arc::clone(&events);
