@@ -69,9 +69,6 @@ fn main() {
         if output.status.success() {
             let xcode_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
             println!(
-                "cargo:rustc-link-arg=-Wl,-rpath,{xcode_path}/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.5/macosx",
-            );
-            println!(
                 "cargo:rustc-link-arg=-Wl,-rpath,{xcode_path}/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/macosx",
             );
         }

@@ -87,6 +87,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `advertise_with_descriptor` advertises the descriptor itself, so its TXT
   record and no-auto-rename flag take effect. For named Bonjour descriptors it
   used to register a new service without them.
+- `build.rs` no longer adds the toolchain's Swift 5.5 back-deployment
+  directory (`usr/lib/swift-5.5/macosx`) to the rpath of the crate's tests and
+  examples. The rpath pointed into Xcode, so it never made back-deployment
+  work on other machines; `libswift_Concurrency` resolves through
+  `/usr/lib/swift`.
 
 ### Changed
 
