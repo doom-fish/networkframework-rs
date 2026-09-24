@@ -727,8 +727,8 @@ fn wait_for_group_state(
 }
 
 #[test]
-fn reinsertion_releases_the_extracted_connection_while_the_group_lives(
-) -> Result<(), NetworkError> {
+fn reinsertion_releases_the_extracted_connection_while_the_group_lives() -> Result<(), NetworkError>
+{
     let Some(TestIdentity { identity, pin }) = test_identity("reinsert") else {
         return Ok(());
     };
@@ -749,7 +749,11 @@ fn reinsertion_releases_the_extracted_connection_while_the_group_lives(
     group.set_new_connection_handler(|_connection| {})?;
     group.start()?;
     assert!(
-        wait_for_group_state(&state_rx, ConnectionGroupState::Ready, Duration::from_secs(10)),
+        wait_for_group_state(
+            &state_rx,
+            ConnectionGroupState::Ready,
+            Duration::from_secs(10)
+        ),
         "the multiplex group did not become ready"
     );
 
@@ -780,6 +784,50 @@ fn reinsertion_releases_the_extracted_connection_while_the_group_lives(
         ConnectionGroupState::Cancelled,
         Duration::from_secs(5)
     ));
+    drop(group);
+    drop(listener);
+    Ok(())
+}
+
+#[test]
+fn group_listener_delivers_groups_and_refuses_accept() -> Result<(), NetworkError> {
+    let Some(TestIdentity { identity, pin }) = test_identity("group-listener") else {
+        return Ok(());
+    };
+    let server_parameters = ConnectionParameters::quic_configured("doomfish-groups", |tls| {
+        tls.set_local_identity(&identity);
+    })?;
+    let (group_tx, group_rx) = mpsc::channel();
+    let listener = TcpListener::bind_with_group_handler(
+        0,
+        &loopback_only(server_parameters)?,
+        move |group| {
+            let _ = group_tx.send(group);
+        },
+    )?;
+    assert!(matches!(
+        listener.accept(),
+        Err(NetworkError::InvalidArgument(_))
+    ));
+
+    let client_parameters = ConnectionParameters::quic_configured("doomfish-groups", |tls| {
+        tls.pin_peer_certificate_sha256(&[pin]);
+    })?;
+    let descriptor = ConnectionGroupDescriptor::multiplex("127.0.0.1", listener.local_port())?;
+    let mut group = ConnectionGroup::new(&descriptor, &client_parameters)?;
+    group.set_new_connection_handler(|_connection| {})?;
+    let group = Arc::new(group);
+    let starter = {
+        let group = Arc::clone(&group);
+        thread::spawn(move || group.start())
+    };
+    let delivered = group_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the listener delivers the inbound QUIC connection as a group");
+    assert!(delivered.descriptor().is_some());
+    group.cancel();
+    let _ = starter.join().expect("starter thread");
+    drop(delivered);
     drop(group);
     drop(listener);
     Ok(())

@@ -865,7 +865,7 @@ typedef struct nw_listener_handle {
     bool cancelled;
     bool cancel_requested;
     bool advertised_installed;
-    bool group_installed;
+    bool group_mode;
     _Atomic uint16_t bound_port;
     nw_shim_subscriptions subs;
     nw_shim_acceptor acceptor;
@@ -945,14 +945,23 @@ static void nw_shim_listener_close_handle(nw_listener_handle *h) {
     nw_shim_listener_release_owner(h);
 }
 
-static void *nw_shim_listener_start(nw_listener_t listener, const char *label, int *out_status) {
+static void nw_shim_listener_on_group(nw_listener_handle *h, nw_connection_group_t group);
+
+static void *nw_shim_listener_start(
+    nw_listener_t listener,
+    const char *label,
+    nw_shim_callback *group_entry,
+    int *out_status
+) {
     if (!listener) {
+        if (group_entry) nw_shim_callback_release(group_entry);
         if (out_status) *out_status = NW_LISTEN_FAILED;
         return NULL;
     }
     nw_listener_handle *h = (nw_listener_handle *)calloc(1, sizeof(nw_listener_handle));
     if (!h) {
         nw_release(listener);
+        if (group_entry) nw_shim_callback_release(group_entry);
         if (out_status) *out_status = NW_LISTEN_FAILED;
         return NULL;
     }
@@ -968,9 +977,17 @@ static void *nw_shim_listener_start(nw_listener_t listener, const char *label, i
     nw_listener_set_state_changed_handler(listener, ^(nw_listener_state_t state, nw_error_t error) {
         nw_shim_listener_on_state(h, state, error);
     });
-    nw_listener_set_new_connection_handler(listener, ^(nw_connection_t connection) {
-        nw_shim_acceptor_offer(&h->acceptor, connection, "networkframework-rs.accepted");
-    });
+    if (group_entry) {
+        h->group_mode = true;
+        nw_shim_subscriptions_add(&h->subs, NW_SHIM_EVENT_NEW_GROUP, *group_entry);
+        nw_listener_set_new_connection_group_handler(listener, ^(nw_connection_group_t group) {
+            nw_shim_listener_on_group(h, group);
+        });
+    } else {
+        nw_listener_set_new_connection_handler(listener, ^(nw_connection_t connection) {
+            nw_shim_acceptor_offer(&h->acceptor, connection, "networkframework-rs.accepted");
+        });
+    }
     nw_listener_start(listener);
 
     uint64_t deadline = nw_shim_deadline_after(NW_SHIM_START_TIMEOUT_NS);
@@ -1002,7 +1019,7 @@ void *nw_shim_listener_create(uint16_t port, int use_tls, int *out_status) {
 
     nw_listener_t listener = nw_listener_create_with_port(port_str, params);
     nw_release(params);
-    return nw_shim_listener_start(listener, "networkframework-rs.listener", out_status);
+    return nw_shim_listener_start(listener, "networkframework-rs.listener", NULL, out_status);
 }
 
 uint16_t nw_shim_listener_port(void *handle) {
@@ -1014,7 +1031,7 @@ uint16_t nw_shim_listener_port(void *handle) {
 // Blocking accept. Returns a `nw_conn_handle*` cast to void*, or NULL.
 void *nw_shim_listener_accept(void *handle, int *out_status) {
     nw_listener_handle *h = (nw_listener_handle *)handle;
-    if (!h) { if (out_status) *out_status = NW_INVALID_ARG; return NULL; }
+    if (!h || h->group_mode) { if (out_status) *out_status = NW_INVALID_ARG; return NULL; }
     return nw_shim_acceptor_accept(&h->acceptor, out_status);
 }
 
@@ -1187,15 +1204,34 @@ static void nw_shim_path_on_cancel(nw_path_handle *h) {
     dispatch_async_f(h->queue, h, nw_shim_path_release_async);
 }
 
-static void *nw_shim_path_start(
-    nw_path_monitor_t monitor,
-    const char *label,
+// interface_type matches nw_interface_type_t:
+//   0=other, 1=wifi, 2=cellular, 3=wired, 4=loopback
+void *nw_shim_path_monitor_start(
+    int scope,
+    int interface_type,
+    const int *prohibited_types,
+    size_t prohibited_count,
     PathMonitorCallback callback,
     void *context,
     NwShimContextCallback retain,
     NwShimContextCallback release
 ) {
     nw_shim_callback entry = nw_shim_make_callback((nw_shim_fn)callback, context, retain, release);
+    if (prohibited_count > 0 && !prohibited_types) {
+        nw_shim_callback_release(&entry);
+        return NULL;
+    }
+    nw_path_monitor_t monitor = NULL;
+    const char *label = "networkframework-rs.path";
+    if (scope == NW_SHIM_PATH_SCOPE_ALL) {
+        monitor = nw_path_monitor_create();
+    } else if (scope == NW_SHIM_PATH_SCOPE_INTERFACE_TYPE) {
+        monitor = nw_path_monitor_create_with_type((nw_interface_type_t)interface_type);
+        label = "networkframework-rs.path.type";
+    } else if (scope == NW_SHIM_PATH_SCOPE_ETHERNET_CHANNEL) {
+        monitor = nw_path_monitor_create_for_ethernet_channel();
+        label = "networkframework-rs.path.ethernet";
+    }
     if (!monitor) {
         nw_shim_callback_release(&entry);
         return NULL;
@@ -1213,6 +1249,9 @@ static void *nw_shim_path_start(
     nw_shim_subscriptions_init(&h->subs);
     nw_shim_subscriptions_add(&h->subs, NW_SHIM_EVENT_SUMMARY, entry);
 
+    for (size_t index = 0; index < prohibited_count; index++) {
+        nw_path_monitor_prohibit_interface_type(monitor, (nw_interface_type_t)prohibited_types[index]);
+    }
     nw_path_monitor_set_queue(monitor, h->queue);
     nw_path_monitor_set_update_handler(monitor, ^(nw_path_t path) {
         nw_shim_path_on_update(h, path);
@@ -1222,48 +1261,6 @@ static void *nw_shim_path_start(
     });
     nw_path_monitor_start(monitor);
     return h;
-}
-
-// interface_type matches nw_interface_type_t:
-//   0=other, 1=wifi, 2=cellular, 3=wired, 4=loopback
-void *nw_shim_path_monitor_start(
-    PathMonitorCallback callback,
-    void *context,
-    NwShimContextCallback retain,
-    NwShimContextCallback release
-) {
-    return nw_shim_path_start(nw_path_monitor_create(), "networkframework-rs.path", callback, context, retain, release);
-}
-
-void *nw_shim_path_monitor_start_with_type(
-    int interface_type,
-    PathMonitorCallback callback,
-    void *context,
-    NwShimContextCallback retain,
-    NwShimContextCallback release
-) {
-    return nw_shim_path_start(
-        nw_path_monitor_create_with_type((nw_interface_type_t)interface_type),
-        "networkframework-rs.path.type",
-        callback,
-        context,
-        retain,
-        release);
-}
-
-void *nw_shim_path_monitor_start_for_ethernet_channel(
-    PathMonitorCallback callback,
-    void *context,
-    NwShimContextCallback retain,
-    NwShimContextCallback release
-) {
-    return nw_shim_path_start(
-        nw_path_monitor_create_for_ethernet_channel(),
-        "networkframework-rs.path.ethernet",
-        callback,
-        context,
-        retain,
-        release);
 }
 
 void nw_shim_path_monitor_stop(void *handle) {
@@ -2090,6 +2087,29 @@ void *nw_shim_test_copy_failed_connection_error(const char *host, uint16_t port,
     return retained_error;
 }
 
+void *nw_shim_listener_create_for_groups(
+    void *parameters,
+    uint16_t port,
+    ListenerNewConnectionGroupCallback callback,
+    void *context,
+    NwShimContextCallback retain,
+    NwShimContextCallback release,
+    int *out_status
+) {
+    nw_shim_callback entry = nw_shim_make_callback((nw_shim_fn)callback, context, retain, release);
+    if (!parameters || !callback) {
+        nw_shim_callback_release(&entry);
+        if (out_status) *out_status = NW_INVALID_ARG;
+        return NULL;
+    }
+
+    char port_str[8];
+    snprintf(port_str, sizeof(port_str), "%u", (unsigned)port);
+
+    nw_listener_t listener = nw_listener_create_with_port(port_str, (nw_parameters_t)parameters);
+    return nw_shim_listener_start(listener, "networkframework-rs.listener.groups", &entry, out_status);
+}
+
 void *nw_shim_listener_create_with_parameters(void *parameters, uint16_t port, int *out_status) {
     if (!parameters) {
         if (out_status) *out_status = NW_INVALID_ARG;
@@ -2100,7 +2120,7 @@ void *nw_shim_listener_create_with_parameters(void *parameters, uint16_t port, i
     snprintf(port_str, sizeof(port_str), "%u", (unsigned)port);
 
     nw_listener_t listener = nw_listener_create_with_port(port_str, (nw_parameters_t)parameters);
-    return nw_shim_listener_start(listener, "networkframework-rs.listener.params", out_status);
+    return nw_shim_listener_start(listener, "networkframework-rs.listener.params", NULL, out_status);
 }
 
 // ---------------------------------------------------------------------
@@ -5629,7 +5649,7 @@ void *nw_shim_listener_create_direct(void *parameters, int *out_status) {
         return NULL;
     }
     nw_listener_t listener = nw_listener_create((nw_parameters_t)parameters);
-    return nw_shim_listener_start(listener, "networkframework-rs.listener.direct", out_status);
+    return nw_shim_listener_start(listener, "networkframework-rs.listener.direct", NULL, out_status);
 }
 
 void *nw_shim_listener_create_with_connection(void *connection_handle, void *parameters, int *out_status) {
@@ -5639,7 +5659,7 @@ void *nw_shim_listener_create_with_connection(void *connection_handle, void *par
         return NULL;
     }
     nw_listener_t listener = nw_listener_create_with_connection(connection->conn, (nw_parameters_t)parameters);
-    return nw_shim_listener_start(listener, "networkframework-rs.listener.connection", out_status);
+    return nw_shim_listener_start(listener, "networkframework-rs.listener.connection", NULL, out_status);
 }
 
 void *nw_shim_listener_create_with_launchd_key(void *parameters, const char *launchd_key, int *out_status) {
@@ -5648,7 +5668,7 @@ void *nw_shim_listener_create_with_launchd_key(void *parameters, const char *lau
         return NULL;
     }
     nw_listener_t listener = nw_listener_create_with_launchd_key((nw_parameters_t)parameters, launchd_key);
-    return nw_shim_listener_start(listener, "networkframework-rs.listener.launchd", out_status);
+    return nw_shim_listener_start(listener, "networkframework-rs.listener.launchd", NULL, out_status);
 }
 
 uint32_t nw_shim_listener_get_new_connection_limit(void *handle) {
@@ -5724,34 +5744,6 @@ uint64_t nw_shim_listener_subscribe_advertised_endpoint(
     return token;
 }
 
-uint64_t nw_shim_listener_subscribe_new_connection_group(
-    void *handle,
-    ListenerNewConnectionGroupCallback callback,
-    void *context,
-    NwShimContextCallback retain,
-    NwShimContextCallback release
-) {
-    nw_listener_handle *h = (nw_listener_handle *)handle;
-    nw_shim_callback entry = nw_shim_make_callback((nw_shim_fn)callback, context, retain, release);
-    if (!h) {
-        nw_shim_callback_release(&entry);
-        return 0;
-    }
-    uint64_t token = nw_shim_subscriptions_add(&h->subs, NW_SHIM_EVENT_NEW_GROUP, entry);
-    if (token) {
-        pthread_mutex_lock(&h->lock);
-        bool install = !h->group_installed;
-        h->group_installed = true;
-        pthread_mutex_unlock(&h->lock);
-        if (install) {
-            nw_listener_set_new_connection_group_handler(h->listener, ^(nw_connection_group_t group) {
-                nw_shim_listener_on_group(h, group);
-            });
-        }
-    }
-    return token;
-}
-
 int nw_shim_path_enumerate_gateways(void *path, EndpointEnumerationCallback callback, void *user_info) {
     if (!path || !callback) {
         return 0;
@@ -5765,16 +5757,6 @@ int nw_shim_path_enumerate_gateways(void *path, EndpointEnumerationCallback call
         });
     }
     return count;
-}
-
-void nw_shim_path_monitor_prohibit_interface_type(void *handle, int interface_type) {
-    nw_path_handle *h = (nw_path_handle *)handle;
-    if (!h) {
-        return;
-    }
-    if (__builtin_available(macOS 11.0, *)) {
-        nw_path_monitor_prohibit_interface_type(h->monitor, (nw_interface_type_t)interface_type);
-    }
 }
 
 void *nw_shim_protocol_create_ip_metadata(void) {

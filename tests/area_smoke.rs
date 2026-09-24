@@ -8,14 +8,14 @@ use networkframework::{
     start_browser_with_descriptor, start_path_monitor_for_ethernet_channel,
     start_path_monitor_with_type, AdvertiseDescriptor, BrowseDescriptor, BrowserEvent,
     BrowserState, ConnectionGroup, ConnectionGroupDescriptor, ConnectionGroupState,
-    ConnectionParameters, ContentContext,
-    DataTransferReportState, Endpoint, EndpointType, ErrorDomain, EthernetChannel,
-    ExpiredDnsBehavior, Framer, FramerContext, FramerDefinition, FramerMessageView, FramerStart,
-    InterfaceType, IpEcnFlag, IpLocalAddressPreference, IpVersion, MultipathService,
-    ParametersAttribution, PathStatus, PrivacyContext, ProtocolDefinition, ProtocolMetadata,
-    ProtocolOptions, ProxyConfig, QuicOptions, RelayHop, ResolverConfig, ServiceClass, TcpClient,
-    TcpListener, TcpMultipathVersion, TxtRecord, TxtRecordFindResult, UrlSessionConfiguration,
-    WsCloseCode, WsResponse, WsResponseStatus, WsVersion,
+    ConnectionParameters, ContentContext, DataTransferReportState, Endpoint, EndpointType,
+    ErrorDomain, EthernetChannel, ExpiredDnsBehavior, Framer, FramerContext, FramerDefinition,
+    FramerMessageView, FramerStart, InterfaceType, IpEcnFlag, IpLocalAddressPreference, IpVersion,
+    MultipathService, ParametersAttribution, PathMonitorBuilder, PathStatus, PathUpdate,
+    PrivacyContext, ProtocolDefinition, ProtocolMetadata, ProtocolOptions, ProxyConfig,
+    QuicOptions, RelayHop, ResolverConfig, ServiceClass, TcpClient, TcpListener,
+    TcpMultipathVersion, TxtRecord, TxtRecordFindResult, UrlSessionConfiguration, WsCloseCode,
+    WsResponse, WsResponseStatus, WsVersion,
 };
 
 fn unique_label(prefix: &str) -> String {
@@ -127,7 +127,6 @@ fn connection_area_round_trip_exposes_metadata() -> Result<(), networkframework:
 fn listener_area_accepts_connections() -> Result<(), networkframework::NetworkError> {
     let mut listener = TcpListener::bind_loopback(0)?;
     listener.set_advertised_endpoint_changed_handler(|_endpoint, _is_added| {});
-    listener.set_new_connection_group_handler(|_group| {});
     assert!(listener.local_port() > 0);
     let port = listener.local_port();
     let server = std::thread::spawn(move || -> Result<Vec<u8>, networkframework::NetworkError> {
@@ -879,12 +878,53 @@ fn ethernet_channel_area_smoke() -> Result<(), networkframework::NetworkError> {
     Ok(())
 }
 
+fn first_path_update(builder: PathMonitorBuilder) -> PathUpdate {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let monitor = builder.start(move |update| {
+        let _ = tx.send(update);
+    });
+    let first = rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the monitor delivers an initial path");
+    drop(monitor);
+    first
+}
+
+#[test]
+fn path_monitor_builder_prohibits_interface_types_before_start() {
+    let physical = [
+        InterfaceType::WiFi,
+        InterfaceType::Wired,
+        InterfaceType::Cellular,
+    ];
+    let unrestricted = first_path_update(PathMonitorBuilder::default());
+    let restricted = first_path_update(
+        physical
+            .iter()
+            .fold(PathMonitorBuilder::default(), |builder, interface_type| {
+                builder.prohibit_interface_type(*interface_type)
+            }),
+    );
+    if unrestricted.satisfied && physical.contains(&unrestricted.interface) {
+        assert!(
+            !restricted.satisfied,
+            "prohibiting every physical interface type must leave the path unsatisfied"
+        );
+    } else {
+        eprintln!("skipping: no satisfied physical path to prohibit");
+    }
+}
+
 #[test]
 fn advanced_path_monitor_and_misc_area_smoke() -> Result<(), networkframework::NetworkError> {
-    let mut monitor = start_path_monitor_with_type(InterfaceType::Loopback, |_update| {});
+    let mut monitor = PathMonitorBuilder::default()
+        .interface_type(InterfaceType::Loopback)
+        .prohibit_interface_type(InterfaceType::WiFi)
+        .start(|_update| {});
     monitor.set_cancel_handler(|| {});
-    monitor.prohibit_interface_type(InterfaceType::WiFi);
     drop(monitor);
+    let typed_monitor = start_path_monitor_with_type(InterfaceType::Loopback, |_update| {});
+    drop(typed_monitor);
 
     let ethernet_monitor = start_path_monitor_for_ethernet_channel(|_update| {});
     drop(ethernet_monitor);

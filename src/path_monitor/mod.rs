@@ -1,7 +1,7 @@
 //! [`PathMonitor`] — observe network reachability and interface
 //! changes via `nw_path_monitor`.
 
-use core::ffi::c_void;
+use core::ffi::{c_int, c_void};
 use core::ptr;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -80,16 +80,6 @@ impl PathMonitor {
         self.handle
     }
 
-    /// Prevent the monitor from considering paths that use an interface type.
-    pub fn prohibit_interface_type(&mut self, interface_type: InterfaceType) -> &mut Self {
-        // SAFETY: `self.handle` is the live monitor handle owned by this
-        // `PathMonitor`, and `interface_type` is a valid shim enum value.
-        unsafe {
-            ffi::nw_shim_path_monitor_prohibit_interface_type(self.handle, interface_type.as_raw());
-        }
-        self
-    }
-
     /// Receive a callback when the monitor is cancelled.
     pub fn set_cancel_handler<F>(&mut self, callback: F)
     where
@@ -158,16 +148,76 @@ unsafe extern "C" fn cancel_trampoline(context: *mut c_void) {
     });
 }
 
-fn start_monitor(
-    callback: Box<dyn FnMut(PathUpdate) + Send + 'static>,
-    start: impl FnOnce(*mut c_void) -> *mut c_void,
-) -> PathMonitor {
-    let updates: CallbackContext<PathCb> = CallbackContext::new(Mutex::new(callback));
-    let handle = start(updates.retained_ptr());
-    PathMonitor {
-        handle,
-        updates,
-        cancel_token: 0,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum Scope {
+    #[default]
+    All,
+    InterfaceType(InterfaceType),
+    EthernetChannel,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PathMonitorBuilder {
+    scope: Scope,
+    prohibited: Vec<InterfaceType>,
+}
+
+impl PathMonitorBuilder {
+    #[must_use]
+    pub const fn interface_type(mut self, interface_type: InterfaceType) -> Self {
+        self.scope = Scope::InterfaceType(interface_type);
+        self
+    }
+
+    #[must_use]
+    pub const fn ethernet_channel(mut self) -> Self {
+        self.scope = Scope::EthernetChannel;
+        self
+    }
+
+    #[must_use]
+    pub fn prohibit_interface_type(mut self, interface_type: InterfaceType) -> Self {
+        self.prohibited.push(interface_type);
+        self
+    }
+
+    #[must_use]
+    pub fn start<F>(self, callback: F) -> PathMonitor
+    where
+        F: FnMut(PathUpdate) + Send + 'static,
+    {
+        let (scope, interface_type) = match self.scope {
+            Scope::All => (ffi::NW_SHIM_PATH_SCOPE_ALL, 0),
+            Scope::InterfaceType(interface_type) => (
+                ffi::NW_SHIM_PATH_SCOPE_INTERFACE_TYPE,
+                interface_type.as_raw(),
+            ),
+            Scope::EthernetChannel => (ffi::NW_SHIM_PATH_SCOPE_ETHERNET_CHANNEL, 0),
+        };
+        let prohibited: Vec<c_int> = self
+            .prohibited
+            .iter()
+            .map(|interface_type| interface_type.as_raw())
+            .collect();
+        let callback: Box<dyn FnMut(PathUpdate) + Send + 'static> = Box::new(callback);
+        let updates: CallbackContext<PathCb> = CallbackContext::new(Mutex::new(callback));
+        let handle = unsafe {
+            ffi::nw_shim_path_monitor_start(
+                scope,
+                interface_type,
+                prohibited.as_ptr(),
+                prohibited.len(),
+                Some(trampoline),
+                updates.retained_ptr(),
+                Some(CallbackContext::<PathCb>::RETAIN),
+                Some(CallbackContext::<PathCb>::RELEASE),
+            )
+        };
+        PathMonitor {
+            handle,
+            updates,
+            cancel_token: 0,
+        }
     }
 }
 
@@ -179,14 +229,7 @@ pub fn start_path_monitor<F>(callback: F) -> PathMonitor
 where
     F: FnMut(PathUpdate) + Send + 'static,
 {
-    start_monitor(Box::new(callback), |context| unsafe {
-        ffi::nw_shim_path_monitor_start(
-            Some(trampoline),
-            context,
-            Some(CallbackContext::<PathCb>::RETAIN),
-            Some(CallbackContext::<PathCb>::RELEASE),
-        )
-    })
+    PathMonitorBuilder::default().start(callback)
 }
 
 /// Start a path monitor restricted to a specific interface type.
@@ -195,15 +238,9 @@ pub fn start_path_monitor_with_type<F>(interface_type: InterfaceType, callback: 
 where
     F: FnMut(PathUpdate) + Send + 'static,
 {
-    start_monitor(Box::new(callback), |context| unsafe {
-        ffi::nw_shim_path_monitor_start_with_type(
-            interface_type.as_raw(),
-            Some(trampoline),
-            context,
-            Some(CallbackContext::<PathCb>::RETAIN),
-            Some(CallbackContext::<PathCb>::RELEASE),
-        )
-    })
+    PathMonitorBuilder::default()
+        .interface_type(interface_type)
+        .start(callback)
 }
 
 /// Start a path monitor associated with ethernet-channel reachability.
@@ -212,12 +249,7 @@ pub fn start_path_monitor_for_ethernet_channel<F>(callback: F) -> PathMonitor
 where
     F: FnMut(PathUpdate) + Send + 'static,
 {
-    start_monitor(Box::new(callback), |context| unsafe {
-        ffi::nw_shim_path_monitor_start_for_ethernet_channel(
-            Some(trampoline),
-            context,
-            Some(CallbackContext::<PathCb>::RETAIN),
-            Some(CallbackContext::<PathCb>::RELEASE),
-        )
-    })
+    PathMonitorBuilder::default()
+        .ethernet_channel()
+        .start(callback)
 }

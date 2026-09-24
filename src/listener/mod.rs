@@ -27,7 +27,7 @@ type NewConnectionGroupCallback = Mutex<Box<dyn FnMut(ConnectionGroup) + Send + 
 pub struct TcpListener {
     handle: *mut c_void,
     advertised_endpoint: Option<Subscription<AdvertisedEndpointCallback>>,
-    new_connection_group: Option<Subscription<NewConnectionGroupCallback>>,
+    new_connection_group: Option<CallbackContext<NewConnectionGroupCallback>>,
 }
 
 unsafe impl Send for TcpListener {}
@@ -105,6 +105,39 @@ impl TcpListener {
             return Err(from_status(status));
         }
         Ok(Self::from_handle(handle))
+    }
+
+    pub fn bind_with_group_handler<F>(
+        port: u16,
+        parameters: &ConnectionParameters,
+        handler: F,
+    ) -> Result<Self, NetworkError>
+    where
+        F: FnMut(ConnectionGroup) + Send + 'static,
+    {
+        let handler: Box<dyn FnMut(ConnectionGroup) + Send + 'static> = Box::new(handler);
+        let context: CallbackContext<NewConnectionGroupCallback> =
+            CallbackContext::new(Mutex::new(handler));
+        let mut status: c_int = 0;
+        let handle = unsafe {
+            ffi::nw_shim_listener_create_for_groups(
+                parameters.as_ptr(),
+                port,
+                Some(new_connection_group_trampoline),
+                context.retained_ptr(),
+                Some(CallbackContext::<NewConnectionGroupCallback>::RETAIN),
+                Some(CallbackContext::<NewConnectionGroupCallback>::RELEASE),
+                &raw mut status,
+            )
+        };
+        if status != ffi::NW_OK || handle.is_null() {
+            return Err(from_status(status));
+        }
+        Ok(Self {
+            handle,
+            advertised_endpoint: None,
+            new_connection_group: Some(context),
+        })
     }
 
     /// Create a listener directly from parameters without binding a specific port first.
@@ -201,29 +234,6 @@ impl TcpListener {
             });
     }
 
-    /// Receive callbacks when the listener creates connection groups.
-    pub fn set_new_connection_group_handler<F>(&mut self, callback: F)
-    where
-        F: FnMut(ConnectionGroup) + Send + 'static,
-    {
-        if let Some(previous) = self.new_connection_group.take() {
-            previous.deactivate();
-            unsafe { ffi::nw_shim_listener_unsubscribe(self.handle, previous.token) };
-        }
-        let callback: Box<dyn FnMut(ConnectionGroup) + Send + 'static> = Box::new(callback);
-        let handle = self.handle;
-        self.new_connection_group =
-            Subscription::register(Mutex::new(callback), |context, retain, release| unsafe {
-                ffi::nw_shim_listener_subscribe_new_connection_group(
-                    handle,
-                    Some(new_connection_group_trampoline),
-                    context,
-                    Some(retain),
-                    Some(release),
-                )
-            });
-    }
-
     #[cfg(feature = "async")]
     #[must_use]
     pub(crate) const fn as_ptr(&self) -> *mut c_void {
@@ -238,6 +248,11 @@ impl TcpListener {
     /// Returns [`NetworkError::Cancelled`] once the listener has failed or
     /// been cancelled and no ready connection is left.
     pub fn accept(&self) -> Result<TcpClient, NetworkError> {
+        if self.new_connection_group.is_some() {
+            return Err(NetworkError::InvalidArgument(
+                "a listener bound with a group handler delivers connection groups".into(),
+            ));
+        }
         let mut status: c_int = 0;
         let conn_handle = unsafe { ffi::nw_shim_listener_accept(self.handle, &raw mut status) };
         if status != ffi::NW_OK || conn_handle.is_null() {

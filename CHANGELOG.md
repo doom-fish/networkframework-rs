@@ -99,6 +99,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking:** `TcpListener::accept` never returns a connection that failed
   its handshake; it returns `NetworkError::Cancelled` once the listener is
   closed and no ready connection is left.
+- **Breaking:** `TcpListener::set_new_connection_group_handler` is removed.
+  It installed the group handler after the listener had started and next to
+  the new-connection handler, both of which the SDK forbids.
+  `TcpListener::bind_with_group_handler(port, &parameters, handler)` installs
+  it before the listener starts, and `accept()` on such a listener returns
+  `NetworkError::InvalidArgument`.
+- **Breaking:** `PathMonitor::prohibit_interface_type` is removed: called
+  after the monitor started, it had no effect. `PathMonitorBuilder` applies
+  prohibited interface types, and the interface-type or Ethernet-channel
+  scope, before the monitor starts.
 - **Breaking:** `ConnectionGroup::extract_connection` takes
   `Option<&Endpoint>` and `Option<&ProtocolOptions>`: the SDK requires no
   endpoint for multiplex groups, so the old signature could not extract from
@@ -112,6 +122,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `nw_shim_browser_start*_with_descriptor`, `nw_shim_framer_definition_create`,
   `nw_shim_ws_metadata_set_pong_handler` and
   `nw_shim_ws_options_set_client_request_handler` changed.
+  `nw_shim_path_monitor_start` takes the monitor scope and the prohibited
+  interface types; `nw_shim_path_monitor_start_with_type`,
+  `nw_shim_path_monitor_start_for_ethernet_channel`,
+  `nw_shim_path_monitor_prohibit_interface_type` and
+  `nw_shim_listener_subscribe_new_connection_group` are removed, and
+  `nw_shim_listener_create_for_groups` is added.
 - Dropping a connection, listener, group, browser or path monitor no longer
   waits for its queue to drain. No new callback starts after the drop, but one
   that is already running may finish afterwards. A `PathMonitor` cancel
@@ -131,6 +147,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `SecurityProtocolMetadata::negotiated_tls_version` and
   `negotiated_application_protocol`.
 - `ConnectionParameters::tls_tcp_configured` and `quic_configured`.
+- `TcpListener::bind_with_group_handler` and `PathMonitorBuilder`.
 - `TcpListener::bind_loopback`, which listens on `127.0.0.1` only;
   `TcpListener::bind` is documented to listen on every interface.
 - `TcpClient::receive_message`.

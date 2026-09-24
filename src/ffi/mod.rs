@@ -17,6 +17,10 @@ pub const NW_MESSAGE_TOO_LARGE: c_int = -8;
 pub const NW_UNSUPPORTED: c_int = -9;
 pub const NW_SECURITY_FAILED: c_int = -10;
 
+pub const NW_SHIM_PATH_SCOPE_ALL: c_int = 0;
+pub const NW_SHIM_PATH_SCOPE_INTERFACE_TYPE: c_int = 1;
+pub const NW_SHIM_PATH_SCOPE_ETHERNET_CHANNEL: c_int = 2;
+
 pub const NW_FRAMER_START_READY: c_int = 1;
 pub const NW_FRAMER_START_WILL_MARK_READY: c_int = 2;
 
@@ -127,8 +131,12 @@ unsafe extern "C" {
         out_status: *mut c_int,
     ) -> *mut c_void;
 
-    #[link_name = "nfw_path_monitor_start"]
+    #[link_name = "nw_shim_path_monitor_start"]
     pub fn nw_shim_path_monitor_start(
+        scope: c_int,
+        interface_type: c_int,
+        prohibited_types: *const c_int,
+        prohibited_count: usize,
         callback: Option<PathMonitorCallback>,
         context: *mut c_void,
         retain: Option<NwShimContextCallback>,

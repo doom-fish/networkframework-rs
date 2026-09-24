@@ -137,7 +137,15 @@ void nw_shim_listener_close(void *handle);
 
 void *nw_shim_udp_connect(const char *host, uint16_t port, int *out_status);
 
+#define NW_SHIM_PATH_SCOPE_ALL 0
+#define NW_SHIM_PATH_SCOPE_INTERFACE_TYPE 1
+#define NW_SHIM_PATH_SCOPE_ETHERNET_CHANNEL 2
+
 void *nw_shim_path_monitor_start(
+    int scope,
+    int interface_type,
+    const int *prohibited_types,
+    size_t prohibited_count,
     PathMonitorCallback callback,
     void *context,
     NwShimContextCallback retain,
@@ -809,6 +817,15 @@ char *nw_shim_error_copy_wifi_aware_domain(void);
 void *nw_shim_parameters_create_custom_ip(uint8_t protocol_number);
 
 void *nw_shim_listener_create_direct(void *parameters, int *out_status);
+void *nw_shim_listener_create_for_groups(
+    void *parameters,
+    uint16_t port,
+    ListenerNewConnectionGroupCallback callback,
+    void *context,
+    NwShimContextCallback retain,
+    NwShimContextCallback release,
+    int *out_status
+);
 void *nw_shim_listener_create_with_connection(void *connection_handle, void *parameters, int *out_status);
 void *nw_shim_listener_create_with_launchd_key(void *parameters, const char *launchd_key, int *out_status);
 uint32_t nw_shim_listener_get_new_connection_limit(void *handle);
@@ -834,30 +851,9 @@ uint64_t nw_shim_listener_subscribe_advertised_endpoint(
     NwShimContextCallback retain,
     NwShimContextCallback release
 );
-uint64_t nw_shim_listener_subscribe_new_connection_group(
-    void *handle,
-    ListenerNewConnectionGroupCallback callback,
-    void *context,
-    NwShimContextCallback retain,
-    NwShimContextCallback release
-);
 void nw_shim_listener_unsubscribe(void *handle, uint64_t token);
 
 int nw_shim_path_enumerate_gateways(void *path, EndpointEnumerationCallback callback, void *user_info);
-void *nw_shim_path_monitor_start_with_type(
-    int interface_type,
-    PathMonitorCallback callback,
-    void *context,
-    NwShimContextCallback retain,
-    NwShimContextCallback release
-);
-void *nw_shim_path_monitor_start_for_ethernet_channel(
-    PathMonitorCallback callback,
-    void *context,
-    NwShimContextCallback retain,
-    NwShimContextCallback release
-);
-void nw_shim_path_monitor_prohibit_interface_type(void *handle, int interface_type);
 uint64_t nw_shim_path_monitor_subscribe_update(
     void *handle,
     ConnectionPathCallback callback,

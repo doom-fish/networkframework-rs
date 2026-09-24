@@ -78,7 +78,7 @@ pub use parameters_support::{ExpiredDnsBehavior, MultipathService, ProtocolStack
 pub use path::{LinkQuality, Path, PathStatus, PathUnsatisfiedReason};
 pub use path_monitor::{
     start_path_monitor, start_path_monitor_for_ethernet_channel, start_path_monitor_with_type,
-    PathMonitor, PathUpdate,
+    PathMonitor, PathMonitorBuilder, PathUpdate,
 };
 pub use privacy::{PrivacyContext, ProxyConfig, RelayHop, ResolverConfig, UrlSessionConfiguration};
 pub use protocol::{
@@ -135,7 +135,7 @@ pub mod prelude {
     pub use crate::path::{LinkQuality, Path, PathStatus, PathUnsatisfiedReason};
     pub use crate::path_monitor::{
         start_path_monitor, start_path_monitor_for_ethernet_channel, start_path_monitor_with_type,
-        PathMonitor, PathUpdate,
+        PathMonitor, PathMonitorBuilder, PathUpdate,
     };
     pub use crate::privacy::{
         PrivacyContext, ProxyConfig, RelayHop, ResolverConfig, UrlSessionConfiguration,

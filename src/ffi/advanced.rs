@@ -1,6 +1,6 @@
 use super::{
     c_char, c_int, c_void, InterfaceEnumerationCallback, NwShimContextCallback,
-    PathMonitorCallback, StringEnumerationCallback,
+    StringEnumerationCallback,
 };
 
 pub type TxtRecordEntryCallback = unsafe extern "C" fn(
@@ -912,14 +912,16 @@ unsafe extern "C" {
         retain: Option<NwShimContextCallback>,
         release: Option<NwShimContextCallback>,
     ) -> u64;
-    #[link_name = "nw_shim_listener_subscribe_new_connection_group"]
-    pub fn nw_shim_listener_subscribe_new_connection_group(
-        handle: *mut c_void,
+    #[link_name = "nw_shim_listener_create_for_groups"]
+    pub fn nw_shim_listener_create_for_groups(
+        parameters: *mut c_void,
+        port: u16,
         callback: Option<ListenerNewConnectionGroupCallback>,
         context: *mut c_void,
         retain: Option<NwShimContextCallback>,
         release: Option<NwShimContextCallback>,
-    ) -> u64;
+        out_status: *mut c_int,
+    ) -> *mut c_void;
     #[link_name = "nw_shim_listener_unsubscribe"]
     pub fn nw_shim_listener_unsubscribe(handle: *mut c_void, token: u64);
 
@@ -929,23 +931,6 @@ unsafe extern "C" {
         callback: Option<EndpointEnumerationCallback>,
         user_info: *mut c_void,
     ) -> c_int;
-    #[link_name = "nw_shim_path_monitor_start_with_type"]
-    pub fn nw_shim_path_monitor_start_with_type(
-        interface_type: c_int,
-        callback: Option<PathMonitorCallback>,
-        context: *mut c_void,
-        retain: Option<NwShimContextCallback>,
-        release: Option<NwShimContextCallback>,
-    ) -> *mut c_void;
-    #[link_name = "nw_shim_path_monitor_start_for_ethernet_channel"]
-    pub fn nw_shim_path_monitor_start_for_ethernet_channel(
-        callback: Option<PathMonitorCallback>,
-        context: *mut c_void,
-        retain: Option<NwShimContextCallback>,
-        release: Option<NwShimContextCallback>,
-    ) -> *mut c_void;
-    #[link_name = "nw_shim_path_monitor_prohibit_interface_type"]
-    pub fn nw_shim_path_monitor_prohibit_interface_type(handle: *mut c_void, interface_type: c_int);
     #[link_name = "nw_shim_path_monitor_subscribe_update"]
     pub fn nw_shim_path_monitor_subscribe_update(
         handle: *mut c_void,

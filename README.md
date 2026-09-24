@@ -144,6 +144,8 @@ framework-managed events. Common entry points include
 `start_path_monitor`, `start_browser_with_descriptor`,
 `start_browser_results_with_descriptor`, `advertise_with_descriptor`, and the
 various `set_*_handler` hooks on connection, group, and protocol types.
+`PathMonitorBuilder` sets a monitor's interface scope and prohibited interface
+types before it starts, which is the only time Network.framework applies them.
 
 Dropping a connection, listener, group, browser or path monitor cancels it. No
 new callback starts after that, but one that is already running may finish
@@ -172,6 +174,10 @@ its final `cancelled` event.
 - QUIC parameters come from `nw_parameters_create_quic`. On a QUIC listener,
   `accept()` first returns the connection for the QUIC tunnel, then one
   connection per stream the peer opens.
+- `TcpListener::bind_with_group_handler(port, &parameters, handler)` delivers
+  each inbound QUIC connection as a `ConnectionGroup` instead. The handler is
+  installed before the listener starts, and `accept()` on such a listener
+  returns `NetworkError::InvalidArgument`.
 
 ```rust,no_run
 use networkframework::{certificate_sha256, ConnectionParameters, TcpClient, TlsVersion};
