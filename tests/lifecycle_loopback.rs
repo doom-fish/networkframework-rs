@@ -3,15 +3,15 @@ use std::net::{Ipv6Addr, Shutdown, SocketAddr, TcpStream, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use networkframework::{
     certificate_sha256, ConnectionGroup, ConnectionGroupDescriptor, ConnectionGroupState,
     ConnectionParameters, Endpoint, Framer, FramerContext, FramerDefinition, FramerMessageView,
-    FramerStart, NetworkError, ProtocolDefinition, QuicConnection, TcpClient, TcpListener,
-    TlsIdentity, TlsVersion, UdpClient,
+    FramerStart, NetworkError, ProtocolDefinition, ProtocolOptions, QuicConnection, TcpClient,
+    TcpListener, TlsIdentity, TlsVersion, UdpClient,
 };
 
 fn loopback_only(mut parameters: ConnectionParameters) -> Result<ConnectionParameters, NetworkError> {
@@ -193,6 +193,41 @@ fn replacing_handlers_while_events_arrive_is_safe() -> Result<(), NetworkError> 
     }
     drop(client);
     drop(listener);
+    Ok(())
+}
+
+fn released_within(weak: &Weak<()>, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while weak.strong_count() > 0 {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    true
+}
+
+#[test]
+fn dropped_clients_release_their_handler_contexts() -> Result<(), NetworkError> {
+    let listener = TcpListener::bind_loopback(0)?;
+    let port = listener.local_port();
+    let mut released = Vec::new();
+    for _ in 0..8 {
+        let mut client = TcpClient::connect("127.0.0.1", port)?;
+        let token = Arc::new(());
+        released.push(Arc::downgrade(&token));
+        client.set_viability_changed_handler(move |_| {
+            let _ = Arc::strong_count(&token);
+        });
+        let _accepted = listener.accept()?;
+        drop(client);
+    }
+    for weak in &released {
+        assert!(
+            released_within(weak, Duration::from_secs(10)),
+            "a dropped client kept its handler context alive"
+        );
+    }
     Ok(())
 }
 
@@ -669,6 +704,83 @@ fn quic_multiplex_group_starts_rejects_late_handlers_and_cancels() -> Result<(),
         assert!(cancelled, "round {round}: cancel must deliver the final cancelled state");
         drop(group);
     }
+    drop(listener);
+    Ok(())
+}
+
+fn wait_for_group_state(
+    states: &mpsc::Receiver<ConnectionGroupState>,
+    wanted: ConnectionGroupState,
+    timeout: Duration,
+) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match states.recv_timeout(remaining) {
+            Ok(state) if state == wanted => return true,
+            Ok(ConnectionGroupState::Failed | ConnectionGroupState::Cancelled) | Err(_) => {
+                return false;
+            }
+            Ok(_) => {}
+        }
+    }
+}
+
+#[test]
+fn reinsertion_releases_the_extracted_connection_while_the_group_lives(
+) -> Result<(), NetworkError> {
+    let Some(TestIdentity { identity, pin }) = test_identity("reinsert") else {
+        return Ok(());
+    };
+    let server_parameters = ConnectionParameters::quic_configured("doomfish-reinsert", |tls| {
+        tls.set_local_identity(&identity);
+    })?;
+    let listener = TcpListener::bind_with_parameters(0, &loopback_only(server_parameters)?)?;
+    let port = listener.local_port();
+    let client_parameters = ConnectionParameters::quic_configured("doomfish-reinsert", |tls| {
+        tls.pin_peer_certificate_sha256(&[pin]);
+    })?;
+    let descriptor = ConnectionGroupDescriptor::multiplex("127.0.0.1", port)?;
+    let mut group = ConnectionGroup::new(&descriptor, &client_parameters)?;
+    let (state_tx, state_rx) = mpsc::channel();
+    group.set_state_changed_handler(move |state| {
+        let _ = state_tx.send(state);
+    });
+    group.set_new_connection_handler(|_connection| {})?;
+    group.start()?;
+    assert!(
+        wait_for_group_state(&state_rx, ConnectionGroupState::Ready, Duration::from_secs(10)),
+        "the multiplex group did not become ready"
+    );
+
+    let stream_options = ProtocolOptions::quic()?;
+    let mut released = Vec::new();
+    for _ in 0..3 {
+        let mut extracted = group.extract_connection(None, Some(&stream_options))?;
+        let token = Arc::new(());
+        released.push(Arc::downgrade(&token));
+        extracted.set_viability_changed_handler(move |_| {
+            let _ = Arc::strong_count(&token);
+        });
+        match group.reinsert_extracted_connection(extracted) {
+            Ok(()) | Err(NetworkError::InvalidArgument(_)) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    for weak in &released {
+        assert!(
+            released_within(weak, Duration::from_secs(10)),
+            "a reinsertion kept the extracted connection's shim handle while the group was alive"
+        );
+    }
+
+    group.cancel();
+    assert!(wait_for_group_state(
+        &state_rx,
+        ConnectionGroupState::Cancelled,
+        Duration::from_secs(5)
+    ));
+    drop(group);
     drop(listener);
     Ok(())
 }

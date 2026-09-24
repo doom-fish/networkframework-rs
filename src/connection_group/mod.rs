@@ -443,18 +443,18 @@ impl ConnectionGroup {
         Ok(unsafe { TcpClient::from_raw(handle) })
     }
 
-    /// Extract a connection for a specific remote endpoint and protocol options.
+    /// Extract a connection for an optional remote endpoint and protocol options.
     pub fn extract_connection(
         &self,
-        endpoint: &Endpoint,
-        protocol_options: &ProtocolOptions,
+        endpoint: Option<&Endpoint>,
+        protocol_options: Option<&ProtocolOptions>,
     ) -> Result<TcpClient, NetworkError> {
         let mut status = ffi::NW_OK;
         let handle = unsafe {
             ffi::nw_shim_connection_group_extract_connection(
                 self.handle,
-                endpoint.as_ptr(),
-                protocol_options.as_ptr(),
+                endpoint.map_or(core::ptr::null_mut(), Endpoint::as_ptr),
+                protocol_options.map_or(core::ptr::null_mut(), ProtocolOptions::as_ptr),
                 &raw mut status,
             )
         };
@@ -500,7 +500,9 @@ impl ConnectionGroup {
             )
         };
         if status != ffi::NW_OK {
-            return Err(from_status(status));
+            return Err(NetworkError::InvalidArgument(
+                "the group did not accept the connection for reinsertion".into(),
+            ));
         }
         unsafe { ffi::nw_shim_connection_release_without_cancel(connection.into_raw()) };
         Ok(())

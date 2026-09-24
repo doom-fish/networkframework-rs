@@ -46,6 +46,48 @@ static NFWRustContextOwner *nw_shim_make_owner(void *context, NwShimContextCallb
     return owner;
 }
 
+@interface NFWConnectionHandlerOwner : NSObject
+@property (nonatomic, readonly) void *handle;
+- (instancetype)initWithHandle:(void *)handle;
+@end
+
+@implementation NFWConnectionHandlerOwner
+
+- (instancetype)initWithHandle:(void *)handle {
+    self = [super init];
+    if (self) {
+        _handle = handle;
+    }
+    return self;
+}
+
+- (void)dealloc {
+    nw_shim_conn_release(_handle);
+}
+
+@end
+
+int nw_shim_conn_install_handlers(void *connection, void *handle) {
+    NFWConnectionHandlerOwner *owner = [[NFWConnectionHandlerOwner alloc] initWithHandle:handle];
+    if (!owner) {
+        return 0;
+    }
+    nw_connection_t conn = (__bridge nw_connection_t)connection;
+    nw_connection_set_state_changed_handler(conn, ^(nw_connection_state_t state, nw_error_t error) {
+        nw_shim_conn_on_state(owner.handle, (int)state, (__bridge void *)error);
+    });
+    nw_connection_set_viability_changed_handler(conn, ^(bool value) {
+        nw_shim_conn_on_boolean(owner.handle, NW_SHIM_EVENT_VIABILITY, value ? 1 : 0);
+    });
+    nw_connection_set_better_path_available_handler(conn, ^(bool value) {
+        nw_shim_conn_on_boolean(owner.handle, NW_SHIM_EVENT_BETTER_PATH, value ? 1 : 0);
+    });
+    nw_connection_set_path_changed_handler(conn, ^(nw_path_t path) {
+        nw_shim_conn_on_path(owner.handle, (__bridge void *)path);
+    });
+    return 1;
+}
+
 void *nw_shim_framer_definition_create(
     const char *identifier,
     uint32_t flags,

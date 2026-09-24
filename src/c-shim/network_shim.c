@@ -30,21 +30,6 @@
 #define NW_SHIM_ACCEPT_BACKLOG 128
 #define NW_SHIM_INLINE_SNAPSHOT 4
 
-enum {
-    NW_SHIM_EVENT_STATE = 1,
-    NW_SHIM_EVENT_VIABILITY,
-    NW_SHIM_EVENT_BETTER_PATH,
-    NW_SHIM_EVENT_PATH,
-    NW_SHIM_EVENT_NEW_CONNECTION,
-    NW_SHIM_EVENT_ADVERTISED_ENDPOINT,
-    NW_SHIM_EVENT_NEW_GROUP,
-    NW_SHIM_EVENT_RECEIVE,
-    NW_SHIM_EVENT_RESULTS,
-    NW_SHIM_EVENT_SERVICE,
-    NW_SHIM_EVENT_SUMMARY,
-    NW_SHIM_EVENT_CANCEL,
-};
-
 typedef void (*nw_shim_fn)(void);
 
 typedef struct nw_shim_callback {
@@ -326,6 +311,7 @@ typedef struct nw_conn_handle {
     bool waiting_error;
     bool cancelled;
     bool cancel_requested;
+    bool handlers_cleared;
     nw_shim_subscriptions subs;
     nw_shim_acceptor *acceptor;
     int slot;
@@ -355,7 +341,8 @@ static void nw_shim_conn_retain(nw_conn_handle *h) {
     atomic_fetch_add_explicit(&h->refs, 1, memory_order_relaxed);
 }
 
-static void nw_shim_conn_release(nw_conn_handle *h) {
+void nw_shim_conn_release(void *handle) {
+    nw_conn_handle *h = (nw_conn_handle *)handle;
     if (atomic_fetch_sub_explicit(&h->refs, 1, memory_order_acq_rel) != 1) {
         return;
     }
@@ -367,8 +354,23 @@ static void nw_shim_conn_release(nw_conn_handle *h) {
     free(h);
 }
 
-static void nw_shim_conn_release_async(void *context) {
-    nw_shim_conn_release((nw_conn_handle *)context);
+static void nw_shim_conn_clear_handlers(nw_conn_handle *h) {
+    pthread_mutex_lock(&h->lock);
+    bool clear = !h->handlers_cleared;
+    h->handlers_cleared = true;
+    pthread_mutex_unlock(&h->lock);
+    if (clear) {
+        nw_connection_set_state_changed_handler(h->conn, NULL);
+        nw_connection_set_viability_changed_handler(h->conn, NULL);
+        nw_connection_set_better_path_available_handler(h->conn, NULL);
+        nw_connection_set_path_changed_handler(h->conn, NULL);
+    }
+}
+
+static void nw_shim_conn_clear_handlers_async(void *context) {
+    nw_conn_handle *h = (nw_conn_handle *)context;
+    nw_shim_conn_clear_handlers(h);
+    nw_shim_conn_release(h);
 }
 
 static void nw_shim_conn_cancel(nw_conn_handle *h) {
@@ -388,7 +390,10 @@ static void nw_shim_conn_close(nw_conn_handle *h) {
 
 static void nw_shim_acceptor_on_state(nw_conn_handle *h, nw_connection_state_t state, bool has_error);
 
-static void nw_shim_conn_on_state(nw_conn_handle *h, nw_connection_state_t state, nw_error_t error) {
+void nw_shim_conn_on_state(void *handle, int raw_state, void *raw_error) {
+    nw_conn_handle *h = (nw_conn_handle *)handle;
+    nw_connection_state_t state = (nw_connection_state_t)raw_state;
+    nw_error_t error = (nw_error_t)raw_error;
     pthread_mutex_lock(&h->lock);
     if (h->cancelled) {
         pthread_mutex_unlock(&h->lock);
@@ -416,14 +421,13 @@ static void nw_shim_conn_on_state(nw_conn_handle *h, nw_connection_state_t state
     nw_shim_snapshot_release(&snapshot);
 
     if (final_event) {
-        nw_connection_set_viability_changed_handler(h->conn, NULL);
-        nw_connection_set_better_path_available_handler(h->conn, NULL);
-        nw_connection_set_path_changed_handler(h->conn, NULL);
-        dispatch_async_f(h->queue, h, nw_shim_conn_release_async);
+        nw_shim_conn_retain(h);
+        dispatch_async_f(h->queue, h, nw_shim_conn_clear_handlers_async);
     }
 }
 
-static void nw_shim_conn_on_boolean(nw_conn_handle *h, int kind, bool value) {
+void nw_shim_conn_on_boolean(void *handle, int kind, int value) {
+    nw_conn_handle *h = (nw_conn_handle *)handle;
     nw_shim_snapshot snapshot;
     nw_shim_subscriptions_snapshot(&h->subs, kind, &snapshot);
     for (size_t index = 0; index < snapshot.count; index++) {
@@ -432,7 +436,9 @@ static void nw_shim_conn_on_boolean(nw_conn_handle *h, int kind, bool value) {
     nw_shim_snapshot_release(&snapshot);
 }
 
-static void nw_shim_conn_on_path(nw_conn_handle *h, nw_path_t path) {
+void nw_shim_conn_on_path(void *handle, void *raw_path) {
+    nw_conn_handle *h = (nw_conn_handle *)handle;
+    nw_path_t path = (nw_path_t)raw_path;
     nw_shim_snapshot snapshot;
     nw_shim_subscriptions_snapshot(&h->subs, NW_SHIM_EVENT_PATH, &snapshot);
     for (size_t index = 0; index < snapshot.count; index++) {
@@ -461,18 +467,12 @@ static nw_conn_handle *nw_shim_conn_create(nw_connection_t conn, const char *lab
     nw_shim_subscriptions_init(&h->subs);
 
     nw_connection_set_queue(conn, h->queue);
-    nw_connection_set_state_changed_handler(conn, ^(nw_connection_state_t state, nw_error_t error) {
-        nw_shim_conn_on_state(h, state, error);
-    });
-    nw_connection_set_viability_changed_handler(conn, ^(bool value) {
-        nw_shim_conn_on_boolean(h, NW_SHIM_EVENT_VIABILITY, value);
-    });
-    nw_connection_set_better_path_available_handler(conn, ^(bool value) {
-        nw_shim_conn_on_boolean(h, NW_SHIM_EVENT_BETTER_PATH, value);
-    });
-    nw_connection_set_path_changed_handler(conn, ^(nw_path_t path) {
-        nw_shim_conn_on_path(h, path);
-    });
+    if (!nw_shim_conn_install_handlers(conn, h)) {
+        nw_connection_cancel(conn);
+        nw_shim_conn_release(h);
+        nw_shim_conn_release(h);
+        return NULL;
+    }
     return h;
 }
 
@@ -5520,6 +5520,7 @@ int nw_shim_connection_group_reinsert_extracted_connection(void *handle, void *c
     if (!h || !connection || !connection->conn) {
         return NW_INVALID_ARG;
     }
+    nw_shim_conn_clear_handlers(connection);
     return nw_connection_group_reinsert_extracted_connection(h->group, connection->conn) ? NW_OK : NW_INVALID_ARG;
 }
 

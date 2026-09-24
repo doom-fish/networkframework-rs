@@ -64,6 +64,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   leaves a block that calls a null callback.
 - `ConnectionGroup::reinsert_extracted_connection` no longer reports failure
   on success.
+- A connection reinserted into its `ConnectionGroup` no longer leaks its shim
+  handle, callback contexts and closures when the group takes over its
+  handlers. Connection handler blocks now own a reference to the handle that
+  is released when Network.framework drops the blocks; the shim removes its
+  handlers before reinsertion and after the final `cancelled` event.
 - Browser handlers are installed before the browser starts, as the SDK
   requires.
 - A connection that Network.framework reports as waiting with an error
@@ -94,6 +99,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking:** `TcpListener::accept` never returns a connection that failed
   its handshake; it returns `NetworkError::Cancelled` once the listener is
   closed and no ready connection is left.
+- **Breaking:** `ConnectionGroup::extract_connection` takes
+  `Option<&Endpoint>` and `Option<&ProtocolOptions>`: the SDK requires no
+  endpoint for multiplex groups, so the old signature could not extract from
+  them. A rejected reinsertion reports `NetworkError::InvalidArgument` with a
+  descriptive message.
 - **Breaking (`raw-ffi`):** the async helper shims (`nw_shim_*_set_*_handler`,
   `nw_shim_*_drain_queue`) and `nw_shim_browser_start` are replaced by
   `nw_shim_*_subscribe_*` and `nw_shim_*_unsubscribe`, and the signatures of
@@ -126,7 +136,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `TcpClient::receive_message`.
 - Loopback regression tests for peer resets, failed TLS handshakes,
   simultaneous accepts, handler replacement, framer lifetimes, oversized
-  datagrams, QUIC streams, connection groups and repeated create/drop.
+  datagrams, QUIC streams, connection groups, repeated create/drop, handler
+  contexts released by dropped connections and group reinsertion.
 
 ## [0.13.3] - 2026-06-06
 

@@ -21,6 +21,27 @@ extern "C" {
 #define NW_UNSUPPORTED -9
 #define NW_SECURITY_FAILED -10
 
+enum {
+    NW_SHIM_EVENT_STATE = 1,
+    NW_SHIM_EVENT_VIABILITY,
+    NW_SHIM_EVENT_BETTER_PATH,
+    NW_SHIM_EVENT_PATH,
+    NW_SHIM_EVENT_NEW_CONNECTION,
+    NW_SHIM_EVENT_ADVERTISED_ENDPOINT,
+    NW_SHIM_EVENT_NEW_GROUP,
+    NW_SHIM_EVENT_RECEIVE,
+    NW_SHIM_EVENT_RESULTS,
+    NW_SHIM_EVENT_SERVICE,
+    NW_SHIM_EVENT_SUMMARY,
+    NW_SHIM_EVENT_CANCEL,
+};
+
+int nw_shim_conn_install_handlers(void *connection, void *handle);
+void nw_shim_conn_on_state(void *handle, int state, void *error);
+void nw_shim_conn_on_boolean(void *handle, int kind, int value);
+void nw_shim_conn_on_path(void *handle, void *path);
+void nw_shim_conn_release(void *handle);
+
 typedef void (*NwShimContextCallback)(void *context);
 
 typedef void (*PathMonitorCallback)(
