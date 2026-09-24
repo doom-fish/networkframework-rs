@@ -9,6 +9,7 @@ use crate::endpoint::Endpoint;
 use crate::error::NetworkError;
 use crate::ffi;
 use crate::protocol::ProtocolOptions;
+use crate::read_only::ReadOnly;
 
 fn to_cstring(value: &str, field: &str) -> Result<CString, NetworkError> {
     CString::new(value).map_err(|e| NetworkError::InvalidArgument(format!("{field} NUL byte: {e}")))
@@ -185,13 +186,6 @@ impl ResolverConfig {
     }
 }
 
-impl Clone for ResolverConfig {
-    fn clone(&self) -> Self {
-        let handle = unsafe { ffi::nw_shim_retain_object(self.handle) };
-        Self { handle }
-    }
-}
-
 impl Drop for ResolverConfig {
     fn drop(&mut self) {
         if !self.handle.is_null() {
@@ -260,13 +254,6 @@ impl RelayHop {
     #[must_use]
     pub(crate) const fn as_ptr(&self) -> *mut c_void {
         self.handle
-    }
-}
-
-impl Clone for RelayHop {
-    fn clone(&self) -> Self {
-        let handle = unsafe { ffi::nw_shim_retain_object(self.handle) };
-        Self { handle }
     }
 }
 
@@ -491,7 +478,10 @@ impl UrlSessionConfiguration {
     }
 
     /// Replace the configuration's `proxyConfigurations` array.
-    pub fn set_proxy_configurations(&mut self, proxy_configurations: &[ProxyConfig]) -> &mut Self {
+    pub fn set_proxy_configurations(
+        &mut self,
+        proxy_configurations: Vec<ProxyConfig>,
+    ) -> &mut Self {
         let items: Vec<*mut c_void> = proxy_configurations
             .iter()
             .map(ProxyConfig::as_ptr)
@@ -503,12 +493,13 @@ impl UrlSessionConfiguration {
                 items.len(),
             );
         };
+        drop(proxy_configurations);
         self
     }
 
     /// Copy the configuration's `proxyConfigurations` array.
     #[must_use]
-    pub fn proxy_configurations(&self) -> Vec<ProxyConfig> {
+    pub fn proxy_configurations(&self) -> Vec<ReadOnly<'_, ProxyConfig>> {
         let mut count = 0_usize;
         let items = unsafe {
             ffi::nw_shim_url_session_configuration_copy_proxy_configurations(
@@ -522,7 +513,8 @@ impl UrlSessionConfiguration {
         let slice = unsafe { std::slice::from_raw_parts(items, count) };
         let configs = slice
             .iter()
-            .filter_map(|handle| (!handle.is_null()).then_some(ProxyConfig { handle: *handle }))
+            .filter(|handle| !handle.is_null())
+            .map(|handle| ReadOnly::new(ProxyConfig { handle: *handle }))
             .collect();
         unsafe { ffi::nw_shim_free_buffer(items.cast()) };
         configs
@@ -535,13 +527,6 @@ impl Drop for UrlSessionConfiguration {
             unsafe { ffi::nw_shim_url_session_configuration_release(self.handle) };
             self.handle = core::ptr::null_mut();
         }
-    }
-}
-
-impl Clone for ProxyConfig {
-    fn clone(&self) -> Self {
-        let handle = unsafe { ffi::nw_shim_retain_object(self.handle) };
-        Self { handle }
     }
 }
 

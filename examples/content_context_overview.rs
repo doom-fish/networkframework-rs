@@ -15,7 +15,7 @@ fn main() -> Result<(), networkframework::NetworkError> {
         context.is_final(),
         context.expiration_milliseconds(),
         context.relative_priority(),
-        context.copy_antecedent().map(|value| value.identifier()),
+        context.antecedent_identifier(),
     );
     Ok(())
 }

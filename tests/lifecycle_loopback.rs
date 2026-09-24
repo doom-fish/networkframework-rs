@@ -610,12 +610,13 @@ fn bind_tls_serves_a_pinned_client() -> Result<(), NetworkError> {
 
 #[test]
 fn quic_uses_real_quic_parameters() -> Result<(), NetworkError> {
-    let parameters = ConnectionParameters::quic("doomfish-quic")?;
+    let mut parameters = ConnectionParameters::quic("doomfish-quic")?;
     let stack = parameters.default_protocol_stack().expect("protocol stack");
     assert!(stack.application_protocols().is_empty());
     assert!(stack
         .transport_protocol()
         .is_some_and(|transport| transport.is_quic()));
+    drop(stack);
 
     let Some(TestIdentity { identity, pin }) = test_identity("quic") else {
         return Ok(());
@@ -666,10 +667,9 @@ fn quic_multiplex_group_starts_rejects_late_handlers_and_cancels() -> Result<(),
     let client_parameters = ConnectionParameters::quic_configured("doomfish-group", |tls| {
         tls.pin_peer_certificate_sha256(&[pin]);
     })?;
-    let descriptor = ConnectionGroupDescriptor::multiplex("127.0.0.1", listener.local_port())?;
-
     for round in 0..3 {
-        let mut group = ConnectionGroup::new(&descriptor, &client_parameters)?;
+        let descriptor = ConnectionGroupDescriptor::multiplex("127.0.0.1", listener.local_port())?;
+        let mut group = ConnectionGroup::new(descriptor, &client_parameters)?;
         let (state_tx, state_rx) = mpsc::channel();
         group.set_state_changed_handler(move |state| {
             let _ = state_tx.send(state);
@@ -741,7 +741,7 @@ fn reinsertion_releases_the_extracted_connection_while_the_group_lives() -> Resu
         tls.pin_peer_certificate_sha256(&[pin]);
     })?;
     let descriptor = ConnectionGroupDescriptor::multiplex("127.0.0.1", port)?;
-    let mut group = ConnectionGroup::new(&descriptor, &client_parameters)?;
+    let mut group = ConnectionGroup::new(descriptor, &client_parameters)?;
     let (state_tx, state_rx) = mpsc::channel();
     group.set_state_changed_handler(move |state| {
         let _ = state_tx.send(state);
@@ -814,7 +814,7 @@ fn group_listener_delivers_groups_and_refuses_accept() -> Result<(), NetworkErro
         tls.pin_peer_certificate_sha256(&[pin]);
     })?;
     let descriptor = ConnectionGroupDescriptor::multiplex("127.0.0.1", listener.local_port())?;
-    let mut group = ConnectionGroup::new(&descriptor, &client_parameters)?;
+    let mut group = ConnectionGroup::new(descriptor, &client_parameters)?;
     group.set_new_connection_handler(|_connection| {})?;
     let group = Arc::new(group);
     let starter = {

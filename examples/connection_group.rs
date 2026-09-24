@@ -7,7 +7,7 @@ use std::time::Duration;
 fn main() -> Result<(), networkframework::NetworkError> {
     let descriptor = ConnectionGroupDescriptor::multicast("239.255.0.1", 5000)?;
     let parameters = ConnectionParameters::udp()?;
-    let mut group = ConnectionGroup::new(&descriptor, &parameters)?;
+    let mut group = ConnectionGroup::new(descriptor, &parameters)?;
 
     let states = Arc::new(Mutex::new(Vec::new()));
     let states_for_callback = Arc::clone(&states);

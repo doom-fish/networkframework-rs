@@ -36,6 +36,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   guards now contain panics instead of unwinding into C.
 - `ProxyConfig::set_credentials` zeroizes the crate's temporary copy
   of the proxy password.
+- Two handles can no longer mutate one unsynchronized Network.framework
+  object from different threads. Disassembly shows that parameters, protocol
+  stacks, most protocol options, group, browse and advertise descriptors, proxy and
+  relay configurations, WebSocket responses and content contexts do not lock
+  their setters, so retain-sharing `Clone`s and accessors that returned the
+  live object raced inside the framework. See **Changed** for the new API.
 - `Sync` is removed from mutable Network.framework wrappers whose clones share
   one object: `AdvertiseDescriptor`, `BrowseDescriptor`, `ConnectionGroupDescriptor`,
   `ContentContext`, `FramerMessage`, `ProtocolMetadata`, `ProtocolOptions`,
@@ -109,6 +115,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   after the monitor started, it had no effect. `PathMonitorBuilder` applies
   prohibited interface types, and the interface-type or Ethernet-channel
   scope, before the monitor starts.
+- **Breaking:** `Clone` is removed from `ProtocolOptions`, `QuicOptions`,
+  `SecurityProtocolOptions`, `ProtocolStack`, `ConnectionGroupDescriptor`,
+  `BrowseDescriptor`, `AdvertiseDescriptor`, `ProxyConfig`, `RelayHop`,
+  `ResolverConfig`, `WsResponse` and `ContentContext`, and therefore from
+  `ReceivedContent` and `ConnectionGroupMessage`.
+- **Breaking:** `ConnectionParameters::default_protocol_stack` takes
+  `&mut self` and returns a `ProtocolStack<'_>` borrowed from the parameters.
+  Its `application_protocols`, `transport_protocol` and `internet_protocol`
+  return `ReadOnly` views.
+- **Breaking:** `ConnectionParameters::prepend_application_protocol` and
+  `ProtocolStack::set_transport_protocol` take the options by value.
+- **Breaking:** `ConnectionGroup::new`, `start_browser_with_descriptor` and
+  `start_browser_results_with_descriptor` take the descriptor by value;
+  `ConnectionGroup::descriptor`, `Browser::browse_descriptor` and
+  `BrowseResultsBrowser::browse_descriptor` return `ReadOnly` views.
+- **Breaking:** `UrlSessionConfiguration::set_proxy_configurations` takes a
+  `Vec<ProxyConfig>`, and `proxy_configurations` returns `ReadOnly` views.
+- **Breaking:** `ProtocolOptions::tls_security_options` is replaced by
+  `configure_tls_security(|security| ..)`, which rejects options that are not
+  TLS options, and `QuicOptions::security_options` by
+  `configure_security(|security| ..)`. `QuicOptions::protocol_options`
+  returns `&ProtocolOptions`, and `ProtocolOptions` implements
+  `From<QuicOptions>`.
+- **Breaking:** `ContentContext::copy_antecedent` is replaced by
+  `antecedent_identifier`.
+- **Breaking:** `FramerContext::options` and
+  `ProtocolMetadata::ws_server_response` return `ReadOnly` views.
+- **Breaking:** `TcpClient::parameters`, `Browser::parameters`,
+  `BrowseResultsBrowser::parameters`, `ConnectionGroup::parameters` and
+  `FramerContext::parameters` return independent deep copies instead of the
+  live object Network.framework hands out.
+- `ProtocolMetadata`, `QuicMetadata`, `FramerMessage`, `TxtRecord`,
+  `DataTransferReport` and `PrivacyContext` keep their `Clone`: the framework
+  locks or serializes their setters (`TxtRecord` clones deeply).
 - **Breaking:** `ConnectionGroup::extract_connection` takes
   `Option<&Endpoint>` and `Option<&ProtocolOptions>`: the SDK requires no
   endpoint for multiplex groups, so the old signature could not extract from
@@ -148,6 +188,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `negotiated_application_protocol`.
 - `ConnectionParameters::tls_tcp_configured` and `quic_configured`.
 - `TcpListener::bind_with_group_handler` and `PathMonitorBuilder`.
+- `ReadOnly<'a, T>`, a borrowed handle that allows only `&T` access.
 - `TcpListener::bind_loopback`, which listens on `127.0.0.1` only;
   `TcpListener::bind` is documented to listen on every interface.
 - `TcpClient::receive_message`.

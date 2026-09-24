@@ -386,13 +386,6 @@ impl WsResponse {
     }
 }
 
-impl Clone for WsResponse {
-    fn clone(&self) -> Self {
-        let handle = unsafe { ffi::nw_shim_retain_object(self.handle) };
-        Self { handle }
-    }
-}
-
 impl Drop for WsResponse {
     fn drop(&mut self) {
         if !self.handle.is_null() {

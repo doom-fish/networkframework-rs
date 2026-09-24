@@ -10,7 +10,7 @@ use crate::ffi;
 use crate::protocol::{ProtocolDefinition, ProtocolMetadata};
 
 /// One received payload and its associated content context.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ReceivedContent {
     pub data: Vec<u8>,
     pub context: Option<ContentContext>,
@@ -114,14 +114,14 @@ impl ContentContext {
         self
     }
 
-    /// Copy the antecedent context, if one exists.
     #[must_use]
-    pub fn copy_antecedent(&self) -> Option<Self> {
+    pub fn antecedent_identifier(&self) -> Option<String> {
         let handle = unsafe { ffi::nw_shim_content_context_copy_antecedent(self.handle) };
         if handle.is_null() {
             return None;
         }
-        Some(Self { handle })
+        let antecedent = Self { handle };
+        Some(antecedent.identifier())
     }
 
     /// Attach framer metadata to this content context.
@@ -188,13 +188,6 @@ impl ContentContext {
 
     #[must_use]
     pub(crate) const unsafe fn from_raw(handle: *mut c_void) -> Self {
-        Self { handle }
-    }
-}
-
-impl Clone for ContentContext {
-    fn clone(&self) -> Self {
-        let handle = unsafe { ffi::nw_shim_retain_object(self.handle) };
         Self { handle }
     }
 }

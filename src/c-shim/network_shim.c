@@ -3356,12 +3356,21 @@ void *nw_shim_connection_copy_endpoint(void *handle) {
     return nw_connection_copy_endpoint(h->conn);
 }
 
+static void *nw_shim_detach_parameters(nw_parameters_t parameters) {
+    if (!parameters) {
+        return NULL;
+    }
+    nw_parameters_t copy = nw_parameters_copy(parameters);
+    nw_release(parameters);
+    return copy;
+}
+
 void *nw_shim_connection_copy_parameters(void *handle) {
     nw_conn_handle *h = (nw_conn_handle *)handle;
     if (!h || !h->conn) {
         return NULL;
     }
-    return nw_connection_copy_parameters(h->conn);
+    return nw_shim_detach_parameters(nw_connection_copy_parameters(h->conn));
 }
 
 void *nw_shim_connection_copy_current_path(void *handle) {
@@ -5186,7 +5195,7 @@ void *nw_shim_browser_copy_parameters(void *handle) {
     if (!h) {
         return NULL;
     }
-    return nw_browser_copy_parameters(h->browser);
+    return nw_shim_detach_parameters(nw_browser_copy_parameters(h->browser));
 }
 
 uint64_t nw_shim_browse_result_get_changes(void *old_result, void *new_result) {
@@ -5387,7 +5396,7 @@ void *nw_shim_framer_copy_parameters(void *framer) {
         return NULL;
     }
     if (__builtin_available(macOS 10.15, *)) {
-        return nw_framer_copy_parameters((nw_framer_t)framer);
+        return nw_shim_detach_parameters(nw_framer_copy_parameters((nw_framer_t)framer));
     }
     return NULL;
 }
@@ -5449,7 +5458,7 @@ void *nw_shim_connection_group_copy_parameters(void *handle) {
     if (!h) {
         return NULL;
     }
-    return nw_connection_group_copy_parameters(h->group);
+    return nw_shim_detach_parameters(nw_connection_group_copy_parameters(h->group));
 }
 
 void *nw_shim_connection_group_copy_remote_endpoint_for_message(void *handle, void *context) {

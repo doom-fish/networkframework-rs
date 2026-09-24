@@ -17,15 +17,13 @@ fn to_cstring(value: &str, field: &str) -> Result<CString, NetworkError> {
 
 /// QUIC protocol options attachable to a protocol stack.
 pub struct QuicOptions {
-    handle: *mut c_void,
+    options: ProtocolOptions,
 }
-
-unsafe impl Send for QuicOptions {}
 
 impl std::fmt::Debug for QuicOptions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("QuicOptions")
-            .field("handle", &self.handle)
+            .field("handle", &self.options.as_ptr())
             .finish()
     }
 }
@@ -33,13 +31,9 @@ impl std::fmt::Debug for QuicOptions {
 impl QuicOptions {
     /// Create a fresh QUIC protocol-options object.
     pub fn new() -> Result<Self, NetworkError> {
-        let handle = unsafe { ffi::nw_shim_protocol_create_quic_options() };
-        if handle.is_null() {
-            return Err(NetworkError::InvalidArgument(
-                "failed to create QUIC options".into(),
-            ));
-        }
-        Ok(Self { handle })
+        Ok(Self {
+            options: ProtocolOptions::quic()?,
+        })
     }
 
     /// Add an ALPN protocol string to the handshake.
@@ -50,7 +44,7 @@ impl QuicOptions {
         let application_protocol = to_cstring(application_protocol, "application_protocol")?;
         unsafe {
             ffi::nw_shim_quic_add_tls_application_protocol(
-                self.handle,
+                self.options.as_ptr(),
                 application_protocol.as_ptr(),
             );
         };
@@ -60,14 +54,14 @@ impl QuicOptions {
     /// Whether the stream is unidirectional.
     #[must_use]
     pub fn stream_is_unidirectional(&self) -> bool {
-        unsafe { ffi::nw_shim_quic_get_stream_is_unidirectional(self.handle) != 0 }
+        unsafe { ffi::nw_shim_quic_get_stream_is_unidirectional(self.options.as_ptr()) != 0 }
     }
 
     /// Set whether the stream is unidirectional.
     pub fn set_stream_is_unidirectional(&mut self, is_unidirectional: bool) -> &mut Self {
         unsafe {
             ffi::nw_shim_quic_set_stream_is_unidirectional(
-                self.handle,
+                self.options.as_ptr(),
                 i32::from(is_unidirectional),
             );
         }
@@ -77,77 +71,71 @@ impl QuicOptions {
     /// Whether the QUIC options are configured as a datagram flow.
     #[must_use]
     pub fn stream_is_datagram(&self) -> bool {
-        unsafe { ffi::nw_shim_quic_get_stream_is_datagram(self.handle) != 0 }
+        unsafe { ffi::nw_shim_quic_get_stream_is_datagram(self.options.as_ptr()) != 0 }
     }
 
     /// Configure the QUIC stream as a datagram flow.
     pub fn set_stream_is_datagram(&mut self, is_datagram: bool) -> &mut Self {
-        unsafe { ffi::nw_shim_quic_set_stream_is_datagram(self.handle, i32::from(is_datagram)) };
+        unsafe {
+            ffi::nw_shim_quic_set_stream_is_datagram(self.options.as_ptr(), i32::from(is_datagram));
+        }
         self
     }
 
     /// Current `initial_max_data` transport parameter.
     #[must_use]
     pub fn initial_max_data(&self) -> u64 {
-        unsafe { ffi::nw_shim_quic_get_initial_max_data(self.handle) }
+        unsafe { ffi::nw_shim_quic_get_initial_max_data(self.options.as_ptr()) }
     }
 
     /// Set the `initial_max_data` transport parameter.
     pub fn set_initial_max_data(&mut self, initial_max_data: u64) -> &mut Self {
-        unsafe { ffi::nw_shim_quic_set_initial_max_data(self.handle, initial_max_data) };
+        unsafe { ffi::nw_shim_quic_set_initial_max_data(self.options.as_ptr(), initial_max_data) };
         self
     }
 
     /// Current maximum UDP payload size.
     #[must_use]
     pub fn max_udp_payload_size(&self) -> u16 {
-        unsafe { ffi::nw_shim_quic_get_max_udp_payload_size(self.handle) }
+        unsafe { ffi::nw_shim_quic_get_max_udp_payload_size(self.options.as_ptr()) }
     }
 
     /// Set the maximum UDP payload size.
     pub fn set_max_udp_payload_size(&mut self, max_udp_payload_size: u16) -> &mut Self {
-        unsafe { ffi::nw_shim_quic_set_max_udp_payload_size(self.handle, max_udp_payload_size) };
+        unsafe {
+            ffi::nw_shim_quic_set_max_udp_payload_size(self.options.as_ptr(), max_udp_payload_size);
+        }
         self
     }
 
     /// Current idle timeout in milliseconds.
     #[must_use]
     pub fn idle_timeout(&self) -> u32 {
-        unsafe { ffi::nw_shim_quic_get_idle_timeout(self.handle) }
+        unsafe { ffi::nw_shim_quic_get_idle_timeout(self.options.as_ptr()) }
     }
 
     /// Set the QUIC idle timeout in milliseconds.
     pub fn set_idle_timeout(&mut self, idle_timeout: u32) -> &mut Self {
-        unsafe { ffi::nw_shim_quic_set_idle_timeout(self.handle, idle_timeout) };
+        unsafe { ffi::nw_shim_quic_set_idle_timeout(self.options.as_ptr(), idle_timeout) };
         self
     }
 
     /// Copy the QUIC protocol definition.
     #[must_use]
     pub fn definition(&self) -> Option<ProtocolDefinition> {
-        self.protocol_options().definition()
+        self.options.definition()
     }
 
     /// Borrow these QUIC options as a generic protocol-options wrapper.
     #[must_use]
-    pub fn protocol_options(&self) -> ProtocolOptions {
-        ProtocolOptions::clone_from_raw(self.handle)
+    pub const fn protocol_options(&self) -> &ProtocolOptions {
+        &self.options
     }
 }
 
-impl Clone for QuicOptions {
-    fn clone(&self) -> Self {
-        let handle = unsafe { ffi::nw_shim_retain_object(self.handle) };
-        Self { handle }
-    }
-}
-
-impl Drop for QuicOptions {
-    fn drop(&mut self) {
-        if !self.handle.is_null() {
-            unsafe { ffi::nw_shim_release_object(self.handle) };
-            self.handle = core::ptr::null_mut();
-        }
+impl From<QuicOptions> for ProtocolOptions {
+    fn from(options: QuicOptions) -> Self {
+        options.options
     }
 }
 

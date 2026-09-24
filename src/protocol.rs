@@ -13,6 +13,7 @@ use crate::error::{FrameworkError, NetworkError};
 use crate::ffi;
 use crate::parameters_support::ServiceClass;
 use crate::quic_support::{SecurityProtocolMetadata, SecurityProtocolOptions};
+use crate::read_only::ReadOnly;
 use crate::websocket::{Opcode, WsCloseCode, WsRequest, WsResponse, WsVersion};
 
 fn handle_result(handle: *mut c_void, context: &str) -> Result<*mut c_void, NetworkError> {
@@ -243,25 +244,6 @@ impl ProtocolOptions {
 
     #[must_use]
     pub(crate) const unsafe fn from_raw(handle: *mut c_void) -> Self {
-        Self {
-            handle,
-            ws_client_request_callback: None,
-        }
-    }
-
-    #[must_use]
-    pub(crate) fn clone_from_raw(handle: *mut c_void) -> Self {
-        let handle = unsafe { ffi::nw_shim_retain_object(handle) };
-        Self {
-            handle,
-            ws_client_request_callback: None,
-        }
-    }
-}
-
-impl Clone for ProtocolOptions {
-    fn clone(&self) -> Self {
-        let handle = unsafe { ffi::nw_shim_retain_object(self.handle) };
         Self {
             handle,
             ws_client_request_callback: None,
@@ -542,9 +524,9 @@ impl ProtocolMetadata {
     }
 
     #[must_use]
-    pub fn ws_server_response(&self) -> Option<WsResponse> {
+    pub fn ws_server_response(&self) -> Option<ReadOnly<'_, WsResponse>> {
         let handle = unsafe { ffi::nw_shim_ws_metadata_copy_server_response(self.handle) };
-        (!handle.is_null()).then_some(unsafe { WsResponse::from_raw(handle) })
+        (!handle.is_null()).then(|| ReadOnly::new(unsafe { WsResponse::from_raw(handle) }))
     }
 
     /// Register a handler that fires when a pong is received for this ping metadata.
@@ -620,11 +602,24 @@ impl ProtocolOptions {
         })
     }
 
-    /// Copy the associated TLS security options.
-    #[must_use]
-    pub fn tls_security_options(&self) -> Option<SecurityProtocolOptions> {
+    pub fn configure_tls_security<F>(&mut self, configure: F) -> Result<&mut Self, NetworkError>
+    where
+        F: FnOnce(&mut SecurityProtocolOptions),
+    {
+        if self.definition() != Some(ProtocolDefinition::tls()?) {
+            return Err(NetworkError::InvalidArgument(
+                "TLS security options exist only on TLS protocol options".into(),
+            ));
+        }
         let handle = unsafe { ffi::nw_shim_tls_copy_sec_protocol_options(self.handle) };
-        (!handle.is_null()).then_some(unsafe { SecurityProtocolOptions::from_raw(handle) })
+        if handle.is_null() {
+            return Err(NetworkError::InvalidArgument(
+                "these protocol options carry no TLS security options".into(),
+            ));
+        }
+        let mut security = unsafe { SecurityProtocolOptions::from_raw(handle) };
+        configure(&mut security);
+        Ok(self)
     }
 
     pub fn set_ip_version(&mut self, version: IpVersion) -> &mut Self {
@@ -873,7 +868,7 @@ mod tests {
             .set_ws_client_request_handler(|_request| {
                 Some(WsResponse::new(WsResponseStatus::Accept, None).expect("accept WebSocket"))
             });
-        server_parameters.prepend_application_protocol(&server_ws_options)?;
+        server_parameters.prepend_application_protocol(server_ws_options)?;
         server_parameters.set_local_endpoint(Some(&Endpoint::address("127.0.0.1", 0)?));
 
         let listener = TcpListener::bind_with_parameters(0, &server_parameters)?;

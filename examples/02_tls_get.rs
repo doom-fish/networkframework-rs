@@ -11,7 +11,7 @@ fn main() -> Result<(), networkframework::NetworkError> {
         .set_prohibit_constrained(true)
         .set_allow_ultra_constrained(true)
         .set_prefer_no_proxy(true);
-    parameters.prepend_application_protocol(&ProtocolOptions::websocket()?)?;
+    parameters.prepend_application_protocol(ProtocolOptions::websocket()?)?;
 
     println!(
         "attribution={:?} interface={:?} expensive={} constrained={} ultra_constrained={}",

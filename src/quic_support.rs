@@ -52,13 +52,6 @@ impl SecurityProtocolOptions {
     }
 }
 
-impl Clone for SecurityProtocolOptions {
-    fn clone(&self) -> Self {
-        let handle = unsafe { ffi::nw_shim_sec_retain(self.handle) };
-        Self { handle }
-    }
-}
-
 impl Drop for SecurityProtocolOptions {
     fn drop(&mut self) {
         if !self.handle.is_null() {
@@ -456,12 +449,20 @@ impl QuicOptions {
         self
     }
 
-    /// Copy the underlying security-options object.
-    #[must_use]
-    pub fn security_options(&self) -> Option<SecurityProtocolOptions> {
+    pub fn configure_security<F>(&mut self, configure: F) -> Result<&mut Self, NetworkError>
+    where
+        F: FnOnce(&mut SecurityProtocolOptions),
+    {
         let options = self.protocol_options();
         let handle = unsafe { ffi::nw_shim_quic_copy_sec_protocol_options(options.as_ptr()) };
-        (!handle.is_null()).then_some(unsafe { SecurityProtocolOptions::from_raw(handle) })
+        if handle.is_null() {
+            return Err(NetworkError::InvalidArgument(
+                "the QUIC options carry no security options".into(),
+            ));
+        }
+        let mut security = unsafe { SecurityProtocolOptions::from_raw(handle) };
+        configure(&mut security);
+        Ok(self)
     }
 }
 

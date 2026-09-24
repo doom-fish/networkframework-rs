@@ -152,6 +152,18 @@ new callback starts after that, but one that is already running may finish
 after the drop returns. Native state is freed once Network.framework delivers
 its final `cancelled` event.
 
+Network.framework does not synchronize most of its configuration objects, so
+one object never has two handles that can reach it from different threads.
+`ConnectionParameters` and `TxtRecord` clone deeply, and parameters read back
+from a connection, browser, group or framer are independent copies. Protocol
+options, protocol stacks, descriptors, proxy and relay configurations,
+WebSocket responses and content contexts are not `Clone`. Handing one to a
+parent (`prepend_application_protocol`, `set_transport_protocol`,
+`ConnectionGroup::new`, `start_browser_with_descriptor`,
+`set_proxy_configurations`) moves it there, and accessors lend it back as a
+`ReadOnly` view. Metadata, framer messages and privacy contexts, whose setters
+the framework locks or serializes, still share one object across clones.
+
 ## Listeners, TLS and QUIC
 
 - `TcpListener::bind(port)` listens on every interface, so other machines can

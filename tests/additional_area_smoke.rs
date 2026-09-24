@@ -62,10 +62,16 @@ fn connection_area_connect_with_parameters_tracks_snapshots() -> Result<(), Netw
         .set_reuse_local_address(true);
 
     let client = Connection::connect_with_parameters("127.0.0.1", port, &parameters)?;
-    let snapshot = client.parameters().expect("parameters snapshot");
+    let mut snapshot = client.parameters().expect("parameters snapshot");
     assert_eq!(snapshot.required_interface_type(), InterfaceType::Loopback);
     assert!(snapshot.reuse_local_address());
     assert!(snapshot.local_endpoint().is_some());
+    snapshot
+        .set_required_interface_type(InterfaceType::WiFi)
+        .set_reuse_local_address(false);
+    let second = client.parameters().expect("second parameters snapshot");
+    assert_eq!(second.required_interface_type(), InterfaceType::Loopback);
+    assert!(second.reuse_local_address());
 
     let endpoint = client.endpoint().expect("remote endpoint");
     assert_eq!(endpoint.port(), port);
@@ -104,16 +110,13 @@ fn listener_area_bind_with_parameters_updates_connection_limit() -> Result<(), N
 #[test]
 fn browser_area_application_service_descriptor_tracks_names_and_flags() -> Result<(), NetworkError>
 {
-    let descriptor = BrowseDescriptor::application_service("com.example.networkframework")?;
-    let clone = descriptor.clone();
+    let mut descriptor = BrowseDescriptor::application_service("com.example.networkframework")?;
     assert_eq!(
         descriptor.application_service_name().as_deref(),
         Some("com.example.networkframework")
     );
-    assert_eq!(
-        clone.application_service_name().as_deref(),
-        Some("com.example.networkframework")
-    );
+    descriptor.set_include_txt_record(true);
+    assert!(descriptor.include_txt_record());
 
     let combined = BrowseResultChange::from_bits(
         BrowseResultChange::RESULT_ADDED.bits() | BrowseResultChange::TXT_RECORD_CHANGED.bits(),
@@ -134,21 +137,28 @@ fn parameters_area_clone_keeps_protocol_stack_independent() -> Result<(), Networ
         .set_reuse_local_address(true)
         .set_local_endpoint(Some(&local_endpoint))
         .set_service_class(ServiceClass::ResponsiveData);
-    original.prepend_application_protocol(&websocket)?;
+    original.prepend_application_protocol(websocket)?;
 
-    let cloned = original.clone();
+    let mut cloned = original.clone();
 
     original
         .set_required_interface_type(InterfaceType::WiFi)
         .set_reuse_local_address(false)
         .set_local_endpoint(None)
         .set_service_class(ServiceClass::Background);
+    original
+        .default_protocol_stack()
+        .expect("original protocol stack")
+        .clear_application_protocols();
 
     let cloned_endpoint = cloned.local_endpoint().expect("cloned local endpoint");
-    let cloned_stack = cloned
+    let cloned_definitions: Vec<_> = cloned
         .default_protocol_stack()
-        .expect("cloned protocol stack");
-    let cloned_protocols = cloned_stack.application_protocols();
+        .expect("cloned protocol stack")
+        .application_protocols()
+        .iter()
+        .map(|protocol| protocol.definition())
+        .collect();
     let websocket_definition = ProtocolDefinition::websocket()?;
 
     assert_eq!(cloned.required_interface_type(), InterfaceType::Loopback);
@@ -156,8 +166,7 @@ fn parameters_area_clone_keeps_protocol_stack_independent() -> Result<(), Networ
     assert_eq!(cloned.service_class(), ServiceClass::ResponsiveData);
     assert_eq!(cloned_endpoint.port(), 0);
     assert!(cloned_endpoint.address_string().is_some());
-    assert_eq!(cloned_protocols.len(), 1);
-    assert_eq!(cloned_protocols[0].definition(), Some(websocket_definition));
+    assert_eq!(cloned_definitions, vec![Some(websocket_definition)]);
 
     assert_eq!(original.required_interface_type(), InterfaceType::WiFi);
     assert!(!original.reuse_local_address());

@@ -300,13 +300,10 @@ impl ConnectionParameters {
     where
         F: FnOnce(&mut SecurityProtocolOptions),
     {
-        let tls = ProtocolOptions::tls()?;
-        let mut security = tls.tls_security_options().ok_or_else(|| {
-            NetworkError::InvalidArgument("TLS options carry no security options".into())
-        })?;
-        configure(&mut security);
+        let mut tls = ProtocolOptions::tls()?;
+        tls.configure_tls_security(configure)?;
         let mut parameters = Self::tcp()?;
-        parameters.prepend_application_protocol(&tls)?;
+        parameters.prepend_application_protocol(tls)?;
         Ok(parameters)
     }
 
@@ -314,22 +311,26 @@ impl ConnectionParameters {
     where
         F: FnOnce(&mut SecurityProtocolOptions),
     {
-        let parameters = Self::quic(alpn)?;
-        let transport = parameters
-            .default_protocol_stack()
-            .and_then(|stack| stack.transport_protocol())
-            .filter(ProtocolOptions::is_quic)
-            .ok_or_else(|| {
-                NetworkError::InvalidArgument("QUIC parameters carry no QUIC transport".into())
+        let mut parameters = Self::quic(alpn)?;
+        {
+            let stack = parameters.default_protocol_stack().ok_or_else(|| {
+                NetworkError::InvalidArgument("QUIC parameters carry no protocol stack".into())
             })?;
-        let handle = unsafe { ffi::nw_shim_quic_copy_sec_protocol_options(transport.as_ptr()) };
-        if handle.is_null() {
-            return Err(NetworkError::InvalidArgument(
-                "QUIC options carry no security options".into(),
-            ));
+            let transport = stack
+                .transport_protocol()
+                .filter(|transport| transport.is_quic())
+                .ok_or_else(|| {
+                    NetworkError::InvalidArgument("QUIC parameters carry no QUIC transport".into())
+                })?;
+            let handle = unsafe { ffi::nw_shim_quic_copy_sec_protocol_options(transport.as_ptr()) };
+            if handle.is_null() {
+                return Err(NetworkError::InvalidArgument(
+                    "QUIC options carry no security options".into(),
+                ));
+            }
+            let mut security = unsafe { SecurityProtocolOptions::from_raw(handle) };
+            configure(&mut security);
         }
-        let mut security = unsafe { SecurityProtocolOptions::from_raw(handle) };
-        configure(&mut security);
         Ok(parameters)
     }
 }

@@ -19,6 +19,7 @@ use crate::error::NetworkError;
 use crate::ffi;
 use crate::parameters::ConnectionParameters;
 use crate::protocol::ProtocolOptions;
+use crate::read_only::ReadOnly;
 use doom_fish_utils::panic_safe::catch_user_panic;
 
 /// Result of [`Framer::on_start`].
@@ -383,9 +384,9 @@ impl FramerContext {
 
     /// Copy the protocol options associated with the framer.
     #[must_use]
-    pub fn options(&self) -> Option<ProtocolOptions> {
+    pub fn options(&self) -> Option<ReadOnly<'_, ProtocolOptions>> {
         let handle = unsafe { ffi::nw_shim_framer_copy_options(self.handle) };
-        (!handle.is_null()).then_some(unsafe { ProtocolOptions::from_raw(handle) })
+        (!handle.is_null()).then(|| ReadOnly::new(unsafe { ProtocolOptions::from_raw(handle) }))
     }
 
     /// Parse available input bytes.

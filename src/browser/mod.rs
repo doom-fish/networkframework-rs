@@ -14,6 +14,7 @@ use crate::error::{FrameworkError, NetworkError};
 use crate::ffi;
 use crate::interface::{InterfaceType, NetworkInterface};
 use crate::parameters::ConnectionParameters;
+use crate::read_only::ReadOnly;
 use crate::txt_record::TxtRecord;
 
 /// One Bonjour service that the browser has observed appearing or
@@ -311,13 +312,6 @@ impl BrowseDescriptor {
     }
 }
 
-impl Clone for BrowseDescriptor {
-    fn clone(&self) -> Self {
-        let handle = unsafe { ffi::nw_shim_retain_object(self.handle) };
-        Self { handle }
-    }
-}
-
 impl Drop for BrowseDescriptor {
     fn drop(&mut self) {
         if !self.handle.is_null() {
@@ -361,9 +355,9 @@ impl std::fmt::Debug for Browser {
 impl Browser {
     /// Copy the active browse descriptor.
     #[must_use]
-    pub fn browse_descriptor(&self) -> Option<BrowseDescriptor> {
+    pub fn browse_descriptor(&self) -> Option<ReadOnly<'_, BrowseDescriptor>> {
         let handle = unsafe { ffi::nw_shim_browser_copy_browse_descriptor(self.handle) };
-        (!handle.is_null()).then_some(BrowseDescriptor { handle })
+        (!handle.is_null()).then(|| ReadOnly::new(BrowseDescriptor { handle }))
     }
 
     /// Copy the browser's current parameters snapshot.
@@ -422,9 +416,9 @@ impl std::fmt::Debug for BrowseResultsBrowser {
 impl BrowseResultsBrowser {
     /// Copy the active browse descriptor.
     #[must_use]
-    pub fn browse_descriptor(&self) -> Option<BrowseDescriptor> {
+    pub fn browse_descriptor(&self) -> Option<ReadOnly<'_, BrowseDescriptor>> {
         let handle = unsafe { ffi::nw_shim_browser_copy_browse_descriptor(self.handle) };
-        (!handle.is_null()).then_some(BrowseDescriptor { handle })
+        (!handle.is_null()).then(|| ReadOnly::new(BrowseDescriptor { handle }))
     }
 
     /// Copy the browser's current parameters snapshot.
@@ -545,7 +539,7 @@ unsafe fn cstr_to_string(p: *const c_char) -> String {
 
 /// Start browsing with an explicit descriptor and optional parameters.
 pub fn start_browser_with_descriptor<F>(
-    descriptor: &BrowseDescriptor,
+    descriptor: BrowseDescriptor,
     parameters: Option<&ConnectionParameters>,
     callback: F,
 ) -> Result<Browser, NetworkError>
@@ -564,6 +558,7 @@ where
             Some(CallbackContext::<Cb>::RELEASE),
         )
     };
+    drop(descriptor);
     if handle.is_null() {
         return Err(NetworkError::ListenFailed);
     }
@@ -576,7 +571,7 @@ where
 
 /// Start browsing with rich browse-result objects and change metadata.
 pub fn start_browser_results_with_descriptor<F>(
-    descriptor: &BrowseDescriptor,
+    descriptor: BrowseDescriptor,
     parameters: Option<&ConnectionParameters>,
     callback: F,
 ) -> Result<BrowseResultsBrowser, NetworkError>
@@ -594,6 +589,7 @@ where
             Some(CallbackContext::<ResultsCb>::RELEASE),
         )
     };
+    drop(descriptor);
     if handle.is_null() {
         return Err(NetworkError::ListenFailed);
     }
@@ -614,7 +610,7 @@ where
     F: FnMut(BrowserEvent) + Send + 'static,
 {
     let descriptor = BrowseDescriptor::bonjour_service(service_type, domain)?;
-    start_browser_with_descriptor(&descriptor, None, callback)
+    start_browser_with_descriptor(descriptor, None, callback)
 }
 
 /// RAII guard for a running Bonjour service advertisement. Drop to

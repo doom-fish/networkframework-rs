@@ -16,6 +16,7 @@ use crate::ffi;
 use crate::parameters::ConnectionParameters;
 use crate::path::Path;
 use crate::protocol::{ProtocolDefinition, ProtocolMetadata, ProtocolOptions};
+use crate::read_only::ReadOnly;
 
 fn to_cstring(value: &str, field: &str) -> Result<CString, NetworkError> {
     CString::new(value).map_err(|e| NetworkError::InvalidArgument(format!("{field} NUL byte: {e}")))
@@ -134,13 +135,6 @@ impl ConnectionGroupDescriptor {
     }
 }
 
-impl Clone for ConnectionGroupDescriptor {
-    fn clone(&self) -> Self {
-        let handle = unsafe { ffi::nw_shim_retain_object(self.handle) };
-        Self { handle }
-    }
-}
-
 impl Drop for ConnectionGroupDescriptor {
     fn drop(&mut self) {
         if !self.handle.is_null() {
@@ -173,7 +167,7 @@ impl ConnectionGroupState {
 }
 
 /// An inbound connection-group message.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ConnectionGroupMessage {
     pub data: Vec<u8>,
     pub context: Option<ContentContext>,
@@ -209,12 +203,13 @@ impl std::fmt::Debug for ConnectionGroup {
 impl ConnectionGroup {
     /// Create a connection group from a descriptor and parameters.
     pub fn new(
-        descriptor: &ConnectionGroupDescriptor,
+        descriptor: ConnectionGroupDescriptor,
         parameters: &crate::ConnectionParameters,
     ) -> Result<Self, NetworkError> {
         let handle = unsafe {
             ffi::nw_shim_connection_group_create(descriptor.as_ptr(), parameters.as_ptr())
         };
+        drop(descriptor);
         if handle.is_null() {
             return Err(NetworkError::InvalidArgument(
                 "failed to create connection group".into(),
@@ -353,9 +348,9 @@ impl ConnectionGroup {
 
     /// Copy the underlying group descriptor.
     #[must_use]
-    pub fn descriptor(&self) -> Option<ConnectionGroupDescriptor> {
+    pub fn descriptor(&self) -> Option<ReadOnly<'_, ConnectionGroupDescriptor>> {
         let handle = unsafe { ffi::nw_shim_connection_group_copy_descriptor(self.handle) };
-        (!handle.is_null()).then_some(ConnectionGroupDescriptor { handle })
+        (!handle.is_null()).then(|| ReadOnly::new(ConnectionGroupDescriptor { handle }))
     }
 
     /// Copy the group's parameters snapshot.

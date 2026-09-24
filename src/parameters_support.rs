@@ -1,6 +1,7 @@
 #![allow(clippy::missing_errors_doc, clippy::semicolon_if_nothing_returned)]
 
 use core::ffi::{c_char, c_int, c_void};
+use core::marker::PhantomData;
 use std::ffi::{CStr, CString};
 
 use crate::{
@@ -11,6 +12,7 @@ use crate::{
     interface_support::{network_interface_from_handle, network_interface_from_parts},
     parameters::ConnectionParameters,
     protocol::ProtocolOptions,
+    read_only::ReadOnly,
 };
 
 fn to_cstring(value: &str, field: &str) -> Result<CString, NetworkError> {
@@ -131,24 +133,28 @@ impl ExpiredDnsBehavior {
 }
 
 /// Mutable wrapper around `nw_protocol_stack_t`.
-pub struct ProtocolStack {
+pub struct ProtocolStack<'a> {
     handle: *mut c_void,
+    parameters: PhantomData<&'a mut ConnectionParameters>,
 }
 
-unsafe impl Send for ProtocolStack {}
+unsafe impl Send for ProtocolStack<'_> {}
 
-impl std::fmt::Debug for ProtocolStack {
+impl std::fmt::Debug for ProtocolStack<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ProtocolStack")
             .field("handle", &self.handle)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
-impl ProtocolStack {
+impl ProtocolStack<'_> {
     #[must_use]
-    pub(crate) const unsafe fn from_raw(handle: *mut c_void) -> Self {
-        Self { handle }
+    pub(crate) unsafe fn from_raw(handle: *mut c_void) -> Self {
+        Self {
+            handle,
+            parameters: PhantomData,
+        }
     }
 
     /// Remove every application protocol from the stack.
@@ -159,7 +165,7 @@ impl ProtocolStack {
 
     /// Copy the current application-protocol list.
     #[must_use]
-    pub fn application_protocols(&self) -> Vec<ProtocolOptions> {
+    pub fn application_protocols(&self) -> Vec<ReadOnly<'_, ProtocolOptions>> {
         let mut count = 0_usize;
         let items = unsafe {
             ffi::nw_shim_protocol_stack_copy_application_protocols(self.handle, &raw mut count)
@@ -170,9 +176,8 @@ impl ProtocolStack {
         let slice = unsafe { std::slice::from_raw_parts(items, count) };
         let protocols = slice
             .iter()
-            .filter_map(|handle| {
-                (!handle.is_null()).then_some(unsafe { ProtocolOptions::from_raw(*handle) })
-            })
+            .filter(|handle| !handle.is_null())
+            .map(|handle| ReadOnly::new(unsafe { ProtocolOptions::from_raw(*handle) }))
             .collect();
         unsafe { ffi::nw_shim_free_buffer(items.cast()) };
         protocols
@@ -180,35 +185,29 @@ impl ProtocolStack {
 
     /// Copy the transport protocol, if one is configured.
     #[must_use]
-    pub fn transport_protocol(&self) -> Option<ProtocolOptions> {
+    pub fn transport_protocol(&self) -> Option<ReadOnly<'_, ProtocolOptions>> {
         let handle = unsafe { ffi::nw_shim_protocol_stack_copy_transport_protocol(self.handle) };
-        (!handle.is_null()).then_some(unsafe { ProtocolOptions::from_raw(handle) })
+        (!handle.is_null()).then(|| ReadOnly::new(unsafe { ProtocolOptions::from_raw(handle) }))
     }
 
     /// Replace the current transport protocol.
-    pub fn set_transport_protocol(&mut self, protocol: &ProtocolOptions) -> &mut Self {
+    pub fn set_transport_protocol(&mut self, protocol: ProtocolOptions) -> &mut Self {
         unsafe {
             ffi::nw_shim_protocol_stack_set_transport_protocol(self.handle, protocol.as_ptr())
         };
+        drop(protocol);
         self
     }
 
     /// Copy the internet protocol, if one is configured.
     #[must_use]
-    pub fn internet_protocol(&self) -> Option<ProtocolOptions> {
+    pub fn internet_protocol(&self) -> Option<ReadOnly<'_, ProtocolOptions>> {
         let handle = unsafe { ffi::nw_shim_protocol_stack_copy_internet_protocol(self.handle) };
-        (!handle.is_null()).then_some(unsafe { ProtocolOptions::from_raw(handle) })
+        (!handle.is_null()).then(|| ReadOnly::new(unsafe { ProtocolOptions::from_raw(handle) }))
     }
 }
 
-impl Clone for ProtocolStack {
-    fn clone(&self) -> Self {
-        let handle = unsafe { ffi::nw_shim_retain_object(self.handle) };
-        Self { handle }
-    }
-}
-
-impl Drop for ProtocolStack {
+impl Drop for ProtocolStack<'_> {
     fn drop(&mut self) {
         if !self.handle.is_null() {
             unsafe { ffi::nw_shim_release_object(self.handle) };
@@ -440,7 +439,7 @@ impl ConnectionParameters {
 
     /// Copy the default protocol stack for these parameters.
     #[must_use]
-    pub fn default_protocol_stack(&self) -> Option<ProtocolStack> {
+    pub fn default_protocol_stack(&mut self) -> Option<ProtocolStack<'_>> {
         let handle = unsafe { ffi::nw_shim_parameters_copy_default_protocol_stack(self.as_ptr()) };
         (!handle.is_null()).then_some(unsafe { ProtocolStack::from_raw(handle) })
     }

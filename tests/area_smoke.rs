@@ -156,7 +156,7 @@ fn browser_area_descriptor_and_start() -> Result<(), networkframework::NetworkEr
 
     let events = Arc::new(Mutex::new(Vec::new()));
     let events_for_callback = Arc::clone(&events);
-    let mut browser = start_browser_with_descriptor(&descriptor, None, move |event| {
+    let mut browser = start_browser_with_descriptor(descriptor, None, move |event| {
         events_for_callback.lock().expect("events lock").push(event);
     })?;
     let states = Arc::new(Mutex::new(Vec::new()));
@@ -168,13 +168,21 @@ fn browser_area_descriptor_and_start() -> Result<(), networkframework::NetworkEr
         }
         states_for_callback.lock().expect("states lock").push(state);
     });
-    let _ = browser.browse_descriptor();
+    let active = browser
+        .browse_descriptor()
+        .expect("active browse descriptor");
+    assert_eq!(
+        active.bonjour_service_type().as_deref(),
+        Some("_nfwtest._tcp")
+    );
+    assert!(active.include_txt_record());
+    drop(active);
     let _ = browser.parameters();
 
     let result_changes = Arc::new(Mutex::new(Vec::new()));
     let result_changes_for_callback = Arc::clone(&result_changes);
     let mut results_browser = start_browser_results_with_descriptor(
-        &descriptor,
+        BrowseDescriptor::bonjour_service("_nfwtest._tcp", Some("local"))?,
         None,
         move |old_result, new_result, changes, _batch_complete| {
             if let Some(result) = old_result.as_ref() {
@@ -238,8 +246,7 @@ fn parameters_area_supports_policy_controls() -> Result<(), networkframework::Ne
     assert!(parameters.prohibit_constrained());
     let _ = parameters.allow_ultra_constrained();
 
-    let websocket = ProtocolOptions::websocket()?;
-    parameters.prepend_application_protocol(&websocket)?;
+    parameters.prepend_application_protocol(ProtocolOptions::websocket()?)?;
 
     let _tcp = ConnectionParameters::tcp()?;
     let _tls_tcp = ConnectionParameters::tls_tcp()?;
@@ -302,13 +309,12 @@ fn parameters_area_supports_advanced_knobs() -> Result<(), networkframework::Net
     parameters.clear_prohibited_interface_types();
     assert!(parameters.prohibited_interface_types().is_empty());
 
-    let websocket = ProtocolOptions::websocket()?;
-    parameters.prepend_application_protocol(&websocket)?;
+    parameters.prepend_application_protocol(ProtocolOptions::websocket()?)?;
     let mut stack = parameters.default_protocol_stack().expect("protocol stack");
     assert_eq!(stack.application_protocols().len(), 1);
     let udp = ProtocolOptions::udp()?;
     let udp_definition = udp.definition().expect("udp definition");
-    stack.set_transport_protocol(&udp);
+    stack.set_transport_protocol(udp);
     assert_eq!(
         stack
             .transport_protocol()
@@ -420,8 +426,15 @@ fn group_area_builds_descriptors_and_drops_unstarted_groups(
     assert!(!descriptor.endpoints().is_empty());
 
     let parameters = ConnectionParameters::udp()?;
+    let group = ConnectionGroup::new(descriptor, &parameters)?;
+    let held = group.descriptor().expect("the group keeps its descriptor");
+    assert!(held.disable_unicast_traffic());
+    assert!(!held.endpoints().is_empty());
+    drop(held);
+    drop(group);
     for _ in 0..32 {
-        let mut group = ConnectionGroup::new(&descriptor, &parameters)?;
+        let descriptor = ConnectionGroupDescriptor::multicast("239.255.0.1", 5000)?;
+        let mut group = ConnectionGroup::new(descriptor, &parameters)?;
         group.set_state_changed_handler(|_state| {});
         group.set_new_connection_handler(|_connection| {})?;
         group.set_receive_handler(2048, false, |_message| {})?;
@@ -441,7 +454,7 @@ fn group_area_starts_and_cancels() -> Result<(), networkframework::NetworkError>
     let _ = descriptor.endpoints();
 
     let parameters = ConnectionParameters::udp()?;
-    let mut group = ConnectionGroup::new(&descriptor, &parameters)?;
+    let mut group = ConnectionGroup::new(descriptor, &parameters)?;
 
     let states = Arc::new(Mutex::new(Vec::new()));
     let states_for_callback = Arc::clone(&states);
@@ -495,7 +508,7 @@ fn protocol_area_exposes_definitions_and_options() -> Result<(), networkframewor
 
     let mut tcp_options = ProtocolOptions::tcp()?;
     let mut udp_options = ProtocolOptions::udp()?;
-    let tls_options = ProtocolOptions::tls()?;
+    let mut tls_options = ProtocolOptions::tls()?;
     let mut ip_options = ProtocolOptions::ip()?;
     let mut websocket_options = ProtocolOptions::websocket()?;
     let websocket_v13 = ProtocolOptions::websocket_with_version(WsVersion::V13)?;
@@ -565,7 +578,13 @@ fn protocol_area_exposes_definitions_and_options() -> Result<(), networkframewor
                     .expect("create ws response"),
             )
         });
-    let _ = tls_options.tls_security_options();
+    tls_options.configure_tls_security(|security| {
+        security.set_min_tls_version(networkframework::TlsVersion::Tls12);
+    })?;
+    assert!(matches!(
+        ProtocolOptions::tcp()?.configure_tls_security(|_security| {}),
+        Err(networkframework::NetworkError::InvalidArgument(_))
+    ));
     let mut ip_metadata = ProtocolMetadata::ip()?;
     ip_metadata
         .set_ip_ecn_flag(IpEcnFlag::Ect0)
@@ -607,7 +626,10 @@ fn content_context_area_tracks_properties() -> Result<(), networkframework::Netw
     assert!(context.is_final());
     let _ = context.expiration_milliseconds();
     let _ = context.relative_priority();
-    let _ = context.copy_antecedent();
+    let mut dependent = ContentContext::new("dependent")?;
+    dependent.set_antecedent(Some(&antecedent));
+    assert_eq!(dependent.antecedent_identifier().as_deref(), Some("first"));
+    assert_eq!(antecedent.antecedent_identifier(), None);
     let _ = context.protocol_metadata_entries();
     Ok(())
 }
@@ -656,8 +678,12 @@ fn quic_area_exposes_transport_settings() -> Result<(), networkframework::Networ
     assert_eq!(options.max_udp_payload_size(), 1350);
     assert_eq!(options.max_datagram_frame_size(), 1200);
     assert_eq!(options.idle_timeout(), 15_000);
-    assert!(options.security_options().is_some());
+    let mut configured = false;
+    options.configure_security(|_security| configured = true)?;
+    assert!(configured);
     assert!(options.protocol_options().is_quic());
+    let quic_protocol: ProtocolOptions = options.into();
+    assert!(quic_protocol.is_quic());
 
     let context = ContentContext::new("quic-empty")?;
     assert!(context.copy_quic_metadata().is_none());
@@ -698,8 +724,14 @@ fn proxy_config_area_tracks_domains_and_optional_relay(
         .iter()
         .any(|domain| domain == "internal.example.com"));
     if let Some(mut configuration) = UrlSessionConfiguration::default_session() {
-        configuration.set_proxy_configurations(&[proxy.clone()]);
-        let _ = configuration.proxy_configurations();
+        configuration.set_proxy_configurations(vec![proxy]);
+        let stored = configuration.proxy_configurations();
+        assert_eq!(stored.len(), 1);
+        assert!(stored[0].failover_allowed());
+        assert!(stored[0]
+            .match_domains()
+            .iter()
+            .any(|domain| domain == "example.com"));
     }
     assert!(ErrorDomain::Posix.name().is_some());
 

@@ -40,6 +40,7 @@ mod quic_support;
 #[cfg(feature = "raw-ffi")]
 #[cfg_attr(docsrs, doc(cfg(feature = "raw-ffi")))]
 pub mod raw_ffi;
+mod read_only;
 pub mod resolver;
 pub mod tls;
 pub mod txt_record;
@@ -89,6 +90,7 @@ pub use quic::{QuicConnection, QuicOptions};
 pub use quic_support::{
     QuicMetadata, QuicStreamType, SecurityProtocolMetadata, SecurityProtocolOptions,
 };
+pub use read_only::ReadOnly;
 pub use tls::{certificate_sha256, TlsIdentity, TlsPeer, TlsVersion};
 pub use txt_record::{TxtRecord, TxtRecordEntry, TxtRecordFindResult, TxtRecordLookup};
 pub use udp::UdpClient;
@@ -148,6 +150,7 @@ pub mod prelude {
     pub use crate::quic_support::{
         QuicMetadata, QuicStreamType, SecurityProtocolMetadata, SecurityProtocolOptions,
     };
+    pub use crate::read_only::ReadOnly;
     pub use crate::tls::{certificate_sha256, TlsIdentity, TlsPeer, TlsVersion};
     pub use crate::txt_record::{TxtRecord, TxtRecordEntry, TxtRecordFindResult, TxtRecordLookup};
     pub use crate::udp::UdpClient;

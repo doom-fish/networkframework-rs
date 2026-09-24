@@ -251,19 +251,6 @@ impl Drop for Advertiser {
     }
 }
 
-impl Clone for AdvertiseDescriptor {
-    fn clone(&self) -> Self {
-        let handle = unsafe { ffi::nw_shim_retain_object(self.handle) };
-        Self {
-            handle,
-            bonjour_name: self.bonjour_name.clone(),
-            bonjour_type: self.bonjour_type.clone(),
-            bonjour_domain: self.bonjour_domain.clone(),
-            application_service_name: self.application_service_name.clone(),
-        }
-    }
-}
-
 impl Drop for AdvertiseDescriptor {
     fn drop(&mut self) {
         if !self.handle.is_null() {

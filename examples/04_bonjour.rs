@@ -10,7 +10,7 @@ fn main() -> Result<(), networkframework::NetworkError> {
         descriptor.bonjour_service_domain(),
         descriptor.include_txt_record(),
     );
-    let _browser = start_browser_with_descriptor(&descriptor, None, |event| {
+    let _browser = start_browser_with_descriptor(descriptor, None, |event| {
         println!("browser event: {event:?}");
     })?;
     std::thread::sleep(Duration::from_millis(250));

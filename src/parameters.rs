@@ -237,7 +237,7 @@ impl ConnectionParameters {
     /// Prepend protocol options onto the application protocol stack.
     pub fn prepend_application_protocol(
         &mut self,
-        protocol_options: &crate::protocol::ProtocolOptions,
+        protocol_options: crate::protocol::ProtocolOptions,
     ) -> Result<&mut Self, NetworkError> {
         let status = unsafe {
             ffi::nw_shim_parameters_prepend_application_protocol(
@@ -245,6 +245,7 @@ impl ConnectionParameters {
                 protocol_options.as_ptr(),
             )
         };
+        drop(protocol_options);
         if status != ffi::NW_OK {
             return Err(crate::error::from_status(status));
         }
