@@ -22,7 +22,7 @@ public func nfwParametersRequireInterface(
     _ name: UnsafePointer<CChar>?,
     _ interfaceType: Int32,
     _ index: UInt32
-) {
+) -> Int32 {
     nw_shim_parameters_require_interface(parameters, name, interfaceType, index)
 }
 
@@ -42,7 +42,7 @@ public func nfwParametersProhibitInterface(
     _ name: UnsafePointer<CChar>?,
     _ interfaceType: Int32,
     _ index: UInt32
-) {
+) -> Int32 {
     nw_shim_parameters_prohibit_interface(parameters, name, interfaceType, index)
 }
 

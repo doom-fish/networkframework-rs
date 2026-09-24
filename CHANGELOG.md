@@ -42,6 +42,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   relay configurations, WebSocket responses and content contexts do not lock
   their setters, so retain-sharing `Clone`s and accessors that returned the
   live object raced inside the framework. See **Changed** for the new API.
+- `FramerContext::async_invoke` keeps the framer retained until its block has
+  run, so the callback never receives a framer that was freed in between.
 - `Sync` is removed from mutable Network.framework wrappers whose clones share
   one object: `AdvertiseDescriptor`, `BrowseDescriptor`, `ConnectionGroupDescriptor`,
   `ContentContext`, `FramerMessage`, `ProtocolMetadata`, `ProtocolOptions`,
@@ -82,6 +84,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   30 s connect timeout.
 - A malformed PKCS#12 blob is reported as an error instead of raising an
   uncaught Objective-C exception.
+- `advertise_with_descriptor` advertises the descriptor itself, so its TXT
+  record and no-auto-rename flag take effect. For named Bonjour descriptors it
+  used to register a new service without them.
 
 ### Changed
 
@@ -149,6 +154,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ProtocolMetadata`, `QuicMetadata`, `FramerMessage`, `TxtRecord`,
   `DataTransferReport` and `PrivacyContext` keep their `Clone`: the framework
   locks or serializes their setters (`TxtRecord` clones deeply).
+- **Breaking:** `advertise_with_descriptor` takes the descriptor by value.
+- **Breaking:** `ConnectionParameters::require_interface` and
+  `prohibit_interface` return `NetworkError::InvalidArgument` when no visible
+  interface matches. `require_interface` used to clear the existing
+  requirement silently and `prohibit_interface` did nothing.
 - **Breaking:** `ConnectionGroup::extract_connection` takes
   `Option<&Endpoint>` and `Option<&ProtocolOptions>`: the SDK requires no
   endpoint for multiplex groups, so the old signature could not extract from
@@ -168,6 +178,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `nw_shim_path_monitor_prohibit_interface_type` and
   `nw_shim_listener_subscribe_new_connection_group` are removed, and
   `nw_shim_listener_create_for_groups` is added.
+  `nw_shim_parameters_require_interface` and
+  `nw_shim_parameters_prohibit_interface` return a status.
 - Dropping a connection, listener, group, browser or path monitor no longer
   waits for its queue to drain. No new callback starts after the drop, but one
   that is already running may finish afterwards. A `PathMonitor` cancel

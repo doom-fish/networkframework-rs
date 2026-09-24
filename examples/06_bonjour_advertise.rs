@@ -19,7 +19,7 @@ fn main() -> Result<(), networkframework::NetworkError> {
         descriptor.domain(),
         descriptor.no_auto_rename(),
     );
-    let _advertiser = advertise_with_descriptor(&descriptor, 18_080)?;
+    let _advertiser = advertise_with_descriptor(descriptor, 18_080)?;
     std::thread::sleep(Duration::from_millis(250));
     Ok(())
 }

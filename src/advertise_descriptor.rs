@@ -201,41 +201,18 @@ impl AdvertiseDescriptor {
 }
 
 pub fn advertise_with_descriptor(
-    descriptor: &AdvertiseDescriptor,
+    descriptor: AdvertiseDescriptor,
     port: u16,
 ) -> Result<Advertiser, NetworkError> {
     let mut status = 0;
-    let handle = if let (Some(service_type), Some(service_name)) = (
-        descriptor.bonjour_type.as_deref(),
-        descriptor.bonjour_name.as_deref(),
-    ) {
-        let service_type = to_cstring(service_type, "service_type")?;
-        let service_name = to_cstring(service_name, "service_name")?;
-        let domain = descriptor
-            .bonjour_domain
-            .as_deref()
-            .map(|value| to_cstring(value, "domain"))
-            .transpose()?;
-        unsafe {
-            ffi::nw_shim_bonjour_advertise_start(
-                service_type.as_ptr(),
-                service_name.as_ptr(),
-                domain
-                    .as_ref()
-                    .map_or(core::ptr::null(), |value| value.as_ptr()),
-                port,
-                &raw mut status,
-            )
-        }
-    } else {
-        unsafe {
-            ffi::nw_shim_bonjour_advertise_start_with_descriptor(
-                descriptor.as_ptr(),
-                port,
-                &raw mut status,
-            )
-        }
+    let handle = unsafe {
+        ffi::nw_shim_bonjour_advertise_start_with_descriptor(
+            descriptor.as_ptr(),
+            port,
+            &raw mut status,
+        )
     };
+    drop(descriptor);
     if status != ffi::NW_OK || handle.is_null() {
         return Err(from_status(status));
     }

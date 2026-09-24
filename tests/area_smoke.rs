@@ -278,6 +278,31 @@ fn parameters_area_supports_advanced_knobs() -> Result<(), networkframework::Net
         assert!(parameters.required_interface().is_none());
     }
 
+    let missing = networkframework::NetworkInterface {
+        name: "doomfish-missing0".into(),
+        interface_type: InterfaceType::Wired,
+        index: 0,
+    };
+    if let Some(visible) = networkframework::list_interfaces().into_iter().next() {
+        parameters.require_interface(Some(&visible))?;
+        assert!(matches!(
+            parameters.require_interface(Some(&missing)),
+            Err(networkframework::NetworkError::InvalidArgument(_))
+        ));
+        assert_eq!(
+            parameters
+                .required_interface()
+                .map(|interface| interface.name),
+            Some(visible.name)
+        );
+        parameters.require_interface(None)?;
+    }
+    assert!(matches!(
+        parameters.prohibit_interface(&missing),
+        Err(networkframework::NetworkError::InvalidArgument(_))
+    ));
+    assert!(parameters.prohibited_interfaces().is_empty());
+
     parameters
         .set_reuse_local_address(true)
         .set_include_peer_to_peer(true)
@@ -782,7 +807,7 @@ fn advertise_descriptor_area_builds_and_advertises() -> Result<(), networkframew
     assert_eq!(descriptor.service_type(), Some("_nfwtest._tcp"));
     assert!(descriptor.service_name().is_some());
 
-    let advertiser = advertise_with_descriptor(&descriptor, 18_080)?;
+    let advertiser = advertise_with_descriptor(descriptor, 18_080)?;
     std::thread::sleep(Duration::from_millis(100));
     drop(advertiser);
 

@@ -19,6 +19,13 @@ fn to_cstring(value: &str, field: &str) -> Result<CString, NetworkError> {
     CString::new(value).map_err(|e| NetworkError::InvalidArgument(format!("{field} NUL byte: {e}")))
 }
 
+fn interface_not_found(interface: &NetworkInterface) -> NetworkError {
+    NetworkError::InvalidArgument(format!(
+        "no visible interface named {:?} of type {:?} with index {}",
+        interface.name, interface.interface_type, interface.index
+    ))
+}
+
 unsafe fn copied_optional_string(ptr: *mut c_char) -> Option<String> {
     if ptr.is_null() {
         return None;
@@ -228,21 +235,23 @@ impl ConnectionParameters {
         &mut self,
         interface: Option<&NetworkInterface>,
     ) -> Result<&mut Self, NetworkError> {
-        match interface {
-            Some(interface) => {
-                let name = to_cstring(&interface.name, "interface.name")?;
-                unsafe {
-                    ffi::nw_shim_parameters_require_interface(
-                        self.as_ptr(),
-                        name.as_ptr(),
-                        interface.interface_type.as_raw(),
-                        interface.index,
-                    )
-                };
+        let Some(interface) = interface else {
+            unsafe {
+                ffi::nw_shim_parameters_require_interface(self.as_ptr(), core::ptr::null(), 0, 0);
             }
-            None => unsafe {
-                ffi::nw_shim_parameters_require_interface(self.as_ptr(), core::ptr::null(), 0, 0)
-            },
+            return Ok(self);
+        };
+        let name = to_cstring(&interface.name, "interface.name")?;
+        let status = unsafe {
+            ffi::nw_shim_parameters_require_interface(
+                self.as_ptr(),
+                name.as_ptr(),
+                interface.interface_type.as_raw(),
+                interface.index,
+            )
+        };
+        if status != ffi::NW_OK {
+            return Err(interface_not_found(interface));
         }
         Ok(self)
     }
@@ -274,7 +283,7 @@ impl ConnectionParameters {
         interface: &NetworkInterface,
     ) -> Result<&mut Self, NetworkError> {
         let name = to_cstring(&interface.name, "interface.name")?;
-        unsafe {
+        let status = unsafe {
             ffi::nw_shim_parameters_prohibit_interface(
                 self.as_ptr(),
                 name.as_ptr(),
@@ -282,6 +291,9 @@ impl ConnectionParameters {
                 interface.index,
             )
         };
+        if status != ffi::NW_OK {
+            return Err(interface_not_found(interface));
+        }
         Ok(self)
     }
 

@@ -179,7 +179,7 @@ unsafe extern "C" {
         name: *const c_char,
         interface_type: c_int,
         index: u32,
-    );
+    ) -> c_int;
     #[link_name = "nw_shim_parameters_copy_required_interface"]
     pub fn nw_shim_parameters_copy_required_interface(
         parameters: *mut c_void,
@@ -193,7 +193,7 @@ unsafe extern "C" {
         name: *const c_char,
         interface_type: c_int,
         index: u32,
-    );
+    ) -> c_int;
     #[link_name = "nw_shim_parameters_clear_prohibited_interfaces"]
     pub fn nw_shim_parameters_clear_prohibited_interfaces(parameters: *mut c_void);
     #[link_name = "nw_shim_parameters_copy_prohibited_interfaces"]

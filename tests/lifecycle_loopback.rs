@@ -329,6 +329,72 @@ fn framer_factory_outlives_rewrapped_parameters() -> Result<(), NetworkError> {
     Ok(())
 }
 
+struct AsyncReadyFramer {
+    marked: Arc<AtomicUsize>,
+}
+
+impl Framer for AsyncReadyFramer {
+    fn on_start(&mut self, context: &mut FramerContext) -> FramerStart {
+        let marked = Arc::clone(&self.marked);
+        context.async_invoke(move |context| {
+            marked.fetch_add(1, Ordering::SeqCst);
+            context.mark_ready();
+        });
+        FramerStart::WillMarkReady
+    }
+
+    fn on_input(&mut self, context: &mut FramerContext) -> usize {
+        context.pass_through_input();
+        0
+    }
+
+    fn on_output(
+        &mut self,
+        context: &mut FramerContext,
+        _message: Option<FramerMessageView<'_>>,
+        _message_length: usize,
+        _is_complete: bool,
+    ) {
+        context.pass_through_output();
+    }
+
+    fn on_stop(&mut self, _context: &mut FramerContext) -> bool {
+        true
+    }
+}
+
+#[test]
+fn framer_async_invocations_mark_the_connection_ready() -> Result<(), NetworkError> {
+    let server = std::net::TcpListener::bind("127.0.0.1:0").expect("bind std listener");
+    let port = server.local_addr().expect("addr").port();
+    let accept_thread = thread::spawn(move || {
+        let mut streams = Vec::new();
+        for _ in 0..4 {
+            if let Ok((stream, _)) = server.accept() {
+                streams.push(stream);
+            }
+        }
+        streams
+    });
+
+    let marked = Arc::new(AtomicUsize::new(0));
+    let factory_marked = Arc::clone(&marked);
+    let definition = FramerDefinition::new("doomfish-async-ready", move || AsyncReadyFramer {
+        marked: Arc::clone(&factory_marked),
+    })?;
+    let options = definition.options()?;
+    let mut parameters = ConnectionParameters::tcp()?;
+    parameters.prepend_framer(&options)?;
+    for round in 1..=4 {
+        let client = TcpClient::connect_with_parameters("127.0.0.1", port, &parameters)?;
+        assert!(marked.load(Ordering::SeqCst) >= round);
+        drop(client);
+    }
+    let streams = accept_thread.join().expect("accept thread");
+    assert_eq!(streams.len(), 4);
+    Ok(())
+}
+
 fn openssl() -> Option<&'static Path> {
     let path = Path::new("/usr/bin/openssl");
     path.exists().then_some(path)

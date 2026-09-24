@@ -2877,8 +2877,10 @@ void nw_shim_framer_async(void *framer, nw_shim_framer_async_fn async_callback, 
         return;
     }
     if (__builtin_available(macOS 10.15, *)) {
-        nw_framer_async((nw_framer_t)framer, ^{
-            async_callback(framer, user_info);
+        nw_framer_t retained = nw_retain((nw_framer_t)framer);
+        nw_framer_async(retained, ^{
+            async_callback(retained, user_info);
+            nw_release(retained);
         });
     }
 }
@@ -4164,19 +4166,21 @@ static nw_interface_t nw_shim_copy_matching_interface(const char *name, int inte
     return interface;
 }
 
-void nw_shim_parameters_require_interface(void *parameters, const char *name, int interface_type, uint32_t index) {
+int nw_shim_parameters_require_interface(void *parameters, const char *name, int interface_type, uint32_t index) {
     if (!parameters) {
-        return;
+        return NW_INVALID_ARG;
     }
     if (!name && index == 0) {
         nw_parameters_require_interface((nw_parameters_t)parameters, NULL);
-        return;
+        return NW_OK;
     }
     nw_interface_t interface = nw_shim_copy_matching_interface(name, interface_type, index);
-    nw_parameters_require_interface((nw_parameters_t)parameters, interface);
-    if (interface) {
-        nw_release(interface);
+    if (!interface) {
+        return NW_INVALID_ARG;
     }
+    nw_parameters_require_interface((nw_parameters_t)parameters, interface);
+    nw_release(interface);
+    return NW_OK;
 }
 
 int nw_shim_parameters_copy_required_interface(void *parameters, char **out_name, int *out_type, uint32_t *out_index) {
@@ -4210,16 +4214,17 @@ int nw_shim_parameters_copy_required_interface(void *parameters, char **out_name
     return 1;
 }
 
-void nw_shim_parameters_prohibit_interface(void *parameters, const char *name, int interface_type, uint32_t index) {
+int nw_shim_parameters_prohibit_interface(void *parameters, const char *name, int interface_type, uint32_t index) {
     if (!parameters || !name) {
-        return;
+        return NW_INVALID_ARG;
     }
     nw_interface_t interface = nw_shim_copy_matching_interface(name, interface_type, index);
     if (!interface) {
-        return;
+        return NW_INVALID_ARG;
     }
     nw_parameters_prohibit_interface((nw_parameters_t)parameters, interface);
     nw_release(interface);
+    return NW_OK;
 }
 
 void nw_shim_parameters_clear_prohibited_interfaces(void *parameters) {

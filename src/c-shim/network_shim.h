@@ -512,9 +512,9 @@ char *nw_shim_interface_copy_name(void *interface);
 int nw_shim_interface_get_type(void *interface);
 uint32_t nw_shim_interface_get_index(void *interface);
 
-void nw_shim_parameters_require_interface(void *parameters, const char *name, int interface_type, uint32_t index);
+int nw_shim_parameters_require_interface(void *parameters, const char *name, int interface_type, uint32_t index);
 int nw_shim_parameters_copy_required_interface(void *parameters, char **out_name, int *out_type, uint32_t *out_index);
-void nw_shim_parameters_prohibit_interface(void *parameters, const char *name, int interface_type, uint32_t index);
+int nw_shim_parameters_prohibit_interface(void *parameters, const char *name, int interface_type, uint32_t index);
 void nw_shim_parameters_clear_prohibited_interfaces(void *parameters);
 void **nw_shim_parameters_copy_prohibited_interfaces(void *parameters, size_t *out_count);
 void nw_shim_parameters_prohibit_interface_type(void *parameters, int interface_type);
