@@ -31,13 +31,22 @@ impl std::fmt::Debug for AdvertiseDescriptor {
     }
 }
 
+/// RAII guard for an advertisement started by [`advertise_with_descriptor`].
+/// Its listener refuses every inbound connection.
+#[deprecated(
+    since = "0.15.0",
+    note = "advertise from the listener that serves the connections: `TcpListener::builder(&parameters).port(port).advertise(descriptor).bind()`"
+)]
 pub struct Advertiser {
     handle: *mut c_void,
 }
 
+#[allow(deprecated)]
 unsafe impl Send for Advertiser {}
+#[allow(deprecated)]
 unsafe impl Sync for Advertiser {}
 
+#[allow(deprecated)]
 impl std::fmt::Debug for Advertiser {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Advertiser")
@@ -200,6 +209,13 @@ impl AdvertiseDescriptor {
     }
 }
 
+/// Advertise `descriptor` from a listener on `port` that uses default TCP
+/// parameters and refuses every inbound connection.
+#[deprecated(
+    since = "0.15.0",
+    note = "advertise from the listener that serves the connections: `TcpListener::builder(&parameters).port(port).advertise(descriptor).bind()`"
+)]
+#[allow(deprecated)]
 pub fn advertise_with_descriptor(
     descriptor: AdvertiseDescriptor,
     port: u16,
@@ -219,6 +235,7 @@ pub fn advertise_with_descriptor(
     Ok(Advertiser { handle })
 }
 
+#[allow(deprecated)]
 impl Drop for Advertiser {
     fn drop(&mut self) {
         if !self.handle.is_null() {

@@ -873,13 +873,13 @@ fn group_listener_delivers_groups_and_refuses_accept() -> Result<(), NetworkErro
         tls.set_local_identity(&identity);
     })?;
     let (group_tx, group_rx) = mpsc::channel();
-    let listener = TcpListener::bind_with_group_handler(
-        0,
-        &loopback_only(server_parameters)?,
-        move |group| {
+    let server_parameters = loopback_only(server_parameters)?;
+    let listener = TcpListener::builder(&server_parameters)
+        .port(0)
+        .on_new_connection_group(move |group| {
             let _ = group_tx.send(group);
-        },
-    )?;
+        })
+        .bind()?;
     assert!(matches!(
         listener.accept(),
         Err(NetworkError::InvalidArgument(_))

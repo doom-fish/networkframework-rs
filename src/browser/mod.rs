@@ -615,13 +615,20 @@ where
 
 /// RAII guard for a running Bonjour service advertisement. Drop to
 /// stop publishing the service to the local network.
+#[deprecated(
+    since = "0.15.0",
+    note = "advertise from the listener that serves the connections: `TcpListener::builder(&parameters).port(port).advertise(descriptor).bind()`"
+)]
 pub struct BonjourAdvertiser {
     handle: *mut c_void,
 }
 
+#[allow(deprecated)]
 unsafe impl Send for BonjourAdvertiser {}
+#[allow(deprecated)]
 unsafe impl Sync for BonjourAdvertiser {}
 
+#[allow(deprecated)]
 impl std::fmt::Debug for BonjourAdvertiser {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BonjourAdvertiser")
@@ -630,6 +637,7 @@ impl std::fmt::Debug for BonjourAdvertiser {
     }
 }
 
+#[allow(deprecated)]
 impl Drop for BonjourAdvertiser {
     fn drop(&mut self) {
         if !self.handle.is_null() {
@@ -639,7 +647,13 @@ impl Drop for BonjourAdvertiser {
     }
 }
 
-/// Publish a Bonjour service on the local network.
+/// Publish a Bonjour service on the local network from a listener on `port`
+/// that uses default TCP parameters and refuses every inbound connection.
+#[deprecated(
+    since = "0.15.0",
+    note = "advertise from the listener that serves the connections: `TcpListener::builder(&parameters).port(port).advertise(descriptor).bind()`"
+)]
+#[allow(deprecated)]
 pub fn advertise_bonjour_service(
     service_type: &str,
     service_name: &str,

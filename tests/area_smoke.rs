@@ -4,18 +4,17 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use networkframework::{
-    advertise_with_descriptor, start_browser_results_with_descriptor,
-    start_browser_with_descriptor, start_path_monitor_for_ethernet_channel,
-    start_path_monitor_with_type, AdvertiseDescriptor, BrowseDescriptor, BrowserEvent,
-    BrowserState, ConnectionGroup, ConnectionGroupDescriptor, ConnectionGroupState,
-    ConnectionParameters, ContentContext, DataTransferReportState, Endpoint, EndpointType,
-    ErrorDomain, EthernetChannel, ExpiredDnsBehavior, Framer, FramerContext, FramerDefinition,
-    FramerMessageView, FramerStart, InterfaceType, IpEcnFlag, IpLocalAddressPreference, IpVersion,
-    MultipathService, ParametersAttribution, PathMonitorBuilder, PathStatus, PathUpdate,
-    PrivacyContext, ProtocolDefinition, ProtocolMetadata, ProtocolOptions, ProxyConfig,
-    QuicOptions, RelayHop, ResolverConfig, ServiceClass, TcpClient, TcpListener,
-    TcpMultipathVersion, TxtRecord, TxtRecordFindResult, UrlSessionConfiguration, WsCloseCode,
-    WsResponse, WsResponseStatus, WsVersion,
+    start_browser_results_with_descriptor, start_browser_with_descriptor,
+    start_path_monitor_for_ethernet_channel, start_path_monitor_with_type, AdvertiseDescriptor,
+    BrowseDescriptor, BrowserEvent, BrowserState, ConnectionGroup, ConnectionGroupDescriptor,
+    ConnectionGroupState, ConnectionParameters, ContentContext, DataTransferReportState, Endpoint,
+    EndpointType, ErrorDomain, EthernetChannel, ExpiredDnsBehavior, Framer, FramerContext,
+    FramerDefinition, FramerMessageView, FramerStart, InterfaceType, IpEcnFlag,
+    IpLocalAddressPreference, IpVersion, MultipathService, ParametersAttribution,
+    PathMonitorBuilder, PathStatus, PathUpdate, PrivacyContext, ProtocolDefinition,
+    ProtocolMetadata, ProtocolOptions, ProxyConfig, QuicOptions, RelayHop, ResolverConfig,
+    ServiceClass, TcpClient, TcpListener, TcpMultipathVersion, TxtRecord, TxtRecordFindResult,
+    UrlSessionConfiguration, WsCloseCode, WsResponse, WsResponseStatus, WsVersion,
 };
 
 fn unique_label(prefix: &str) -> String {
@@ -786,7 +785,9 @@ fn advertise_descriptor_area_builds_descriptors() -> Result<(), networkframework
         "_nfwtest._tcp",
         Some("local"),
     )?;
-    descriptor.set_txt_record(b"k=v").set_no_auto_rename(true);
+    descriptor
+        .set_txt_record(b"\x03k=v")
+        .set_no_auto_rename(true);
     assert!(descriptor.no_auto_rename());
     assert_eq!(descriptor.service_type(), Some("_nfwtest._tcp"));
     assert!(descriptor.service_name().is_some());
@@ -804,13 +805,18 @@ fn advertise_descriptor_area_builds_descriptors() -> Result<(), networkframework
 
 #[test]
 #[ignore = "advertising listens on every interface"]
+#[allow(deprecated)]
 fn advertise_descriptor_area_builds_and_advertises() -> Result<(), networkframework::NetworkError> {
+    use networkframework::advertise_with_descriptor;
+
     let mut descriptor = AdvertiseDescriptor::bonjour_service(
         Some(&unique_label("service")),
         "_nfwtest._tcp",
         Some("local"),
     )?;
-    descriptor.set_txt_record(b"k=v").set_no_auto_rename(true);
+    descriptor
+        .set_txt_record(b"\x03k=v")
+        .set_no_auto_rename(true);
     assert!(descriptor.no_auto_rename());
     assert_eq!(descriptor.service_type(), Some("_nfwtest._tcp"));
     assert!(descriptor.service_name().is_some());
@@ -1002,8 +1008,10 @@ fn advanced_path_monitor_and_misc_area_smoke() -> Result<(), networkframework::N
 
     let mut parameters = ConnectionParameters::tcp()?;
     parameters.set_local_endpoint(Some(&Endpoint::address("127.0.0.1", 0)?));
-    let _ = TcpListener::bind_direct(&parameters);
-    let _ = TcpListener::bind_with_launchd_key(&parameters, "com.example.networkframework.test");
+    let _ = TcpListener::builder(&parameters).bind();
+    let _ = TcpListener::builder(&parameters)
+        .launchd_key("com.example.networkframework.test")
+        .bind();
 
     Ok(())
 }

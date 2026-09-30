@@ -47,12 +47,15 @@ pub mod txt_record;
 pub mod udp;
 pub mod websocket;
 
-pub use advertise_descriptor::{advertise_with_descriptor, AdvertiseDescriptor, Advertiser};
+pub use advertise_descriptor::AdvertiseDescriptor;
+#[allow(deprecated)]
+pub use advertise_descriptor::{advertise_with_descriptor, Advertiser};
+#[allow(deprecated)]
+pub use browser::{advertise_bonjour_service, BonjourAdvertiser};
 pub use browser::{
-    advertise_bonjour_service, start_browser, start_browser_results_with_descriptor,
-    start_browser_with_descriptor, BonjourAdvertiser, BrowseDescriptor, BrowseResult,
-    BrowseResultChange, BrowseResultsBrowser, Browser, BrowserEvent, BrowserState,
-    DiscoveredService,
+    start_browser, start_browser_results_with_descriptor, start_browser_with_descriptor,
+    BrowseDescriptor, BrowseResult, BrowseResultChange, BrowseResultsBrowser, Browser,
+    BrowserEvent, BrowserState, DiscoveredService,
 };
 pub use client::{ContentContext, ReceivedContent, TcpClient};
 pub use connection::Connection;
@@ -73,7 +76,7 @@ pub use framer::{
 pub use group::{Group, GroupDescriptor, GroupMessage, GroupState};
 pub use interface::{list_interfaces, InterfaceType, NetworkInterface};
 pub use interface_support::InterfaceRadioType;
-pub use listener::TcpListener;
+pub use listener::{ListenerBuilder, TcpListener};
 pub use parameters::{ConnectionParameters, ParametersAttribution};
 pub use parameters_support::{ExpiredDnsBehavior, MultipathService, ProtocolStack, ServiceClass};
 pub use path::{LinkQuality, Path, PathStatus, PathUnsatisfiedReason};
@@ -100,14 +103,15 @@ pub use websocket::{
 
 /// Common imports.
 pub mod prelude {
-    pub use crate::advertise_descriptor::{
-        advertise_with_descriptor, AdvertiseDescriptor, Advertiser,
-    };
+    pub use crate::advertise_descriptor::AdvertiseDescriptor;
+    #[allow(deprecated)]
+    pub use crate::advertise_descriptor::{advertise_with_descriptor, Advertiser};
+    #[allow(deprecated)]
+    pub use crate::browser::{advertise_bonjour_service, BonjourAdvertiser};
     pub use crate::browser::{
-        advertise_bonjour_service, start_browser, start_browser_results_with_descriptor,
-        start_browser_with_descriptor, BonjourAdvertiser, BrowseDescriptor, BrowseResult,
-        BrowseResultChange, BrowseResultsBrowser, Browser, BrowserEvent, BrowserState,
-        DiscoveredService,
+        start_browser, start_browser_results_with_descriptor, start_browser_with_descriptor,
+        BrowseDescriptor, BrowseResult, BrowseResultChange, BrowseResultsBrowser, Browser,
+        BrowserEvent, BrowserState, DiscoveredService,
     };
     pub use crate::client::{ContentContext, ReceivedContent, TcpClient};
     pub use crate::connection::Connection;
@@ -129,7 +133,7 @@ pub mod prelude {
     pub use crate::group::{Group, GroupDescriptor, GroupMessage, GroupState};
     pub use crate::interface::{list_interfaces, InterfaceType, NetworkInterface};
     pub use crate::interface_support::InterfaceRadioType;
-    pub use crate::listener::TcpListener;
+    pub use crate::listener::{ListenerBuilder, TcpListener};
     pub use crate::parameters::{ConnectionParameters, ParametersAttribution};
     pub use crate::parameters_support::{
         ExpiredDnsBehavior, MultipathService, ProtocolStack, ServiceClass,

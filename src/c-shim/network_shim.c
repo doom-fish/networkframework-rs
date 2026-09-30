@@ -866,6 +866,8 @@ typedef struct nw_listener_handle {
     bool cancel_requested;
     bool advertised_installed;
     bool group_mode;
+    bool refuse_connections;
+    bool started;
     _Atomic uint16_t bound_port;
     nw_shim_subscriptions subs;
     nw_shim_acceptor acceptor;
@@ -947,21 +949,17 @@ static void nw_shim_listener_close_handle(nw_listener_handle *h) {
 
 static void nw_shim_listener_on_group(nw_listener_handle *h, nw_connection_group_t group);
 
-static void *nw_shim_listener_start(
-    nw_listener_t listener,
-    const char *label,
-    nw_shim_callback *group_entry,
-    int *out_status
-) {
+// Wraps `listener` in a handle whose queue and state handler are installed but
+// which is not started yet. Pre-start settings go on the handle, then
+// `nw_shim_listener_activate` starts it. Consumes `listener`.
+static nw_listener_handle *nw_shim_listener_prepare(nw_listener_t listener, const char *label, int *out_status) {
     if (!listener) {
-        if (group_entry) nw_shim_callback_release(group_entry);
         if (out_status) *out_status = NW_LISTEN_FAILED;
         return NULL;
     }
     nw_listener_handle *h = (nw_listener_handle *)calloc(1, sizeof(nw_listener_handle));
     if (!h) {
         nw_release(listener);
-        if (group_entry) nw_shim_callback_release(group_entry);
         if (out_status) *out_status = NW_LISTEN_FAILED;
         return NULL;
     }
@@ -977,18 +975,36 @@ static void *nw_shim_listener_start(
     nw_listener_set_state_changed_handler(listener, ^(nw_listener_state_t state, nw_error_t error) {
         nw_shim_listener_on_state(h, state, error);
     });
-    if (group_entry) {
-        h->group_mode = true;
-        nw_shim_subscriptions_add(&h->subs, NW_SHIM_EVENT_NEW_GROUP, *group_entry);
-        nw_listener_set_new_connection_group_handler(listener, ^(nw_connection_group_t group) {
+    if (out_status) *out_status = NW_OK;
+    return h;
+}
+
+// Installs the connection handler matching the handle's mode, starts the
+// listener and waits for it to become ready. On failure the handle is closed
+// and must not be used again.
+static int nw_shim_listener_activate(nw_listener_handle *h) {
+    pthread_mutex_lock(&h->lock);
+    bool already_started = h->started;
+    h->started = true;
+    pthread_mutex_unlock(&h->lock);
+    if (already_started) {
+        return NW_INVALID_ARG;
+    }
+
+    if (h->group_mode) {
+        nw_listener_set_new_connection_group_handler(h->listener, ^(nw_connection_group_t group) {
             nw_shim_listener_on_group(h, group);
         });
+    } else if (h->refuse_connections) {
+        nw_listener_set_new_connection_handler(h->listener, ^(nw_connection_t connection) {
+            nw_connection_cancel(connection);
+        });
     } else {
-        nw_listener_set_new_connection_handler(listener, ^(nw_connection_t connection) {
+        nw_listener_set_new_connection_handler(h->listener, ^(nw_connection_t connection) {
             nw_shim_acceptor_offer(&h->acceptor, connection, "networkframework-rs.accepted");
         });
     }
-    nw_listener_start(listener);
+    nw_listener_start(h->listener);
 
     uint64_t deadline = nw_shim_deadline_after(NW_SHIM_START_TIMEOUT_NS);
     pthread_mutex_lock(&h->lock);
@@ -1001,25 +1017,105 @@ static void *nw_shim_listener_start(
     pthread_mutex_unlock(&h->lock);
     if (!ready) {
         nw_shim_listener_close_handle(h);
-        if (out_status) *out_status = NW_LISTEN_FAILED;
+        return NW_LISTEN_FAILED;
+    }
+    return NW_OK;
+}
+
+static void nw_shim_listener_use_group_entry(nw_listener_handle *h, nw_shim_callback entry) {
+    h->group_mode = true;
+    nw_shim_subscriptions_add(&h->subs, NW_SHIM_EVENT_NEW_GROUP, entry);
+}
+
+static nw_listener_t nw_shim_listener_create_on_port(uint16_t port, nw_parameters_t parameters) {
+    char port_str[8];
+    snprintf(port_str, sizeof(port_str), "%u", (unsigned)port);
+    return nw_listener_create_with_port(port_str, parameters);
+}
+
+void *nw_shim_listener_prepare_with_port(void *parameters, uint16_t port, int *out_status) {
+    if (!parameters) {
+        if (out_status) *out_status = NW_INVALID_ARG;
         return NULL;
     }
-    if (out_status) *out_status = NW_OK;
-    return h;
+    nw_listener_t listener = nw_shim_listener_create_on_port(port, (nw_parameters_t)parameters);
+    return nw_shim_listener_prepare(listener, "networkframework-rs.listener", out_status);
+}
+
+void *nw_shim_listener_prepare_direct(void *parameters, int *out_status) {
+    if (!parameters) {
+        if (out_status) *out_status = NW_INVALID_ARG;
+        return NULL;
+    }
+    nw_listener_t listener = nw_listener_create((nw_parameters_t)parameters);
+    return nw_shim_listener_prepare(listener, "networkframework-rs.listener.direct", out_status);
+}
+
+void *nw_shim_listener_prepare_with_connection(void *connection_handle, void *parameters, int *out_status) {
+    nw_conn_handle *connection = (nw_conn_handle *)connection_handle;
+    if (!connection || !connection->conn || !parameters) {
+        if (out_status) *out_status = NW_INVALID_ARG;
+        return NULL;
+    }
+    nw_listener_t listener = nw_listener_create_with_connection(connection->conn, (nw_parameters_t)parameters);
+    return nw_shim_listener_prepare(listener, "networkframework-rs.listener.connection", out_status);
+}
+
+void *nw_shim_listener_prepare_with_launchd_key(void *parameters, const char *launchd_key, int *out_status) {
+    if (!parameters || !launchd_key) {
+        if (out_status) *out_status = NW_INVALID_ARG;
+        return NULL;
+    }
+    nw_listener_t listener = nw_listener_create_with_launchd_key((nw_parameters_t)parameters, launchd_key);
+    return nw_shim_listener_prepare(listener, "networkframework-rs.listener.launchd", out_status);
+}
+
+int nw_shim_listener_set_new_connection_group_handler(
+    void *handle,
+    ListenerNewConnectionGroupCallback callback,
+    void *context,
+    NwShimContextCallback retain,
+    NwShimContextCallback release
+) {
+    nw_listener_handle *h = (nw_listener_handle *)handle;
+    nw_shim_callback entry = nw_shim_make_callback((nw_shim_fn)callback, context, retain, release);
+    if (!h || !callback || h->started || h->group_mode) {
+        nw_shim_callback_release(&entry);
+        return NW_INVALID_ARG;
+    }
+    nw_shim_listener_use_group_entry(h, entry);
+    return NW_OK;
+}
+
+void nw_shim_listener_set_advertise_descriptor(void *handle, void *descriptor) {
+    nw_listener_handle *h = (nw_listener_handle *)handle;
+    if (!h) return;
+    nw_listener_set_advertise_descriptor(h->listener, (nw_advertise_descriptor_t)descriptor);
+}
+
+int nw_shim_listener_start_prepared(void *handle) {
+    nw_listener_handle *h = (nw_listener_handle *)handle;
+    if (!h) return NW_INVALID_ARG;
+    return nw_shim_listener_activate(h);
+}
+
+// Starts a prepared handle, returning it on success and NULL on failure.
+static void *nw_shim_listener_start_or_null(void *handle, int *out_status) {
+    if (!handle) return NULL;
+    int status = nw_shim_listener_start_prepared(handle);
+    if (out_status) *out_status = status;
+    return status == NW_OK ? handle : NULL;
 }
 
 void *nw_shim_listener_create(uint16_t port, int use_tls, int *out_status) {
-    char port_str[8];
-    snprintf(port_str, sizeof(port_str), "%u", (unsigned)port);
-
     nw_parameters_t params = nw_parameters_create_secure_tcp(
         use_tls ? NW_PARAMETERS_DEFAULT_CONFIGURATION : NW_PARAMETERS_DISABLE_PROTOCOL,
         NW_PARAMETERS_DEFAULT_CONFIGURATION);
     if (!params) { if (out_status) *out_status = NW_LISTEN_FAILED; return NULL; }
 
-    nw_listener_t listener = nw_listener_create_with_port(port_str, params);
+    void *handle = nw_shim_listener_prepare_with_port(params, port, out_status);
     nw_release(params);
-    return nw_shim_listener_start(listener, "networkframework-rs.listener", NULL, out_status);
+    return nw_shim_listener_start_or_null(handle, out_status);
 }
 
 uint16_t nw_shim_listener_port(void *handle) {
@@ -1695,122 +1791,24 @@ void *nw_shim_quic_connect(const char *host, uint16_t port, const char *alpn, in
 // Bonjour advertisement (nw_listener with a bonjour service endpoint)
 // ---------------------------------------------------------------------
 
-typedef struct nw_bonjour_advertise_handle {
-    _Atomic long refs;
-    nw_listener_t listener;
-    dispatch_queue_t queue;
-    pthread_mutex_t lock;
-    pthread_cond_t cond;
-    int state;
-    bool cancelled;
-    bool cancel_requested;
-} nw_bonjour_advertise_handle;
-
-static void nw_shim_advertise_release(nw_bonjour_advertise_handle *h) {
-    if (atomic_fetch_sub_explicit(&h->refs, 1, memory_order_acq_rel) != 1) {
-        return;
-    }
-    nw_release(h->listener);
-    dispatch_release(h->queue);
-    pthread_cond_destroy(&h->cond);
-    pthread_mutex_destroy(&h->lock);
-    free(h);
-}
-
-static void nw_shim_advertise_release_async(void *context) {
-    nw_shim_advertise_release((nw_bonjour_advertise_handle *)context);
-}
-
-static void nw_shim_advertise_on_state(nw_bonjour_advertise_handle *h, nw_listener_state_t state) {
-    pthread_mutex_lock(&h->lock);
-    if (h->cancelled) {
-        pthread_mutex_unlock(&h->lock);
-        return;
-    }
-    h->state = (int)state;
-    bool final_event = state == nw_listener_state_cancelled;
-    if (final_event) {
-        h->cancelled = true;
-    }
-    pthread_cond_broadcast(&h->cond);
-    pthread_mutex_unlock(&h->lock);
-    if (final_event) {
-        dispatch_async_f(h->queue, h, nw_shim_advertise_release_async);
-    }
-}
-
-static void nw_shim_advertise_close(nw_bonjour_advertise_handle *h) {
-    pthread_mutex_lock(&h->lock);
-    bool should_cancel = !h->cancel_requested && !h->cancelled;
-    h->cancel_requested = true;
-    pthread_mutex_unlock(&h->lock);
-    if (should_cancel) {
-        nw_listener_cancel(h->listener);
-    }
-    nw_shim_advertise_release(h);
-}
-
-static void *nw_shim_advertise_start(nw_listener_t listener, const char *label, int *out_status) {
-    if (!listener) {
-        if (out_status) *out_status = NW_LISTEN_FAILED;
-        return NULL;
-    }
-    nw_bonjour_advertise_handle *h = (nw_bonjour_advertise_handle *)calloc(1, sizeof(nw_bonjour_advertise_handle));
-    if (!h) {
-        nw_release(listener);
-        if (out_status) *out_status = NW_LISTEN_FAILED;
-        return NULL;
-    }
-    atomic_init(&h->refs, 2);
-    h->listener = listener;
-    h->queue = dispatch_queue_create(label, DISPATCH_QUEUE_SERIAL);
-    pthread_mutex_init(&h->lock, NULL);
-    pthread_cond_init(&h->cond, NULL);
-
-    nw_listener_set_queue(listener, h->queue);
-    nw_listener_set_state_changed_handler(listener, ^(nw_listener_state_t state, nw_error_t error) {
-        (void)error;
-        nw_shim_advertise_on_state(h, state);
-    });
-    nw_listener_set_new_connection_handler(listener, ^(nw_connection_t conn) {
-        // Drop inbound connections — we're advertising only.
-        nw_connection_cancel(conn);
-    });
-    nw_listener_start(listener);
-
-    uint64_t deadline = nw_shim_deadline_after(NW_SHIM_START_TIMEOUT_NS);
-    pthread_mutex_lock(&h->lock);
-    while (h->state != nw_listener_state_ready && h->state != nw_listener_state_failed && !h->cancelled) {
-        if (!nw_shim_cond_wait_until(&h->cond, &h->lock, deadline)) {
-            break;
-        }
-    }
-    bool ready = h->state == nw_listener_state_ready && !h->cancelled;
-    pthread_mutex_unlock(&h->lock);
-    if (!ready) {
-        nw_shim_advertise_close(h);
-        if (out_status) *out_status = NW_LISTEN_FAILED;
-        return NULL;
-    }
-    if (out_status) *out_status = NW_OK;
-    return h;
-}
-
-static nw_listener_t nw_shim_advertise_listener(uint16_t port, nw_advertise_descriptor_t descriptor) {
+// An advertiser is a listener on default TCP parameters that registers
+// `descriptor` and refuses every inbound connection.
+static void *nw_shim_advertise_start(uint16_t port, nw_advertise_descriptor_t descriptor, int *out_status) {
     nw_parameters_t params = nw_parameters_create_secure_tcp(
         NW_PARAMETERS_DISABLE_PROTOCOL,
         NW_PARAMETERS_DEFAULT_CONFIGURATION);
     if (!params) {
+        if (out_status) *out_status = NW_LISTEN_FAILED;
         return NULL;
     }
-    char port_str[8];
-    snprintf(port_str, sizeof(port_str), "%u", (unsigned)port);
-    nw_listener_t listener = nw_listener_create_with_port(port_str, params);
+    nw_listener_handle *h = (nw_listener_handle *)nw_shim_listener_prepare_with_port(params, port, out_status);
     nw_release(params);
-    if (listener) {
-        nw_listener_set_advertise_descriptor(listener, descriptor);
+    if (!h) {
+        return NULL;
     }
-    return listener;
+    h->refuse_connections = true;
+    nw_listener_set_advertise_descriptor(h->listener, descriptor);
+    return nw_shim_listener_start_or_null(h, out_status);
 }
 
 void *nw_shim_bonjour_advertise_start(
@@ -1832,9 +1830,9 @@ void *nw_shim_bonjour_advertise_start(
         if (out_status) *out_status = NW_INVALID_ARG;
         return NULL;
     }
-    nw_listener_t listener = nw_shim_advertise_listener(port, adv);
+    void *handle = nw_shim_advertise_start(port, adv, out_status);
     nw_release(adv);
-    return nw_shim_advertise_start(listener, "networkframework-rs.bonjour-adv", out_status);
+    return handle;
 }
 
 void *nw_shim_bonjour_advertise_start_with_descriptor(void *descriptor, uint16_t port, int *out_status) {
@@ -1842,14 +1840,11 @@ void *nw_shim_bonjour_advertise_start_with_descriptor(void *descriptor, uint16_t
         if (out_status) *out_status = NW_INVALID_ARG;
         return NULL;
     }
-    nw_listener_t listener = nw_shim_advertise_listener(port, (nw_advertise_descriptor_t)descriptor);
-    return nw_shim_advertise_start(listener, "networkframework-rs.advertise-descriptor", out_status);
+    return nw_shim_advertise_start(port, (nw_advertise_descriptor_t)descriptor, out_status);
 }
 
 void nw_shim_bonjour_advertise_stop(void *handle) {
-    nw_bonjour_advertise_handle *h = (nw_bonjour_advertise_handle *)handle;
-    if (!h) return;
-    nw_shim_advertise_close(h);
+    nw_shim_listener_close(handle);
 }
 
 // ---------------------------------------------------------------------
@@ -2005,6 +2000,21 @@ void nw_shim_parameters_set_prefer_no_proxy(void *parameters, int prefer_no_prox
     nw_parameters_set_prefer_no_proxy((nw_parameters_t)parameters, prefer_no_proxy != 0);
 }
 
+void *nw_shim_connection_create_with_endpoint(void *endpoint, void *parameters, int *out_status) {
+    if (!endpoint || !parameters) {
+        if (out_status) *out_status = NW_INVALID_ARG;
+        return NULL;
+    }
+
+    nw_connection_t conn = nw_connection_create((nw_endpoint_t)endpoint, (nw_parameters_t)parameters);
+    if (!conn) {
+        if (out_status) *out_status = NW_CONNECT_FAILED;
+        return NULL;
+    }
+
+    return nw_shim_conn_start_and_wait(conn, "networkframework-rs.conn.params", NW_SHIM_CONNECT_TIMEOUT_NS, out_status);
+}
+
 void *nw_shim_connection_create_with_parameters(
     const char *host,
     uint16_t port,
@@ -2022,14 +2032,9 @@ void *nw_shim_connection_create_with_parameters(
         return NULL;
     }
 
-    nw_connection_t conn = nw_connection_create(endpoint, (nw_parameters_t)parameters);
+    void *handle = nw_shim_connection_create_with_endpoint(endpoint, parameters, out_status);
     nw_release(endpoint);
-    if (!conn) {
-        if (out_status) *out_status = NW_CONNECT_FAILED;
-        return NULL;
-    }
-
-    return nw_shim_conn_start_and_wait(conn, "networkframework-rs.conn.params", NW_SHIM_CONNECT_TIMEOUT_NS, out_status);
+    return handle;
 }
 
 void *nw_shim_test_copy_failed_connection_error(const char *host, uint16_t port, int use_tls) {
@@ -2103,24 +2108,18 @@ void *nw_shim_listener_create_for_groups(
         return NULL;
     }
 
-    char port_str[8];
-    snprintf(port_str, sizeof(port_str), "%u", (unsigned)port);
-
-    nw_listener_t listener = nw_listener_create_with_port(port_str, (nw_parameters_t)parameters);
-    return nw_shim_listener_start(listener, "networkframework-rs.listener.groups", &entry, out_status);
+    nw_listener_handle *h = (nw_listener_handle *)nw_shim_listener_prepare_with_port(parameters, port, out_status);
+    if (!h) {
+        nw_shim_callback_release(&entry);
+        return NULL;
+    }
+    nw_shim_listener_use_group_entry(h, entry);
+    return nw_shim_listener_start_or_null(h, out_status);
 }
 
 void *nw_shim_listener_create_with_parameters(void *parameters, uint16_t port, int *out_status) {
-    if (!parameters) {
-        if (out_status) *out_status = NW_INVALID_ARG;
-        return NULL;
-    }
-
-    char port_str[8];
-    snprintf(port_str, sizeof(port_str), "%u", (unsigned)port);
-
-    nw_listener_t listener = nw_listener_create_with_port(port_str, (nw_parameters_t)parameters);
-    return nw_shim_listener_start(listener, "networkframework-rs.listener.params", NULL, out_status);
+    void *handle = nw_shim_listener_prepare_with_port(parameters, port, out_status);
+    return nw_shim_listener_start_or_null(handle, out_status);
 }
 
 // ---------------------------------------------------------------------
@@ -5309,6 +5308,13 @@ void nw_shim_connection_restart(void *handle) {
     }
 }
 
+void nw_shim_connection_cancel(void *handle) {
+    nw_conn_handle *h = (nw_conn_handle *)handle;
+    if (h) {
+        nw_shim_conn_cancel(h);
+    }
+}
+
 void nw_shim_connection_force_cancel(void *handle) {
     nw_conn_handle *h = (nw_conn_handle *)handle;
     if (h) {
@@ -5658,31 +5664,18 @@ void *nw_shim_parameters_create_custom_ip(uint8_t protocol_number) {
 }
 
 void *nw_shim_listener_create_direct(void *parameters, int *out_status) {
-    if (!parameters) {
-        if (out_status) *out_status = NW_INVALID_ARG;
-        return NULL;
-    }
-    nw_listener_t listener = nw_listener_create((nw_parameters_t)parameters);
-    return nw_shim_listener_start(listener, "networkframework-rs.listener.direct", NULL, out_status);
+    void *handle = nw_shim_listener_prepare_direct(parameters, out_status);
+    return nw_shim_listener_start_or_null(handle, out_status);
 }
 
 void *nw_shim_listener_create_with_connection(void *connection_handle, void *parameters, int *out_status) {
-    nw_conn_handle *connection = (nw_conn_handle *)connection_handle;
-    if (!connection || !connection->conn || !parameters) {
-        if (out_status) *out_status = NW_INVALID_ARG;
-        return NULL;
-    }
-    nw_listener_t listener = nw_listener_create_with_connection(connection->conn, (nw_parameters_t)parameters);
-    return nw_shim_listener_start(listener, "networkframework-rs.listener.connection", NULL, out_status);
+    void *handle = nw_shim_listener_prepare_with_connection(connection_handle, parameters, out_status);
+    return nw_shim_listener_start_or_null(handle, out_status);
 }
 
 void *nw_shim_listener_create_with_launchd_key(void *parameters, const char *launchd_key, int *out_status) {
-    if (!parameters || !launchd_key) {
-        if (out_status) *out_status = NW_INVALID_ARG;
-        return NULL;
-    }
-    nw_listener_t listener = nw_listener_create_with_launchd_key((nw_parameters_t)parameters, launchd_key);
-    return nw_shim_listener_start(listener, "networkframework-rs.listener.launchd", NULL, out_status);
+    void *handle = nw_shim_listener_prepare_with_launchd_key(parameters, launchd_key, out_status);
+    return nw_shim_listener_start_or_null(handle, out_status);
 }
 
 uint32_t nw_shim_listener_get_new_connection_limit(void *handle) {

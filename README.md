@@ -142,10 +142,11 @@ fn main() -> Result<(), networkframework::NetworkError> {
 Callback-oriented APIs are still available for long-lived observers and
 framework-managed events. Common entry points include
 `start_path_monitor`, `start_browser_with_descriptor`,
-`start_browser_results_with_descriptor`, `advertise_with_descriptor`, and the
-various `set_*_handler` hooks on connection, group, and protocol types.
+`start_browser_results_with_descriptor`, and the various `set_*_handler`
+hooks on connection, group, and protocol types.
 `PathMonitorBuilder` sets a monitor's interface scope and prohibited interface
 types before it starts, which is the only time Network.framework applies them.
+`TcpListener::builder` does the same for listeners.
 
 Dropping a connection, listener, group, browser or path monitor cancels it. No
 new callback starts after that, but one that is already running may finish
@@ -186,10 +187,41 @@ the framework locks or serializes, still share one object across clones.
 - QUIC parameters come from `nw_parameters_create_quic`. On a QUIC listener,
   `accept()` first returns the connection for the QUIC tunnel, then one
   connection per stream the peer opens.
-- `TcpListener::bind_with_group_handler(port, &parameters, handler)` delivers
-  each inbound QUIC connection as a `ConnectionGroup` instead. The handler is
-  installed before the listener starts, and `accept()` on such a listener
-  returns `NetworkError::InvalidArgument`.
+- `TcpListener::builder(&parameters)` applies settings before the listener
+  starts: `port`, `connection` or `launchd_key` choose where it listens,
+  `new_connection_limit` caps delivery, and `on_new_connection_group(handler)`
+  delivers each inbound QUIC connection as a `ConnectionGroup` instead
+  (`accept()` then returns `NetworkError::InvalidArgument`).
+- `advertise(descriptor)` registers a Bonjour or application service for the
+  listener that serves it, with the listener's own parameters. With
+  `set_include_peer_to_peer(true)` the service is also advertised over AWDL.
+  `on_advertised_endpoint` reports the registered name from the first event,
+  and `set_advertise_descriptor` replaces or removes the advertisement later.
+- `TcpClient::connect_endpoint(&endpoint, &parameters)` connects to any
+  `Endpoint`, including a Bonjour service that Network.framework resolves.
+
+```rust,no_run
+use networkframework::{AdvertiseDescriptor, ConnectionParameters, Endpoint, TcpClient, TcpListener};
+
+fn main() -> Result<(), networkframework::NetworkError> {
+    let mut parameters = ConnectionParameters::tcp()?;
+    parameters.set_include_peer_to_peer(true);
+
+    let descriptor = AdvertiseDescriptor::bonjour_service(Some("Imperium"), "_awdlssh._tcp", None)?;
+    let listener = TcpListener::builder(&parameters)
+        .advertise(descriptor)
+        .on_advertised_endpoint(|endpoint, added| {
+            println!("advertised={added} {:?}", endpoint.and_then(|e| e.bonjour_service_name()));
+        })
+        .bind()?;
+
+    // On the peer:
+    let endpoint = Endpoint::bonjour_service(Some("Imperium"), "_awdlssh._tcp", Some("local."))?;
+    let _client = TcpClient::connect_endpoint(&endpoint, &parameters)?;
+    let _server = listener.accept()?;
+    Ok(())
+}
+```
 
 ```rust,no_run
 use networkframework::{certificate_sha256, ConnectionParameters, TcpClient, TlsVersion};

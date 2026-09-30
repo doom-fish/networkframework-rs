@@ -218,6 +218,7 @@ int nw_shim_parameters_get_prohibit_constrained(void *parameters);
 void nw_shim_parameters_set_allow_ultra_constrained(void *parameters, int allow_ultra_constrained);
 int nw_shim_parameters_get_allow_ultra_constrained(void *parameters);
 
+void *nw_shim_connection_create_with_endpoint(void *endpoint, void *parameters, int *out_status);
 void *nw_shim_connection_create_with_parameters(
     const char *host,
     uint16_t port,
@@ -738,6 +739,7 @@ uint64_t nw_shim_connection_subscribe_path(
 );
 void nw_shim_connection_unsubscribe(void *handle, uint64_t token);
 void nw_shim_connection_restart(void *handle);
+void nw_shim_connection_cancel(void *handle);
 void nw_shim_connection_force_cancel(void *handle);
 void nw_shim_connection_cancel_current_endpoint(void *handle);
 void nw_shim_connection_batch(void *handle, ConnectionBatchCallback callback, void *user_info);
@@ -828,6 +830,22 @@ void *nw_shim_listener_create_for_groups(
 );
 void *nw_shim_listener_create_with_connection(void *connection_handle, void *parameters, int *out_status);
 void *nw_shim_listener_create_with_launchd_key(void *parameters, const char *launchd_key, int *out_status);
+// Two-phase listener creation: a prepared handle takes pre-start settings and
+// must then be passed to nw_shim_listener_start_prepared, which closes it on
+// failure.
+void *nw_shim_listener_prepare_with_port(void *parameters, uint16_t port, int *out_status);
+void *nw_shim_listener_prepare_direct(void *parameters, int *out_status);
+void *nw_shim_listener_prepare_with_connection(void *connection_handle, void *parameters, int *out_status);
+void *nw_shim_listener_prepare_with_launchd_key(void *parameters, const char *launchd_key, int *out_status);
+int nw_shim_listener_set_new_connection_group_handler(
+    void *handle,
+    ListenerNewConnectionGroupCallback callback,
+    void *context,
+    NwShimContextCallback retain,
+    NwShimContextCallback release
+);
+void nw_shim_listener_set_advertise_descriptor(void *handle, void *descriptor);
+int nw_shim_listener_start_prepared(void *handle);
 uint32_t nw_shim_listener_get_new_connection_limit(void *handle);
 void nw_shim_listener_set_new_connection_limit(void *handle, uint32_t new_connection_limit);
 uint64_t nw_shim_listener_subscribe_state(

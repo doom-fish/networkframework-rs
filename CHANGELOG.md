@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `TcpListener::builder(&parameters)` returns a `ListenerBuilder` that applies
+  every setting before the listener starts: `port`, `connection`,
+  `launchd_key`, `new_connection_limit`, `on_new_connection_group`,
+  `advertise` and `on_advertised_endpoint`.
+- A listener can advertise itself with `ListenerBuilder::advertise`, using its
+  own parameters. With `set_include_peer_to_peer(true)` one listener is
+  advertised over Bonjour and AWDL and accepts the connections it advertises.
+  `on_advertised_endpoint` sees the first registration event, and
+  `TcpListener::set_advertise_descriptor` replaces or removes the
+  advertisement on a running listener.
+- `TcpClient::connect_endpoint(&endpoint, &parameters)` connects to any
+  `Endpoint`, including a Bonjour service.
+
+- `TcpClient::cancel()` cancels a connection gracefully (TCP FIN) through a
+  shared reference, and wakes any `receive` blocked on another thread. Before
+  this, the only graceful close was dropping the client, and `force_cancel`
+  resets the connection, which can discard data the peer has not read yet.
+
+### Changed
+
+- Bonjour advertisers run on the listener lifecycle instead of a copy of it.
+  `advertise_with_descriptor` and `advertise_bonjour_service` behave as
+  before.
+- The `06_bonjour_advertise` example advertises from a peer-to-peer listener
+  and builds its TXT record with `TxtRecord`.
+
+### Deprecated
+
+- `TcpListener::bind_with_group_handler`, `bind_direct`,
+  `bind_with_connection` and `bind_with_launchd_key`, in favour of the
+  matching `ListenerBuilder` methods.
+- `advertise_with_descriptor`, `advertise_bonjour_service`, `Advertiser` and
+  `BonjourAdvertiser`. Their listener uses fixed TCP parameters and refuses
+  every connection; advertise from the serving listener with
+  `ListenerBuilder::advertise` instead.
+
 ## [0.14.0] - 2026-09-24
 
 ### Security
