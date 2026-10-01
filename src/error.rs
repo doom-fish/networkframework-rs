@@ -143,6 +143,7 @@ impl FrameworkError {
     /// Returns the underlying Core Foundation [`CFError`](apple_cf::cf::CFError), if available.
     ///
     /// Wraps `nw_error_copy_cf_error`.
+    #[cfg(target_os = "macos")]
     #[must_use]
     pub fn cf_error(&self) -> Option<apple_cf::cf::CFError> {
         let cf_error_ptr = unsafe { ffi::nw_shim_error_copy_cf_error(self.handle) };
@@ -150,6 +151,7 @@ impl FrameworkError {
     }
 
     /// Alias for [`Self::cf_error`].
+    #[cfg(target_os = "macos")]
     #[must_use]
     pub fn copy_cf_error(&self) -> Option<apple_cf::cf::CFError> {
         self.cf_error()

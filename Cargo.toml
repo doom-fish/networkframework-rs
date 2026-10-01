@@ -43,9 +43,12 @@ crate-type = ["lib"]
 [build-dependencies]
 
 [dependencies]
-apple-cf = { path = "../apple-cf-rs", version = ">=0.11, <0.12" }
 doom-fish-utils = { path = "../doom-fish-utils", version = ">=0.4.1, <0.5" }
 zeroize = ">=1.6, <1.9"
+
+# apple-cf builds its Swift bridge for macOS only.
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-cf = { path = "../apple-cf-rs", version = ">=0.11, <0.12" }
 
 [dev-dependencies]
 pollster = "0.3"

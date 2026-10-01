@@ -4,7 +4,8 @@ import PackageDescription
 let package = Package(
     name: "NetworkFrameworkBridge",
     platforms: [
-        .macOS(.v14)
+        .macOS(.v14),
+        .iOS("26.0"),
     ],
     products: [
         .library(

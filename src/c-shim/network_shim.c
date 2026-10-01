@@ -3,6 +3,7 @@
 // src/ffi/mod.rs on the Rust side.
 
 #include <Network/Network.h>
+#include <TargetConditionals.h>
 #include <dispatch/dispatch.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <arpa/inet.h>
@@ -1228,10 +1229,13 @@ void *nw_shim_path_monitor_start(
     } else if (scope == NW_SHIM_PATH_SCOPE_INTERFACE_TYPE) {
         monitor = nw_path_monitor_create_with_type((nw_interface_type_t)interface_type);
         label = "networkframework-rs.path.type";
-    } else if (scope == NW_SHIM_PATH_SCOPE_ETHERNET_CHANNEL) {
+    }
+#if TARGET_OS_OSX
+    else if (scope == NW_SHIM_PATH_SCOPE_ETHERNET_CHANNEL) {
         monitor = nw_path_monitor_create_for_ethernet_channel();
         label = "networkframework-rs.path.ethernet";
     }
+#endif
     if (!monitor) {
         nw_shim_callback_release(&entry);
         return NULL;
@@ -4908,6 +4912,8 @@ int nw_shim_txt_record_is_equal(void *txt_record, void *other_txt_record) {
     return nw_txt_record_is_equal((nw_txt_record_t)txt_record, (nw_txt_record_t)other_txt_record) ? 1 : 0;
 }
 
+#if TARGET_OS_OSX
+
 typedef struct nw_ethernet_channel_handle {
     _Atomic long refs;
     nw_ethernet_channel_t channel;
@@ -5126,6 +5132,61 @@ void nw_shim_ethernet_channel_release(void *handle) {
     nw_shim_ethernet_channel_cancel(h);
     nw_shim_ethernet_release(h);
 }
+
+#else // !TARGET_OS_OSX: Ethernet channels are macOS-only, so creating one fails.
+
+void *nw_shim_ethernet_channel_create(uint16_t ether_type, const char *name, int interface_type, uint32_t index) {
+    (void)ether_type; (void)name; (void)interface_type; (void)index;
+    return NULL;
+}
+
+void *nw_shim_ethernet_channel_create_with_parameters(uint16_t ether_type, const char *name, int interface_type, uint32_t index, void *parameters) {
+    (void)ether_type; (void)name; (void)interface_type; (void)index; (void)parameters;
+    return NULL;
+}
+
+uint64_t nw_shim_ethernet_channel_subscribe_state(
+    void *handle,
+    EthernetChannelStateCallback callback,
+    void *context,
+    NwShimContextCallback retain,
+    NwShimContextCallback release
+) {
+    (void)handle;
+    nw_shim_callback entry = nw_shim_make_callback((nw_shim_fn)callback, context, retain, release);
+    nw_shim_callback_release(&entry);
+    return 0;
+}
+
+uint64_t nw_shim_ethernet_channel_subscribe_receive(
+    void *handle,
+    EthernetChannelReceiveCallback callback,
+    void *context,
+    NwShimContextCallback retain,
+    NwShimContextCallback release
+) {
+    (void)handle;
+    nw_shim_callback entry = nw_shim_make_callback((nw_shim_fn)callback, context, retain, release);
+    nw_shim_callback_release(&entry);
+    return 0;
+}
+
+void nw_shim_ethernet_channel_unsubscribe(void *handle, uint64_t token) { (void)handle; (void)token; }
+
+uint32_t nw_shim_ethernet_channel_get_maximum_payload_size(void *handle) { (void)handle; return 0; }
+
+void nw_shim_ethernet_channel_start(void *handle) { (void)handle; }
+
+void nw_shim_ethernet_channel_cancel(void *handle) { (void)handle; }
+
+int nw_shim_ethernet_channel_send(void *handle, const uint8_t *data, size_t len, uint16_t vlan_tag, const uint8_t *remote_address) {
+    (void)handle; (void)data; (void)len; (void)vlan_tag; (void)remote_address;
+    return NW_UNSUPPORTED;
+}
+
+void nw_shim_ethernet_channel_release(void *handle) { (void)handle; }
+
+#endif // TARGET_OS_OSX
 
 
 // ---------------------------------------------------------------------
@@ -5651,9 +5712,13 @@ char *nw_shim_error_copy_wifi_aware_domain(void) {
 }
 
 void *nw_shim_parameters_create_custom_ip(uint8_t protocol_number) {
+#if TARGET_OS_OSX
     if (__builtin_available(macOS 10.15, *)) {
         return nw_parameters_create_custom_ip(protocol_number, NW_PARAMETERS_DEFAULT_CONFIGURATION);
     }
+#else
+    (void)protocol_number;
+#endif
     return NULL;
 }
 
@@ -5681,8 +5746,13 @@ void *nw_shim_listener_create_with_launchd_key(void *parameters, const char *lau
         if (out_status) *out_status = NW_INVALID_ARG;
         return NULL;
     }
+#if TARGET_OS_OSX
     nw_listener_t listener = nw_listener_create_with_launchd_key((nw_parameters_t)parameters, launchd_key);
     return nw_shim_listener_start(listener, "networkframework-rs.listener.launchd", NULL, out_status);
+#else
+    if (out_status) *out_status = NW_UNSUPPORTED;
+    return NULL;
+#endif
 }
 
 uint32_t nw_shim_listener_get_new_connection_limit(void *handle) {
