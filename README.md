@@ -1,5 +1,8 @@
 # networkframework-rs
 
+The crate clears its temporary credential buffers with the system `memset_s` function before it releases their memory.
+Path monitors do not require a third-party memory utility.-rs
+
 Safe Rust bindings for Apple's
 [Network.framework](https://developer.apple.com/documentation/network),
 backed by a Swift bridge plus an opt-in raw FFI surface.

@@ -5,7 +5,6 @@ use std::ffi::{CStr, CString};
 use std::sync::Arc;
 
 use doom_fish_utils::panic_safe::catch_user_panic_result;
-use zeroize::Zeroizing;
 
 use crate::context::release_arc;
 use crate::error::NetworkError;
@@ -27,19 +26,34 @@ impl std::fmt::Debug for TlsIdentity {
     }
 }
 
+pub(crate) struct CredentialBytes(pub(crate) Vec<u8>);
+
+#[link(name = "System")]
+unsafe extern "C" {
+    fn memset_s(destination: *mut c_void, size: usize, value: c_int, count: usize) -> c_int;
+}
+
+impl Drop for CredentialBytes {
+    fn drop(&mut self) {
+        unsafe {
+            memset_s(self.0.as_mut_ptr().cast(), self.0.len(), 0, self.0.len());
+        }
+    }
+}
+
 pub(crate) fn secret_c_string(
     value: &str,
     field: &str,
-) -> Result<Zeroizing<Vec<u8>>, NetworkError> {
+) -> Result<CredentialBytes, NetworkError> {
     if value.as_bytes().contains(&0) {
         return Err(NetworkError::InvalidArgument(format!(
             "{field} contains a NUL byte"
         )));
     }
-    let mut bytes = Zeroizing::new(Vec::with_capacity(value.len() + 1));
+    let mut bytes = Vec::with_capacity(value.len() + 1);
     bytes.extend_from_slice(value.as_bytes());
     bytes.push(0);
-    Ok(bytes)
+    Ok(CredentialBytes(bytes))
 }
 
 impl TlsIdentity {
@@ -57,7 +71,7 @@ impl TlsIdentity {
             ffi::nw_shim_identity_create_from_pkcs12(
                 data.as_ptr(),
                 data.len(),
-                password_bytes.as_ptr().cast::<c_char>(),
+                password_bytes.0.as_ptr().cast::<c_char>(),
                 &raw mut status,
                 &raw mut os_status,
             )

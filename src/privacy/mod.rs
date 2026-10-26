@@ -379,7 +379,7 @@ impl ProxyConfig {
                 username.as_ptr(),
                 password
                     .as_ref()
-                    .map_or(core::ptr::null(), |value| value.as_ptr().cast()),
+                    .map_or(core::ptr::null(), |value| value.0.as_ptr().cast()),
             );
         }
         Ok(self)

@@ -1,4 +1,7 @@
-# Network.framework coverage (v0.14.0)
+# Network.framework coverage (v0.14.3)
+
+The credential buffer helper calls the system `memset_s` function before it releases its memory.
+The public Rust API stays the same. Path monitors do not require `zeroize`.
 
 `COVERAGE_AUDIT.md` lists the 500 functions, types and constants declared
 under `Network.framework/Headers` in the macOS 26.2 SDK. 499 of them are
