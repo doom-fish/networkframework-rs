@@ -281,7 +281,10 @@ fn parameters_area_supports_advanced_knobs() -> Result<(), networkframework::Net
             .iter()
             .any(|interface| interface.index == loopback.index));
         parameters.clear_prohibited_interfaces();
-        assert!(parameters.prohibited_interfaces().is_empty());
+        assert_eq!(
+            parameters.prohibited_interfaces(),
+            [] as [networkframework::NetworkInterface; 0]
+        );
         parameters.require_interface(None)?;
         assert!(parameters.required_interface().is_none());
     }
@@ -309,7 +312,10 @@ fn parameters_area_supports_advanced_knobs() -> Result<(), networkframework::Net
         parameters.prohibit_interface(&missing),
         Err(networkframework::NetworkError::InvalidArgument(_))
     ));
-    assert!(parameters.prohibited_interfaces().is_empty());
+    assert_eq!(
+        parameters.prohibited_interfaces(),
+        [] as [networkframework::NetworkInterface; 0]
+    );
 
     parameters
         .set_reuse_local_address(true)
@@ -340,7 +346,10 @@ fn parameters_area_supports_advanced_knobs() -> Result<(), networkframework::Net
     parameters.set_local_endpoint(Some(&local_endpoint));
     assert!(parameters.local_endpoint().is_some());
     parameters.clear_prohibited_interface_types();
-    assert!(parameters.prohibited_interface_types().is_empty());
+    assert_eq!(
+        parameters.prohibited_interface_types(),
+        [] as [networkframework::InterfaceType; 0]
+    );
 
     parameters.prepend_application_protocol(ProtocolOptions::websocket()?)?;
     let mut stack = parameters.default_protocol_stack().expect("protocol stack");
@@ -853,7 +862,7 @@ fn txt_record_area_supports_lookup_and_endpoint_helpers(
     let entries = txt.entries();
     assert_eq!(entries.len(), 3);
     let bytes = txt.bytes();
-    assert!(!bytes.is_empty());
+    assert_ne!(bytes, [] as [u8; 0]);
     let parsed = TxtRecord::from_bytes(&bytes)?;
     assert_eq!(
         parsed.find_key("alpha")?,
