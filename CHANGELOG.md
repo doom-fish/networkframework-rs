@@ -347,6 +347,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added `PrivacyContext`, `ProxyConfig`, and `ResolverConfig` wrappers attachable to parameters.
 - Added `framer_length_prefix`, `interface_list`, and `connection_group` examples.
 
+## [0.7.0] - 2026-05-16
+
+### Added
+
+- Add a Bonjour service publisher.
+
+## [0.6.0] - 2026-05-16
+
+### Added
+
+- Add a single-stream QUIC client.
+
+## [0.5.0] - 2026-05-16
+
+### Added
+
+- Add a WebSocket client through `nw_ws`.
+
+## [0.4.0] - 2026-05-16
+
+### Added
+
+- Add Bonjour service discovery through `nw_browser`.
+
+## [0.3.0] - 2026-05-16
+
+### Added
+
+- Add UDP support and the path monitor.
+
+## [0.2.0] - 2026-05-16
+
+### Added
+
+- Add TLS support through `connect_tls` and `bind_tls`.
+
 ## 0.1.0 - 2025-
 
 - First release.
