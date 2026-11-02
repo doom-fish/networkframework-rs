@@ -1,8 +1,5 @@
 # networkframework-rs
 
-The crate clears its temporary credential buffers with the system `memset_s` function before it releases their memory.
-Path monitors do not require a third-party memory utility.-rs
-
 Safe Rust bindings for Apple's
 [Network.framework](https://developer.apple.com/documentation/network),
 backed by a Swift bridge plus an opt-in raw FFI surface.
@@ -14,6 +11,9 @@ crate, one of them only through `raw-ffi`. The count leaves out the
 essentials are now wrapped in the `tls` module) and anything added in later
 SDKs. See [`COVERAGE.md`](COVERAGE.md) for the logical-area map and
 [`COVERAGE_AUDIT.md`](COVERAGE_AUDIT.md) for the symbol list.
+
+The crate clears its temporary credential buffers with the system `memset_s` function before it releases their memory.
+Path monitors do not require a third-party memory utility.
 
 ## Why this crate
 
@@ -40,14 +40,14 @@ SDKs. See [`COVERAGE.md`](COVERAGE.md) for the logical-area map and
 
 ```toml
 [dependencies]
-networkframework = "0.14.0"
+networkframework = "0.15.0"
 ```
 
 Enable async support explicitly when you want awaitable event streams:
 
 ```toml
 [dependencies]
-networkframework = { version = "0.14.0", features = ["async"] }
+networkframework = { version = "0.15.0", features = ["async"] }
 ```
 
 ## Async usage
