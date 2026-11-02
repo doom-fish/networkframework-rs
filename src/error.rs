@@ -178,7 +178,7 @@ impl Drop for FrameworkError {
 pub(crate) fn from_status(code: i32) -> NetworkError {
     use crate::ffi::{
         NW_CANCELLED, NW_CONNECT_FAILED, NW_INVALID_ARG, NW_LISTEN_FAILED, NW_RECV_FAILED,
-        NW_SEND_FAILED, NW_TIMEOUT,
+        NW_SEND_FAILED, NW_TIMEOUT, NW_UNSUPPORTED,
     };
     match code {
         NW_INVALID_ARG => NetworkError::InvalidArgument("shim".into()),
@@ -188,6 +188,7 @@ pub(crate) fn from_status(code: i32) -> NetworkError {
         NW_LISTEN_FAILED => NetworkError::ListenFailed,
         NW_CANCELLED => NetworkError::Cancelled,
         NW_TIMEOUT => NetworkError::Timeout,
+        NW_UNSUPPORTED => NetworkError::Unsupported("not available on this platform".into()),
         other => NetworkError::Unknown(other),
     }
 }
