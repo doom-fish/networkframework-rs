@@ -203,7 +203,7 @@ pub(crate) fn receive_error(code: isize, size: usize, limit: usize) -> NetworkEr
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::FrameworkError;
     use core::ffi::{c_char, c_int, c_void};
