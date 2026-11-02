@@ -25,14 +25,15 @@ fn main() {
             "networkframework: unsupported target arch '{other}'. Expected x86_64 or aarch64.",
         ),
     };
-    // iOS builds default to the bridge's minimum in swift-bridge/Package.swift.
-    let ios_version = env::var("IPHONEOS_DEPLOYMENT_TARGET").unwrap_or_else(|_| "26.0".into());
     let (swift_triple, sdk) = match (target_os.as_str(), target_abi.as_str()) {
         ("ios", "sim") => (
-            format!("{arch}-apple-ios{ios_version}-simulator"),
+            format!("{arch}-apple-ios{}-simulator", ios_deployment_target()),
             Some("iphonesimulator"),
         ),
-        ("ios", _) => (format!("{arch}-apple-ios{ios_version}"), Some("iphoneos")),
+        ("ios", _) => (
+            format!("{arch}-apple-ios{}", ios_deployment_target()),
+            Some("iphoneos"),
+        ),
         _ => (format!("{arch}-apple-macosx"), None),
     };
 
@@ -109,4 +110,18 @@ fn main() {
             );
         }
     }
+}
+
+fn ios_deployment_target() -> String {
+    // iOS builds default to the bridge's minimum in swift-bridge/Package.swift.
+    let version = env::var("IPHONEOS_DEPLOYMENT_TARGET").unwrap_or_else(|_| "26.0".into());
+    let major = version
+        .split('.')
+        .next()
+        .and_then(|major| major.parse::<u32>().ok());
+    assert!(
+        major.is_some_and(|major| major >= 26),
+        "networkframework: iOS builds need IPHONEOS_DEPLOYMENT_TARGET 26.0 or later, the Swift bridge's minimum, but it is '{version}'",
+    );
+    version
 }
