@@ -246,7 +246,7 @@ Scope (updated in 0.14.0): only Network.framework's own headers are counted. The
 | `nw_listener_create_with_port` | function | `listener.h` | AdvertiseDescriptor, Advertiser, advertise_with_descriptor, Browser, BrowseDescriptor, start_browser_with_descriptor, TcpListener |
 | `nw_listener_get_new_connection_limit` | function | `listener.h` | TcpListener, TcpClient, ConnectionParameters, ConnectionGroup, Endpoint |
 | `nw_listener_get_port` | function | `listener.h` | TcpListener |
-| `nw_listener_set_advertise_descriptor` | function | `listener.h` | AdvertiseDescriptor, Advertiser, advertise_with_descriptor, Browser, BrowseDescriptor, start_browser_with_descriptor |
+| `nw_listener_set_advertise_descriptor` | function | `listener.h` | AdvertiseDescriptor, ListenerBuilder, TcpListener, Advertiser, advertise_with_descriptor, Browser, BrowseDescriptor, start_browser_with_descriptor |
 | `nw_listener_set_advertised_endpoint_changed_handler` | function | `listener.h` | TcpListener, TcpClient, ConnectionParameters, ConnectionGroup, Endpoint |
 | `nw_listener_set_new_connection_group_handler` | function | `listener.h` | TcpListener, TcpClient, ConnectionParameters, ConnectionGroup, Endpoint |
 | `nw_listener_set_new_connection_handler` | function | `listener.h` | AdvertiseDescriptor, Advertiser, advertise_with_descriptor, Browser, BrowseDescriptor, start_browser_with_descriptor, TcpListener |

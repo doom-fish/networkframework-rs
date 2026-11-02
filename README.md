@@ -154,7 +154,8 @@ types before it starts, which is the only time Network.framework applies them.
 Dropping a connection, listener, group, browser or path monitor cancels it. No
 new callback starts after that, but one that is already running may finish
 after the drop returns. Native state is freed once Network.framework delivers
-its final `cancelled` event.
+its final `cancelled` event. `TcpClient::cancel` closes a connection with a TCP
+FIN through a shared reference, and `TcpClient::force_cancel` resets it.
 
 Network.framework does not synchronize most of its configuration objects, so
 one object never has two handles that can reach it from different threads.
@@ -210,7 +211,7 @@ fn main() -> Result<(), networkframework::NetworkError> {
     let mut parameters = ConnectionParameters::tcp()?;
     parameters.set_include_peer_to_peer(true);
 
-    let descriptor = AdvertiseDescriptor::bonjour_service(Some("Imperium"), "_awdlssh._tcp", None)?;
+    let descriptor = AdvertiseDescriptor::bonjour_service(Some("Example"), "_example._tcp", None)?;
     let listener = TcpListener::builder(&parameters)
         .advertise(descriptor)
         .on_advertised_endpoint(|endpoint, added| {
@@ -219,7 +220,7 @@ fn main() -> Result<(), networkframework::NetworkError> {
         .bind()?;
 
     // On the peer:
-    let endpoint = Endpoint::bonjour_service(Some("Imperium"), "_awdlssh._tcp", Some("local."))?;
+    let endpoint = Endpoint::bonjour_service(Some("Example"), "_example._tcp", Some("local."))?;
     let _client = TcpClient::connect_endpoint(&endpoint, &parameters)?;
     let _server = listener.accept()?;
     Ok(())

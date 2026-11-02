@@ -37,7 +37,7 @@ enum Source<'a> {
 ///
 /// let mut parameters = ConnectionParameters::tcp()?;
 /// parameters.set_include_peer_to_peer(true);
-/// let descriptor = AdvertiseDescriptor::bonjour_service(None, "_awdlssh._tcp", None)?;
+/// let descriptor = AdvertiseDescriptor::bonjour_service(None, "_example._tcp", None)?;
 ///
 /// let listener = TcpListener::builder(&parameters)
 ///     .advertise(descriptor)
