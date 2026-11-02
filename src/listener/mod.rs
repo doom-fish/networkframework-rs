@@ -2,12 +2,16 @@
 
 #![allow(clippy::missing_errors_doc)]
 
+mod builder;
+
 use core::ffi::{c_int, c_void};
-use std::ffi::CString;
 use std::sync::Mutex;
 
 use doom_fish_utils::callback_context::CallbackContext;
 
+pub use builder::ListenerBuilder;
+
+use crate::advertise_descriptor::AdvertiseDescriptor;
 use crate::client::TcpClient;
 use crate::connection_group::ConnectionGroup;
 use crate::context::Subscription;
@@ -44,12 +48,11 @@ impl std::fmt::Debug for TcpListener {
 }
 
 impl TcpListener {
-    const fn from_handle(handle: *mut c_void) -> Self {
-        Self {
-            handle,
-            advertised_endpoint: None,
-            new_connection_group: None,
-        }
+    /// Start configuring a listener that uses `parameters`. Settings such as
+    /// the port, a Bonjour advertisement or a connection-group handler are
+    /// applied before the listener starts; see [`ListenerBuilder`].
+    pub const fn builder(parameters: &ConnectionParameters) -> ListenerBuilder<'_> {
+        ListenerBuilder::new(parameters)
     }
 
     /// Bind a plain TCP listener on `port` (use `0` for an OS-assigned
@@ -62,12 +65,7 @@ impl TcpListener {
     ///
     /// Returns [`NetworkError::ListenFailed`] if the bind fails.
     pub fn bind(port: u16) -> Result<Self, NetworkError> {
-        let mut status: c_int = 0;
-        let handle = unsafe { ffi::nw_shim_listener_create(port, 0, &raw mut status) };
-        if status != ffi::NW_OK || handle.is_null() {
-            return Err(from_status(status));
-        }
-        Ok(Self::from_handle(handle))
+        Self::bind_with_parameters(port, &ConnectionParameters::tcp()?)
     }
 
     pub fn bind_loopback(port: u16) -> Result<Self, NetworkError> {
@@ -92,21 +90,19 @@ impl TcpListener {
         Self::bind_with_parameters(port, &parameters)
     }
 
-    /// Bind a listener using explicit [`ConnectionParameters`].
+    /// Bind a listener using explicit [`ConnectionParameters`]. Shorthand for
+    /// `TcpListener::builder(parameters).port(port).bind()`.
     pub fn bind_with_parameters(
         port: u16,
         parameters: &ConnectionParameters,
     ) -> Result<Self, NetworkError> {
-        let mut status: c_int = 0;
-        let handle = unsafe {
-            ffi::nw_shim_listener_create_with_parameters(parameters.as_ptr(), port, &raw mut status)
-        };
-        if status != ffi::NW_OK || handle.is_null() {
-            return Err(from_status(status));
-        }
-        Ok(Self::from_handle(handle))
+        Self::builder(parameters).port(port).bind()
     }
 
+    #[deprecated(
+        since = "0.15.0",
+        note = "use `TcpListener::builder(parameters).port(port).on_new_connection_group(handler).bind()`"
+    )]
     pub fn bind_with_group_handler<F>(
         port: u16,
         parameters: &ConnectionParameters,
@@ -115,80 +111,43 @@ impl TcpListener {
     where
         F: FnMut(ConnectionGroup) + Send + 'static,
     {
-        let handler: Box<dyn FnMut(ConnectionGroup) + Send + 'static> = Box::new(handler);
-        let context: CallbackContext<NewConnectionGroupCallback> =
-            CallbackContext::new(Mutex::new(handler));
-        let mut status: c_int = 0;
-        let handle = unsafe {
-            ffi::nw_shim_listener_create_for_groups(
-                parameters.as_ptr(),
-                port,
-                Some(new_connection_group_trampoline),
-                context.retained_ptr(),
-                Some(CallbackContext::<NewConnectionGroupCallback>::RETAIN),
-                Some(CallbackContext::<NewConnectionGroupCallback>::RELEASE),
-                &raw mut status,
-            )
-        };
-        if status != ffi::NW_OK || handle.is_null() {
-            return Err(from_status(status));
-        }
-        Ok(Self {
-            handle,
-            advertised_endpoint: None,
-            new_connection_group: Some(context),
-        })
+        Self::builder(parameters)
+            .port(port)
+            .on_new_connection_group(handler)
+            .bind()
     }
 
     /// Create a listener directly from parameters without binding a specific port first.
+    #[deprecated(
+        since = "0.15.0",
+        note = "use `TcpListener::builder(parameters).bind()`"
+    )]
     pub fn bind_direct(parameters: &ConnectionParameters) -> Result<Self, NetworkError> {
-        let mut status: c_int = 0;
-        let handle =
-            unsafe { ffi::nw_shim_listener_create_direct(parameters.as_ptr(), &raw mut status) };
-        if status != ffi::NW_OK || handle.is_null() {
-            return Err(from_status(status));
-        }
-        Ok(Self::from_handle(handle))
+        Self::builder(parameters).bind()
     }
 
     /// Create a listener anchored to an existing connection.
+    #[deprecated(
+        since = "0.15.0",
+        note = "use `TcpListener::builder(parameters).connection(connection).bind()`"
+    )]
     pub fn bind_with_connection(
         connection: &TcpClient,
         parameters: &ConnectionParameters,
     ) -> Result<Self, NetworkError> {
-        let mut status: c_int = 0;
-        let handle = unsafe {
-            ffi::nw_shim_listener_create_with_connection(
-                connection.as_ptr(),
-                parameters.as_ptr(),
-                &raw mut status,
-            )
-        };
-        if status != ffi::NW_OK || handle.is_null() {
-            return Err(from_status(status));
-        }
-        Ok(Self::from_handle(handle))
+        Self::builder(parameters).connection(connection).bind()
     }
 
     /// Create a launchd-backed listener from an existing launchd key.
+    #[deprecated(
+        since = "0.15.0",
+        note = "use `TcpListener::builder(parameters).launchd_key(key).bind()`"
+    )]
     pub fn bind_with_launchd_key(
         parameters: &ConnectionParameters,
         launchd_key: &str,
     ) -> Result<Self, NetworkError> {
-        let launchd_key = CString::new(launchd_key)
-            .map_err(|e| NetworkError::InvalidArgument(format!("launchd_key NUL byte: {e}")))?;
-        let mut status: c_int = 0;
-        let handle = unsafe {
-            ffi::nw_shim_listener_create_with_launchd_key(
-                parameters.as_ptr(),
-                launchd_key.as_ptr(),
-                &raw mut status,
-            )
-        };
-        if status != ffi::NW_OK || handle.is_null() {
-            return Err(from_status(status));
-        }
-        Ok(Self::from_handle(handle))
+        Self::builder(parameters).launchd_key(launchd_key).bind()
     }
 
     /// The port actually bound (useful when `bind(0)` was used).
@@ -211,7 +170,27 @@ impl TcpListener {
         self
     }
 
+    /// Replace the listener's advertisement, or stop advertising with `None`.
+    /// Setting a new descriptor on a running listener can update its TXT
+    /// record.
+    pub fn set_advertise_descriptor(
+        &mut self,
+        descriptor: Option<AdvertiseDescriptor>,
+    ) -> &mut Self {
+        let pointer = descriptor
+            .as_ref()
+            .map_or(core::ptr::null_mut(), AdvertiseDescriptor::as_ptr);
+        unsafe { ffi::nw_shim_listener_set_advertise_descriptor(self.handle, pointer) };
+        // Taken by value so the caller cannot mutate a descriptor the
+        // listener shares; the listener retains its own reference.
+        drop(descriptor);
+        self
+    }
+
     /// Receive callbacks when the listener's advertised endpoint changes.
+    ///
+    /// Events delivered before this call are missed; to see the first
+    /// advertisement, use [`ListenerBuilder::on_advertised_endpoint`].
     pub fn set_advertised_endpoint_changed_handler<F>(&mut self, callback: F)
     where
         F: FnMut(Option<Endpoint>, bool) + Send + 'static,

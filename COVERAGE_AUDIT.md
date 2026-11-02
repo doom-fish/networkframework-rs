@@ -56,7 +56,7 @@ Scope (updated in 0.14.0): only Network.framework's own headers are counted. The
 | `nw_browser_t` | type | `browser.h` | Browser, BrowseDescriptor, start_browser_with_descriptor |
 | `nw_connection_access_establishment_report` | function | `connection_report.h` | DataTransferReport, EstablishmentReport, ResolutionReport, TcpClient, QuicConnection |
 | `nw_connection_batch` | function | `connection.h` | TcpClient, Path, ProtocolDefinition, ProtocolMetadata |
-| `nw_connection_cancel` | function | `connection.h` | AdvertiseDescriptor, Advertiser, advertise_with_descriptor, Browser, BrowseDescriptor, start_browser_with_descriptor, TcpListener |
+| `nw_connection_cancel` | function | `connection.h` | AdvertiseDescriptor, Advertiser, advertise_with_descriptor, Browser, BrowseDescriptor, start_browser_with_descriptor, TcpClient, TcpListener |
 | `nw_connection_cancel_current_endpoint` | function | `connection.h` | TcpClient, Path, ProtocolDefinition, ProtocolMetadata |
 | `nw_connection_copy_current_path` | function | `connection.h` | TcpClient |
 | `nw_connection_copy_description` | function | `connection.h` | TcpClient, Path, ProtocolDefinition, ProtocolMetadata |

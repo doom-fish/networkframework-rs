@@ -99,6 +99,36 @@ impl TcpClient {
         Self::connect_inner(host, port, true)
     }
 
+    /// Open a connection to `endpoint` using `parameters`. The endpoint can be
+    /// any kind [`Endpoint`](crate::endpoint::Endpoint) supports, including a
+    /// Bonjour service, which Network.framework resolves; enable
+    /// [`ConnectionParameters::set_include_peer_to_peer`] to reach services
+    /// advertised over AWDL.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetworkError::ConnectFailed`] / [`NetworkError::Timeout`]
+    /// on failure.
+    pub fn connect_endpoint(
+        endpoint: &crate::endpoint::Endpoint,
+        parameters: &ConnectionParameters,
+    ) -> Result<Self, NetworkError> {
+        let mut status: c_int = 0;
+        // SAFETY: `endpoint` and `parameters` are live handles that outlive
+        // the call; the connection retains what it keeps.
+        let handle = unsafe {
+            ffi::nw_shim_connection_create_with_endpoint(
+                endpoint.as_ptr(),
+                parameters.as_ptr(),
+                &raw mut status,
+            )
+        };
+        if status != ffi::NW_OK || handle.is_null() {
+            return Err(from_status(status));
+        }
+        Ok(unsafe { Self::from_raw(handle) })
+    }
+
     /// Open a TCP connection using explicit [`ConnectionParameters`].
     pub fn connect_with_parameters(
         host: &str,
@@ -221,7 +251,21 @@ impl TcpClient {
         }
     }
 
-    /// Force immediate cancellation without graceful teardown.
+    /// Cancel the connection gracefully: TCP closes with a FIN, and any
+    /// `receive` blocked on another thread returns an error. Unlike dropping
+    /// the client, this works through a shared reference, e.g. to tear down
+    /// both sides of a relay from either direction. Idempotent; dropping the
+    /// client afterwards does not cancel it again.
+    pub fn cancel(&self) {
+        // SAFETY: `self.handle` is the live connection handle owned by this
+        // client, and the shim forwards the request without retaining pointers.
+        unsafe {
+            ffi::nw_shim_connection_cancel(self.handle);
+        }
+    }
+
+    /// Force immediate cancellation without graceful teardown (TCP resets
+    /// the connection; see [`TcpClient::cancel`] for a graceful close).
     pub fn force_cancel(&self) {
         // SAFETY: `self.handle` is the live connection handle owned by this
         // client, and the shim forwards the request without retaining pointers.
