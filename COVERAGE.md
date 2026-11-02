@@ -52,3 +52,4 @@ review.
 
 - Application-service, relay/OHTTP proxy, ultra-constrained-path, launchd-listener, and custom-IP helpers are now covered by the safe surface with runtime availability handling where required.
 - Enable `raw-ffi` only when you need direct access to bridge symbols beyond the safe API.
+- On iOS, Ethernet channels, the Ethernet path monitor, launchd listeners and custom IP parameters are not available. Their wrappers return an error, and a path monitor for Ethernet channels gives no updates.

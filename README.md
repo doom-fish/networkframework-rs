@@ -302,18 +302,31 @@ The safe wrappers return `NetworkError::InvalidArgument` (or
 `NetworkError::Unsupported` for `TlsIdentity::from_pkcs12`) when a requested
 API is unavailable at runtime.
 
+The crate also builds for iOS devices and for the iOS simulator. It needs iOS
+26 or later, the iOS deployment target of the Swift bridge. Set
+`IPHONEOS_DEPLOYMENT_TARGET` to 26.0 or later for iOS builds. The build stops
+if the value is lower. If you do not set it, the Swift bridge uses 26.0, but
+Rust links your binaries for an older iOS version.
+
+Ethernet channels, the Ethernet path monitor, launchd listeners and custom IP
+parameters are macOS only. On iOS their functions return an error, and a path
+monitor for Ethernet channels gives no updates. `FrameworkError::cf_error` and
+`FrameworkError::copy_cf_error` are also macOS only.
+
 ## Validation
 
 ```bash
 cargo build --all-features
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
+rustup target add aarch64-apple-ios
+IPHONEOS_DEPLOYMENT_TARGET=26.0 cargo clippy --all-targets --all-features --target aarch64-apple-ios -- -D warnings
 ```
 
 ## Status
 
-Actively developed. Targets macOS and tracks the audited Network.framework SDK
-surface closely.
+Actively developed. Targets macOS and iOS and tracks the audited
+Network.framework SDK surface closely.
 
 ## License
 

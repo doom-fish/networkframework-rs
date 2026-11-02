@@ -25,6 +25,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reference. A `receive` call that waits on a different thread then returns.
   `force_cancel` resets the connection, and the peer can lose the data that it
   did not read.
+- The crate builds for iOS devices and for the iOS simulator. The build script
+  selects the Swift triple and the SDK from the Rust target. iOS builds must
+  use iOS 26.0 or later, and the build stops if `IPHONEOS_DEPLOYMENT_TARGET` is
+  lower.
+- On iOS, Ethernet channels, the Ethernet path monitor, launchd listeners and
+  custom IP parameters are not available. A launchd listener gives
+  `NetworkError::Unsupported`, Ethernet channels and custom IP parameters give
+  `NetworkError::InvalidArgument`, and a path monitor for Ethernet channels
+  gives no updates.
 
 ### Changed
 
@@ -33,6 +42,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before.
 - The `06_bonjour_advertise` example advertises from a peer-to-peer listener
   and makes its TXT record with `TxtRecord`.
+- `apple-cf` is a dependency only on macOS. `FrameworkError::cf_error` and
+  `FrameworkError::copy_cf_error` are only on macOS.
 
 ### Deprecated
 
