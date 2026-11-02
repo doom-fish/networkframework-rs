@@ -47,6 +47,8 @@ jobs:
     name: iOS build
     runs-on: macos-26
     timeout-minutes: 45
+    env:
+      IPHONEOS_DEPLOYMENT_TARGET: "26.0"
     defaults:
       run:
         working-directory: networkframework-rs
@@ -65,10 +67,6 @@ jobs:
           repository: doom-fish/doom-fish-utils
           path: doom-fish-utils
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
-        with:
-          toolchain: stable
-          targets: aarch64-apple-ios
-          components: clippy
-      - run: cargo build --lib --all-features --target aarch64-apple-ios
-      - run: cargo clippy --lib --all-features --target aarch64-apple-ios -- -D warnings
+      - run: rustup target add aarch64-apple-ios
+      - run: cargo build --all-targets --all-features --target aarch64-apple-ios
+      - run: cargo clippy --all-targets --all-features --target aarch64-apple-ios -- -D warnings
